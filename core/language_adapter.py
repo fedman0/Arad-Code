@@ -106,7 +106,7 @@ class TreeSitterAdapter:
         )
 
     def enumerate_symbols(self, repo_path: str, file_path: str) -> AnalysisResult:
-        from .code_analysis import parse_file_structure
+        from .code_analysis import parse_file_structure, _HAS_TREE_SITTER
         import json
         raw = parse_file_structure(repo_path, file_path)
         try:
@@ -118,23 +118,22 @@ class TreeSitterAdapter:
                 error=str(ex),
             )
         suffix = Path(file_path).suffix.lower()
-        method = "structural" if suffix in self._SUPPORTED else "textual"
-        conf = "medium" if method == "structural" else "low"
+        ast_available = _HAS_TREE_SITTER and suffix in self._SUPPORTED
+        method = "structural" if ast_available else "textual"
+        conf = "medium" if ast_available else "speculative"
+        limitations = [] if ast_available else [
+            f"tree-sitter unavailable or no grammar for {suffix}; used regex fallback"
+        ]
         return AnalysisResult(
             items=data.get("symbols", []),
-            quality=AnalysisQuality(
-                method=method,
-                confidence=conf,
-                limitations=[] if method == "structural"
-                             else [f"no tree-sitter grammar for {suffix}; used regex fallback"],
-            ),
+            quality=AnalysisQuality(method=method, confidence=conf, limitations=limitations),
         )
 
     def find_references(self, repo_path: str, symbol_name: str,
                         file_glob: Optional[str] = None) -> AnalysisResult:
         from .code_analysis import find_all_usages
         raw = find_all_usages(repo_path, symbol_name, file_glob)
-        lines = [l for l in raw.splitlines() if l.strip()]
+        lines = [l for l in raw.splitlines() if l.strip() and l.strip() != "No usages found"]
         return AnalysisResult(
             items=lines,
             quality=AnalysisQuality(
@@ -200,7 +199,7 @@ class TextualAdapter:
                         file_glob: Optional[str] = None) -> AnalysisResult:
         from .code_analysis import find_all_usages
         raw = find_all_usages(repo_path, symbol_name, file_glob)
-        lines = [l for l in raw.splitlines() if l.strip()]
+        lines = [l for l in raw.splitlines() if l.strip() and l.strip() != "No usages found"]
         return AnalysisResult(
             items=lines,
             quality=AnalysisQuality(method="textual", confidence="speculative",

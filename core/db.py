@@ -345,6 +345,14 @@ class EvidenceStore:
             self.save_function_summary(repo_path, fs, result.commit)
         for cf in result.conflicts:
             self.save_conflict(repo_path, cf)
+        for oq_text in result.open_questions:
+            if isinstance(oq_text, str) and oq_text.strip():
+                oq = OpenQuestion(
+                    question=oq_text,
+                    raised_by_skill=result.skill_name,
+                    impact="informational",
+                )
+                self.save_open_question(repo_path, oq)
 
     def close(self):
         self.conn.close()

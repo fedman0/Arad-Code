@@ -176,7 +176,7 @@ def find_all_usages(repo_path: str, symbol_name: str,
         partial = _rg_grep(repo_path, pat, None, file_glob, max_matches // len(patterns))
         for line in partial.splitlines():
             results.add(line)
-    return "\n".join(sorted(results)[:max_matches]) or "No usages found"
+    return "\n".join(sorted(results)[:max_matches])
 
 
 def _rg_grep(repo_path: str, pattern: str, path: Optional[str] = None,
@@ -277,9 +277,14 @@ def run_shell(repo_path: str, command: str) -> str:
         if blocked:
             return f"find flag(s) {blocked} not allowed (can execute processes or delete files)"
     if binary == "sed":
-        if any(a in ("-i", "--in-place") or a.startswith("-i") and len(a) == 2
-               for a in parts[1:]):
-            return "sed -i (in-place edit) not allowed"
+        for a in parts[1:]:
+            if a == "--in-place" or re.match(r'^-i', a):
+                return "sed -i (in-place edit) not allowed"
+    if binary == "awk":
+        prog_tokens = [p for p in parts[1:] if not p.startswith("-")]
+        prog = " ".join(prog_tokens)
+        if re.search(r'\bsystem\s*\(', prog) or re.search(r'\bpipe\s*\(', prog):
+            return "awk system() and pipe() are not allowed"
     resolved = shutil.which(binary)
     if resolved is None:
         return f"Command '{binary}' not found in PATH"

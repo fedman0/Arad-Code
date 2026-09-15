@@ -531,10 +531,34 @@ class SkillRunner:
         if name == "list_dir":
             return list_dir(repo_path, args.get("path", ""), args.get("max_entries", 80))
         if name == "parse_file_structure":
-            return parse_file_structure(repo_path, args["file_path"])
+            from .language_adapter import get_adapter_for
+            file_path = args["file_path"]
+            adapter = get_adapter_for(file_path)
+            result = adapter.enumerate_symbols(repo_path, file_path)
+            import json as _json
+            out: dict = {"file": file_path, "symbols": result.items}
+            if result.quality.limitations or result.quality.method != "structural":
+                out["analysis_quality"] = result.quality.model_dump()
+            if result.error:
+                out["error"] = result.error
+            return _json.dumps(out, indent=2)
         if name == "find_all_usages":
-            return find_all_usages(repo_path, args["symbol_name"],
-                                   args.get("file_glob"), args.get("max_matches", 100))
+            from .language_adapter import get_adapter_for
+            symbol_name = args["symbol_name"]
+            adapter = get_adapter_for(symbol_name)
+            result = adapter.find_references(repo_path, symbol_name, args.get("file_glob"))
+            if not result.items:
+                return "No usages found"
+            quality_note = ""
+            if result.quality.limitations:
+                quality_note = (
+                    f"\n[quality: method={result.quality.method}, "
+                    f"confidence={result.quality.confidence}, "
+                    f"limitations={result.quality.limitations}]"
+                )
+            if result.truncated:
+                quality_note += "\n[results truncated — increase max_matches]"
+            return "\n".join(result.items[:args.get("max_matches", 100)]) + quality_note
         if name == "run_semgrep":
             return run_semgrep(repo_path, args.get("pattern", ""),
                                args.get("language"), args.get("rules"))
@@ -571,6 +595,7 @@ class SkillRunner:
                 file_path=fp,
                 line=line,
                 created_by_skill=skill_name,
+                commit=self._get_commit(repo_path),
                 inputs=args.get("inputs", []),
                 reads=args.get("reads", []),
                 writes=args.get("writes", []),
@@ -766,6 +791,11 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             h_data["skill_source"] = skill_name
             h_data["commit"] = commit
             h = Hypothesis.model_validate(h_data)
+            if h.status == "reproduced":
+                h.status = "evidence_supported"
+            unresolved_obs = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
+            if unresolved_obs and h.status == "evidence_supported" and h.confidence < 5:
+                h.status = "initial"
             h.priority = h.compute_priority()
             hypotheses.append(h)
 
@@ -787,6 +817,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"guard[{i}] invalid: {ex}")
 
+        auto_conflicts: list[ConflictRecord] = []
+
         evidence_items: list[Evidence] = []
         for i, e_data in enumerate(findings.get("evidence", [])):
             try:
@@ -800,6 +832,34 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 evidence_items.append(Evidence.model_validate(e_data))
             except Exception as ex:
                 validation_errors.append(f"evidence[{i}] invalid: {ex}")
+
+        verified_evidence: list[Evidence] = []
+        for ev in evidence_items:
+            target = self._resolve_path(repo_path, ev.file_path)
+            if target is None or not target.exists():
+                auto_conflicts.append(ConflictRecord(
+                    kind="stale_reference",
+                    description=f"Evidence file does not exist: {ev.file_path}",
+                    left=f"evidence/{ev.id}",
+                    right=ev.file_path,
+                    severity="blocks_finding",
+                ))
+                ev.analysis_quality.limitations.append(f"file not found: {ev.file_path}")
+                verified_evidence.append(ev)
+                continue
+            try:
+                lines = target.read_text(errors="replace").splitlines()
+                s = max(0, ev.line_start - 1)
+                e = min(len(lines), ev.line_end)
+                actual = "\n".join(lines[s:e])
+                if actual:
+                    ev.snippet = actual
+                ev.analysis_quality.method = "structural"
+                ev.analysis_quality.confidence = "high"
+            except Exception as ex:
+                ev.analysis_quality.limitations.append(f"read error: {ex}")
+            verified_evidence.append(ev)
+        evidence_items = verified_evidence
 
         structured_questions: list[OpenQuestion] = []
         for sq_data in findings.get("structured_questions", []):
@@ -820,7 +880,6 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"function_summary invalid: {ex}")
 
-        auto_conflicts: list[ConflictRecord] = []
         for h in hypotheses:
             if h.status in ("evidence_supported", "reproduced"):
                 unresolved = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
@@ -836,14 +895,15 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                         right=f"proof_obligations[unresolved={len(unresolved)}]",
                         severity="degrades_confidence",
                     ))
-            if h.guard_analysis == "complete" and h.guard_coverage == "some_paths":
+            if h.guard_coverage == "all_paths" and h.uncovered_paths:
                 auto_conflicts.append(ConflictRecord(
                     kind="guard_mismatch",
                     description=(
-                        f"Hypothesis {h.id} claims guard_analysis=complete but guard_coverage=some_paths"
+                        f"Hypothesis {h.id} claims guard_coverage=all_paths "
+                        f"but lists {len(h.uncovered_paths)} uncovered path(s)"
                     ),
-                    left=f"{h.id}.guard_analysis=complete",
-                    right=f"{h.id}.guard_coverage=some_paths",
+                    left=f"{h.id}.guard_coverage=all_paths",
+                    right=f"{h.id}.uncovered_paths={h.uncovered_paths[:2]}",
                     severity="degrades_confidence",
                 ))
 
