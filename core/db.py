@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 from .models import (
     Hypothesis, Evidence, CoverageItem, ValidationRun,
-    EntryPoint, Guard, SkillResult
+    EntryPoint, Guard, SkillResult, ThreatModel
 )
 
 
@@ -81,6 +81,15 @@ class EvidenceStore:
             repo_path TEXT,
             data TEXT NOT NULL,
             commit_sha TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS threat_models (
+            target TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            amendments TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by_skill TEXT NOT NULL DEFAULT ''
         );
         """)
         self.conn.commit()
@@ -170,6 +179,56 @@ class EvidenceStore:
             "SELECT status, COUNT(*) as cnt FROM coverage WHERE repo_path=? GROUP BY status", (repo_path,)
         ).fetchall()
         return {r["status"]: r["cnt"] for r in rows}
+
+    def save_threat_model(self, repo_path: str, content: str, skill: str = "") -> None:
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        self.conn.execute(
+            """INSERT INTO threat_models (target, content, amendments, created_at, updated_at, created_by_skill)
+               VALUES (?,?,'[]',?,?,?)
+               ON CONFLICT(target) DO UPDATE SET
+                 content=excluded.content,
+                 updated_at=excluded.updated_at,
+                 created_by_skill=excluded.created_by_skill""",
+            (repo_path, content, now, now, skill)
+        )
+        self.conn.commit()
+
+    def get_threat_model(self, repo_path: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT content, amendments FROM threat_models WHERE target=?", (repo_path,)
+        ).fetchone()
+        if row is None:
+            return None
+        content = row["content"]
+        amendments = json.loads(row["amendments"] or "[]")
+        if amendments:
+            addenda = "\n\n".join(
+                f"### Amendment {i+1} (by {a.get('added_by_skill', '?')})\n{a['content']}"
+                for i, a in enumerate(amendments)
+            )
+            return content + "\n\n---\n\n" + addenda
+        return content
+
+    def amend_threat_model(self, repo_path: str, addendum: str, skill: str = "") -> bool:
+        from datetime import datetime
+        row = self.conn.execute(
+            "SELECT amendments FROM threat_models WHERE target=?", (repo_path,)
+        ).fetchone()
+        if row is None:
+            return False
+        amendments = json.loads(row["amendments"] or "[]")
+        amendments.append({
+            "content": addendum,
+            "added_at": datetime.utcnow().isoformat(),
+            "added_by_skill": skill,
+        })
+        self.conn.execute(
+            "UPDATE threat_models SET amendments=?, updated_at=? WHERE target=?",
+            (json.dumps(amendments), datetime.utcnow().isoformat(), repo_path)
+        )
+        self.conn.commit()
+        return True
 
     def mark_stale_by_commit(self, repo_path: str, old_commit: str):
         self.conn.execute(

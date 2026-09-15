@@ -100,6 +100,7 @@ class Hypothesis(BaseModel):
     skill_source: str = ""
     commit: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
+    cwe: Optional[str] = None
 
     def compute_priority(self) -> int:
         score = self.severity * 2 + self.confidence
@@ -131,9 +132,27 @@ class CoverageItem(BaseModel):
     kind: Literal["entry_point", "actor", "resource", "state_transition", "trust_boundary",
                   "sensitive_op", "error_path", "async_path", "environment"]
     name: str
-    status: Literal["unseen", "mapped", "investigated", "validated", "blocked", "excluded"]
+    status: Literal[
+        "unseen",
+        "no_issue_found",
+        "ruled_out",
+        "not_applicable",
+        "needs_follow_up",
+        "reported",
+        "blocked",
+        "excluded",
+    ]
     blocker: Optional[str] = None
     exclusion_reason: Optional[str] = None
+
+
+class ThreatModel(BaseModel):
+    target: str
+    content: str
+    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    amendments: list[dict] = Field(default_factory=list)
+    created_by_skill: str = ""
 
 
 class ValidationRun(BaseModel):
@@ -185,6 +204,7 @@ FINDINGS_SCHEMA = {
                     "confidence": {"type": "integer", "minimum": 0, "maximum": 10},
                     "skill_source": {"type": "string"},
                     "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                    "cwe": {"type": "string", "description": "CWE ID e.g. CWE-89, CWE-79, CWE-306"},
                 }
             }
         },
@@ -196,7 +216,11 @@ FINDINGS_SCHEMA = {
                 "properties": {
                     "kind": {"type": "string"},
                     "name": {"type": "string"},
-                    "status": {"type": "string"},
+                    "status": {"type": "string", "enum": [
+                        "unseen", "no_issue_found", "ruled_out",
+                        "not_applicable", "needs_follow_up", "reported",
+                        "blocked", "excluded",
+                    ]},
                     "blocker": {"type": "string"},
                 }
             }

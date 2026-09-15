@@ -243,6 +243,42 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "save_threat_model",
+            "description": (
+                "Persist a threat model for this target, shared with all subsequent skills. "
+                "Call once after initial architecture review. "
+                "Required sections: ## Overview, ## Trust Boundaries, ## Attack Surface, ## Severity Calibration. "
+                "Minimum 400 chars. If a model already exists, this overwrites it."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["content"],
+                "properties": {
+                    "content": {"type": "string", "description": "Full threat model in Markdown"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "amend_threat_model",
+            "description": (
+                "Append a correction or discovery to the existing threat model without replacing it. "
+                "Use when you find the base model was wrong or incomplete."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["addendum"],
+                "properties": {
+                    "addendum": {"type": "string", "description": "Markdown correction or addition"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": "Submit the final structured findings. Call this when analysis is complete.",
             "parameters": {
@@ -340,7 +376,7 @@ class SkillRunner:
         except Exception as ex:
             return f"Error: {ex}"
 
-    async def _execute_tool(self, name: str, args: dict, repo_path: str) -> str:
+    async def _execute_tool(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
         if name == "search_graph":
             r = await self._mcp.search_graph(**{k: v for k, v in args.items()})
             return json.dumps(r, indent=2) if r else "No results (codebase-memory-mcp may not be indexed)"
@@ -374,10 +410,28 @@ class SkillRunner:
                                args.get("language"), args.get("rules"))
         if name == "shell":
             return run_shell(repo_path, args["command"])
+        if name == "save_threat_model":
+            content = args.get("content", "")
+            if len(content) < 400:
+                return (
+                    "Threat model too short — minimum 400 chars. "
+                    "Include ## Overview, ## Trust Boundaries, ## Attack Surface, ## Severity Calibration."
+                )
+            self._db.save_threat_model(repo_path, content, skill_name)
+            return "Threat model saved and will be visible to all subsequent skills."
+        if name == "amend_threat_model":
+            addendum = args.get("addendum", "")
+            if not addendum.strip():
+                return "Addendum cannot be empty."
+            ok = self._db.amend_threat_model(repo_path, addendum, skill_name)
+            return "Amendment recorded." if ok else "No threat model exists yet — call save_threat_model first."
         return "Unknown tool"
 
     def _build_initial_context(self, repo_path: str) -> str:
         parts: list[str] = []
+        threat_model = self._db.get_threat_model(repo_path)
+        if threat_model:
+            parts.append("# Threat Model (built by prior skill — use this as your starting context)\n" + threat_model)
         entry_points = self._db.list_entry_points(repo_path)
         if entry_points:
             eps = [f"  {ep.kind} {ep.path} -> {ep.handler_qn} ({ep.file_path}:{ep.line})"
@@ -462,7 +516,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 else:
                     if verbose:
                         print(f"  [{iteration}] tool={name} args={json.dumps(args)[:120]}")
-                    result_text = await self._execute_tool(name, args, repo_path)
+                    result_text = await self._execute_tool(name, args, repo_path, skill_name)
                     if verbose:
                         print(f"  → {result_text[:200]}")
 
@@ -657,7 +711,7 @@ When done, call finish() with:
                 else:
                     if verbose:
                         print(f"  [verify-{iteration}] {name}({json.dumps(args)[:100]})")
-                    res = await self._execute_tool(name, args, repo_path)
+                    res = await self._execute_tool(name, args, repo_path, "verify")
                     tool_results.append({"role": "tool", "tool_call_id": tc.id, "content": res})
 
             messages.extend(tool_results)
