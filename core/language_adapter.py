@@ -133,7 +133,9 @@ class TreeSitterAdapter:
                         max_matches: int = 100) -> AnalysisResult:
         from .code_analysis import find_all_usages
         raw = find_all_usages(repo_path, symbol_name, file_glob, max_matches)
-        lines = [l for l in raw.splitlines() if l.strip() and l.strip() != "No usages found"]
+        all_lines = raw.splitlines()
+        truncated = "[TRUNCATED]" in all_lines
+        lines = [l for l in all_lines if l.strip() and l.strip() not in ("No usages found", "[TRUNCATED]")]
         return AnalysisResult(
             items=lines,
             quality=AnalysisQuality(
@@ -144,7 +146,7 @@ class TreeSitterAdapter:
                     "does not resolve overloads or aliased imports",
                 ],
             ),
-            truncated=len(lines) >= max_matches,
+            truncated=truncated,
         )
 
     def resolve_callers(self, repo_path: str, qualified_name: str) -> AnalysisResult:
@@ -200,12 +202,14 @@ class TextualAdapter:
                         max_matches: int = 100) -> AnalysisResult:
         from .code_analysis import find_all_usages
         raw = find_all_usages(repo_path, symbol_name, file_glob, max_matches)
-        lines = [l for l in raw.splitlines() if l.strip() and l.strip() != "No usages found"]
+        all_lines = raw.splitlines()
+        truncated = "[TRUNCATED]" in all_lines
+        lines = [l for l in all_lines if l.strip() and l.strip() not in ("No usages found", "[TRUNCATED]")]
         return AnalysisResult(
             items=lines,
             quality=AnalysisQuality(method="textual", confidence="speculative",
                                     limitations=["grep-based; false positives likely"]),
-            truncated=len(lines) >= max_matches,
+            truncated=truncated,
         )
 
     def resolve_callers(self, repo_path: str, qualified_name: str) -> AnalysisResult:

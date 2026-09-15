@@ -84,6 +84,8 @@ class AnalysisQuality(BaseModel):
 class ProofObligation(BaseModel):
     question: str
     status: Literal["verified", "unresolved", "refuted"] = "unresolved"
+    claim_type: Literal["reachability", "input_control", "guard", "impact", "other"] = "other"
+    required_for_finding: bool = True
     evidence_ref: Optional[str] = None
     reason: Optional[str] = None
 
@@ -133,6 +135,7 @@ class ReturnValueContract(BaseModel):
     consequence_if_ignored: str = ""
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     created_by_skill: str = ""
+    commit: str = ""
     ignored_at: list[str] = Field(default_factory=list)
 
 
@@ -183,6 +186,8 @@ class Hypothesis(BaseModel):
 
     skill_source: str = ""
     rejection_reason: Optional[str] = None
+    rejection_controlling_evidence_ids: list[str] = Field(default_factory=list)
+    rejection_condition: str = ""
     commit: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
     cwe: Optional[str] = None

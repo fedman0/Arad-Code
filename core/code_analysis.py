@@ -172,17 +172,34 @@ def _fallback_structure(source: str, file_path: str) -> str:
 
 def find_all_usages(repo_path: str, symbol_name: str,
                     file_glob: Optional[str] = None, max_matches: int = 100) -> str:
-    patterns = [
-        rf'\b{re.escape(symbol_name)}\b',
-        rf'\.{re.escape(symbol_name)}\b',
-        rf'>{re.escape(symbol_name)}\b',
-    ]
-    results = set()
-    for pat in patterns:
-        partial = _rg_grep(repo_path, pat, None, file_glob, max_matches // len(patterns))
-        for line in partial.splitlines():
-            results.add(line)
-    return "\n".join(sorted(results)[:max_matches])
+    safe = re.escape(symbol_name)
+    combined = rf'(?:\b{safe}\b|\.{safe}\b|>{safe}\b)'
+    search_path = repo_path
+    try:
+        cmd = ["rg", "--line-number", "--no-heading", "-m", str(max_matches + 1)]
+        if file_glob:
+            cmd.extend(["-g", file_glob])
+        cmd.extend([combined, search_path])
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        raw_lines = [l for l in r.stdout.splitlines() if l.strip()]
+    except FileNotFoundError:
+        raw_lines = []
+        for pat in [rf'\b{safe}\b', rf'\.{safe}\b', rf'>{safe}\b']:
+            partial = _rg_grep(repo_path, pat, None, file_glob, max_matches // 3)
+            raw_lines.extend(l for l in partial.splitlines() if l.strip())
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for line in raw_lines:
+        parts = line.split(':', 2)
+        key = ':'.join(parts[:2]) if len(parts) >= 2 else line
+        if key not in seen:
+            seen.add(key)
+            deduped.append(line)
+    truncated = len(deduped) > max_matches
+    out = "\n".join(deduped[:max_matches])
+    if truncated:
+        out += "\n[TRUNCATED]"
+    return out
 
 
 def _rg_grep(repo_path: str, pattern: str, path: Optional[str] = None,
@@ -285,14 +302,9 @@ def run_shell(repo_path: str, command: str) -> str:
         if blocked:
             return f"find flag(s) {blocked} not allowed (can execute processes or delete files)"
     if binary == "sed":
-        for a in parts[1:]:
-            if a == "--in-place" or re.match(r'^-i', a):
-                return "sed -i (in-place edit) not allowed"
+        return "sed is blocked; use read_file with line ranges or parse_file_structure"
     if binary == "awk":
-        prog_tokens = [p for p in parts[1:] if not p.startswith("-")]
-        prog = " ".join(prog_tokens)
-        if re.search(r'\bsystem\s*\(', prog) or re.search(r'\bpipe\s*\(', prog):
-            return "awk system() and pipe() are not allowed"
+        return "awk is blocked; use sqz_grep, find_all_usages, or parse_file_structure"
     _XARGS_SAFE = {
         "grep", "rg", "wc", "head", "tail", "file",
         "stat", "sha256sum", "md5sum", "sha1sum",

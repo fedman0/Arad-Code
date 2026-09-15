@@ -354,6 +354,20 @@ class EvidenceStore:
         ).fetchall()
         return [ReturnValueContract.model_validate_json(r["data"]) for r in rows]
 
+    def get_evidence_for_hypothesis(self, hypothesis_id: str) -> list[Evidence]:
+        rows = self.conn.execute(
+            "SELECT data FROM evidence WHERE hypothesis_id=? AND stale=0",
+            (hypothesis_id,)
+        ).fetchall()
+        return [Evidence.model_validate_json(r["data"]) for r in rows]
+
+    def get_conflicts_for_hypothesis(self, hypothesis_id: str) -> list[ConflictRecord]:
+        rows = self.conn.execute(
+            "SELECT data FROM conflicts WHERE (data LIKE ? OR data LIKE ?) AND status='open'",
+            (f'%"{hypothesis_id}"%', f'%"{hypothesis_id}"%')
+        ).fetchall()
+        return [ConflictRecord.model_validate_json(r["data"]) for r in rows]
+
     def mark_stale_by_commit(self, repo_path: str, old_commit: str):
         self.conn.execute(
             "UPDATE evidence SET stale=1 WHERE repo_path=? AND commit_sha=? AND commit_sha != ''",

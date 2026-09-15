@@ -58,7 +58,7 @@ Never claim a guard is absent without reading the relevant code.
 - Call **save_function_summary** after reading a shared utility so later skills skip re-analyzing it. Include: inputs (origin of each parameter), reads (state/DB accessed), writes (state modified), external_effects, guards (what checks it performs), transformations, failure_behavior, required_authority, unresolved_calls.
 
 ## Proof obligations
-- For each hypothesis, populate `proof_obligations` — one entry per claim you need to verify. Mark each `verified` (with evidence_ref=file:line) or `unresolved` (with reason). A hypothesis cannot be `evidence_supported` if it has unresolved proof obligations that affect reachability or guard completeness.
+- For each hypothesis, populate `proof_obligations` — one entry per claim you need to verify. Mark each `verified` (with evidence_ref=file:line) or `unresolved` (with reason). Obligations with `required_for_finding=true` block the finding if `unresolved` OR `refuted`. Use `claim_type` to categorize: reachability, input_control, guard, impact, other.
 
 ## Conflicts
 - Use **flag_conflict** when you discover a contradiction: a prior guard claim that doesn't hold, two paths with incompatible preconditions, or a claimed sanitizer that doesn't cover all forms of the input.
@@ -77,7 +77,7 @@ Never claim a guard is absent without reading the relevant code.
 - When a caller does NOT satisfy a precondition, treat it as a potential authorization bypass.
 
 ## Rejected hypotheses
-- When you rule out a hypothesis because a guard is effective, call **reject_hypothesis** with the reason instead of just setting it to refuted. This records WHY so future skills can detect if the guard is later removed."""
+- When you rule out a hypothesis because a guard is effective, call **reject_hypothesis** with the reason instead of just setting it to refuted. Pass `rejection_condition` (the condition that must hold for this rejection to remain valid, e.g. "Guard X at file:line remains in place") and `rejection_controlling_evidence_ids` (the evidence IDs that prove the guard — if those become stale, the rejection should be re-evaluated)."""
 
 TOOLS = [
     {
@@ -491,6 +491,8 @@ TOOLS = [
                 "properties": {
                     "hypothesis_id": {"type": "string"},
                     "reason": {"type": "string", "description": "Why this hypothesis is ruled out (cite the specific guard/control and file:line)"},
+                    "rejection_condition": {"type": "string", "description": "Condition that must hold for this rejection to remain valid (e.g. 'Guard X at file:line remains in place')"},
+                    "rejection_controlling_evidence_ids": {"type": "array", "items": {"type": "string"}, "description": "Evidence IDs that prove the guard — if these become stale, rejection should be re-evaluated"},
                 },
             },
         },
@@ -510,6 +512,30 @@ TOOLS = [
         },
     },
 ]
+
+
+def _gate_hypothesis_status(
+    h: "Hypothesis",
+    evidence: "list[Evidence]",
+    conflicts: "list[ConflictRecord]",
+) -> str:
+    if h.status in ("rejected", "closed"):
+        return h.status
+    status = "evidence_supported" if h.status == "reproduced" else h.status
+    if status != "evidence_supported":
+        return status
+    valid_ev = [e for e in evidence if not e.stale]
+    if not valid_ev:
+        return "initial"
+    for c in conflicts:
+        if c.severity == "blocks_finding" and c.status == "open":
+            if h.id in (c.left, c.right):
+                return "initial"
+    if any(ob.required_for_finding and ob.status == "unresolved" for ob in h.proof_obligations):
+        return "initial"
+    if any(ob.required_for_finding and ob.status == "refuted" for ob in h.proof_obligations):
+        return "initial"
+    return status
 
 
 class SkillRunner:
@@ -777,14 +803,14 @@ class SkillRunner:
                     kind="capability_mismatch",
                     description=(
                         f"Return value of {fn_qn} ignored at {caller}. "
-                        f"Contract requires must_check. Consequence: {rc.consequence_if_ignored}"
+                        f"Contract: must_check. Consequence: {rc.consequence_if_ignored}"
                     ),
                     left=fn_qn,
                     right=caller,
-                    severity="blocks_finding",
+                    severity="degrades_confidence",
                 )
                 self._db.save_conflict(repo_path, cf)
-                return f"Flagged ignored return at {caller} (auto_conflict={cf.id}, severity=blocks_finding)."
+                return f"Flagged ignored return at {caller} (auto_conflict={cf.id}, severity=degrades_confidence)."
             return f"Flagged ignored return at {caller} (handling={rc.expected_handling}, no auto-conflict)."
         if name == "get_return_contracts":
             contracts = self._db.list_return_contracts(repo_path)
@@ -804,13 +830,19 @@ class SkillRunner:
             reason = args.get("reason", "")
             if not hyp_id or not reason:
                 return "hypothesis_id and reason are required."
+            condition = args.get("rejection_condition", "")
+            controlling_ids = args.get("rejection_controlling_evidence_ids", [])
             hypotheses = self._db.list_hypotheses(repo_path)
             for h in hypotheses:
                 if h.id == hyp_id:
                     h.status = "rejected"
                     h.rejection_reason = reason
+                    h.rejection_condition = condition
+                    h.rejection_controlling_evidence_ids = (
+                        controlling_ids if isinstance(controlling_ids, list) else []
+                    )
                     self._db.save_hypothesis(repo_path, h)
-                    return f"Hypothesis {hyp_id} rejected. Reason recorded for regression detection."
+                    return f"Hypothesis {hyp_id} rejected. Reason and condition recorded."
             return f"Hypothesis {hyp_id} not found."
         return "Unknown tool"
 
@@ -1009,7 +1041,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             try:
                 lines = target.read_text(errors="replace").splitlines()
                 total = len(lines)
-                if ev.line_start < 1 or ev.line_start > total:
+                if (ev.line_start < 1 or ev.line_start > total
+                        or ev.line_end < ev.line_start or ev.line_end > total):
                     auto_conflicts.append(ConflictRecord(
                         kind="stale_reference",
                         description=(
@@ -1041,20 +1074,6 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     if cf.left == f"evidence/{ev.id}":
                         blocked_hyp_ids.add(ev.hypothesis_id)
 
-        for h in hypotheses:
-            if h.id in blocked_hyp_ids and h.status in ("evidence_supported", "reproduced"):
-                h.status = "initial"
-                auto_conflicts.append(ConflictRecord(
-                    kind="status_inconsistency",
-                    description=(
-                        f"Hypothesis {h.id} downgraded to initial: "
-                        "linked evidence has blocks_finding conflict"
-                    ),
-                    left=h.id,
-                    right="blocks_finding evidence",
-                    severity="blocks_finding",
-                ))
-
         structured_questions: list[OpenQuestion] = []
         for sq_data in findings.get("structured_questions", []):
             try:
@@ -1084,20 +1103,6 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 validation_errors.append(f"ignored_return invalid: {ex}")
 
         for h in hypotheses:
-            if h.status in ("evidence_supported", "reproduced"):
-                unresolved = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
-                if unresolved:
-                    auto_conflicts.append(ConflictRecord(
-                        kind="status_inconsistency",
-                        description=(
-                            f"Hypothesis {h.id} has status={h.status} but "
-                            f"{len(unresolved)} unresolved proof obligation(s): "
-                            + "; ".join(ob.question for ob in unresolved[:3])
-                        ),
-                        left=h.id,
-                        right=f"proof_obligations[unresolved={len(unresolved)}]",
-                        severity="degrades_confidence",
-                    ))
             if h.guard_coverage == "all_paths" and h.uncovered_paths:
                 auto_conflicts.append(ConflictRecord(
                     kind="guard_mismatch",
@@ -1109,6 +1114,14 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     right=f"{h.id}.uncovered_paths={h.uncovered_paths[:2]}",
                     severity="degrades_confidence",
                 ))
+
+        for h in hypotheses:
+            ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
+            conf_for_h = [
+                c for c in auto_conflicts
+                if h.id in (c.left, c.right) or h.id in c.description
+            ]
+            h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h)
 
         open_questions = findings.get("open_questions", []) + validation_errors
 
@@ -1276,6 +1289,10 @@ When done, call finish() with:
 
         if new_status != hyp.status:
             hyp.status = new_status
-            self._db.save_hypothesis(repo_path, hyp)
+
+        all_db_conflicts = self._db.get_conflicts_for_hypothesis(hyp.id)
+        all_db_evidence = self._db.get_evidence_for_hypothesis(hyp.id)
+        hyp.status = _gate_hypothesis_status(hyp, all_db_evidence, all_db_conflicts)
+        self._db.save_hypothesis(repo_path, hyp)
 
         return verdict
