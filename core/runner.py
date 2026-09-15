@@ -282,13 +282,19 @@ class SkillRunner:
         except Exception:
             return ""
 
+    def _resolve_path(self, repo_path: str, rel: str) -> Optional[Path]:
+        repo = Path(repo_path).resolve()
+        try:
+            full = (repo / rel).resolve()
+            full.relative_to(repo)
+            return full
+        except (ValueError, OSError):
+            return None
+
     def _read_file(self, repo_path: str, file_path: str,
                    start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
-        repo = Path(repo_path).resolve()
-        target = (repo / file_path).resolve()
-        try:
-            target.relative_to(repo)
-        except ValueError:
+        target = self._resolve_path(repo_path, file_path)
+        if target is None:
             return "Access denied: path outside repository"
         if not target.exists():
             return f"File not found: {file_path}"
@@ -308,7 +314,13 @@ class SkillRunner:
 
     def _grep(self, repo_path: str, pattern: str, path: Optional[str] = None,
               file_glob: Optional[str] = None, max_matches: int = 100) -> str:
-        search_path = str(Path(repo_path) / path) if path else repo_path
+        if path:
+            safe = self._resolve_path(repo_path, path)
+            if safe is None:
+                return "Access denied: path outside repository"
+            search_path = str(safe)
+        else:
+            search_path = repo_path
         try:
             cmd = ["rg", "--line-number", "--no-heading", f"-m{max_matches}"]
             if file_glob:
@@ -481,27 +493,46 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         coverage = [CoverageItem.model_validate(c) for c in findings.get("coverage", [])]
 
+        validation_errors: list[str] = []
+
         entry_points: list[EntryPoint] = []
-        for ep_data in findings.get("entry_points_found", []):
+        for i, ep_data in enumerate(findings.get("entry_points_found", [])):
             try:
                 entry_points.append(EntryPoint.model_validate(ep_data))
-            except Exception:
-                pass
+            except Exception as ex:
+                validation_errors.append(f"entry_point[{i}] invalid: {ex}")
 
         guards: list[Guard] = []
-        for g_data in findings.get("guards_found", []):
+        for i, g_data in enumerate(findings.get("guards_found", [])):
             try:
                 guards.append(Guard.model_validate(g_data))
-            except Exception:
-                pass
+            except Exception as ex:
+                validation_errors.append(f"guard[{i}] invalid: {ex}")
+
+        evidence_items: list[Evidence] = []
+        for i, e_data in enumerate(findings.get("evidence", [])):
+            try:
+                e_data = dict(e_data)
+                hyp_idx = e_data.pop("hypothesis_index", 0)
+                if not (0 <= hyp_idx < len(hypotheses)):
+                    validation_errors.append(f"evidence[{i}]: hypothesis_index {hyp_idx} out of range")
+                    continue
+                e_data["hypothesis_id"] = hypotheses[hyp_idx].id
+                e_data.setdefault("commit", commit)
+                evidence_items.append(Evidence.model_validate(e_data))
+            except Exception as ex:
+                validation_errors.append(f"evidence[{i}] invalid: {ex}")
+
+        open_questions = findings.get("open_questions", []) + validation_errors
 
         result = SkillResult(
             skill_name=skill_name,
             repo_path=repo_path,
             commit=commit,
             hypotheses=hypotheses,
+            evidence=evidence_items,
             coverage=coverage,
-            open_questions=findings.get("open_questions", []),
+            open_questions=open_questions,
             entry_points_found=entry_points,
             guards_found=guards,
         )
@@ -634,21 +665,25 @@ When done, call finish() with:
                 verdict = finish_args.get("verdict", finish_args)
                 break
 
-        new_status = verdict.get("suggested_status", hyp.status)
-        allowed = {"reproduced", "refuted", "blocked", "evidence_supported", "initial"}
-        if new_status in allowed:
-            if new_status in ("reproduced", "refuted"):
-                run = ValidationRun(
-                    hypothesis_id=hyp.id,
-                    approach="adversarial_verify",
-                    positive_result=(new_status == "reproduced"),
-                    negative_result=(new_status == "refuted"),
-                    notes=("; ".join(verdict.get("confirmed_steps", []))
-                           if new_status == "reproduced"
-                           else (verdict.get("refutation_reason") or ""))[:500],
+        _REVIEW_STATUS_MAP = {
+            "reproduced": "evidence_supported",
+            "evidence_supported": "evidence_supported",
+            "refuted": "refuted",
+            "blocked": "blocked",
+            "initial": "initial",
+        }
+        suggested = verdict.get("suggested_status", hyp.status)
+        new_status = _REVIEW_STATUS_MAP.get(suggested, hyp.status)
+        if suggested == "reproduced":
+            verdict["suggested_status"] = "evidence_supported"
+            verdict.setdefault("notes", [])
+            if isinstance(verdict.get("notes"), list):
+                verdict["notes"].append(
+                    "downgraded from reproduced: code review cannot prove execution; "
+                    "use ValidationRun from runtime instrumentation"
                 )
-                self._db.save_validation_run(repo_path, run)
-                hyp.validation = "run"
+
+        if new_status != hyp.status:
             hyp.status = new_status
             self._db.save_hypothesis(repo_path, hyp)
 

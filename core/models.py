@@ -202,6 +202,25 @@ FINDINGS_SCHEMA = {
             }
         },
         "open_questions": {"type": "array", "items": {"type": "string"}},
+        "evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["kind", "description", "file_path", "line_start", "line_end", "snippet"],
+                "properties": {
+                    "hypothesis_index": {
+                        "type": "integer",
+                        "description": "0-based index into the hypotheses array this evidence supports"
+                    },
+                    "kind": {"type": "string", "enum": ["code", "config", "test", "trace", "runtime"]},
+                    "description": {"type": "string"},
+                    "file_path": {"type": "string"},
+                    "line_start": {"type": "integer"},
+                    "line_end": {"type": "integer"},
+                    "snippet": {"type": "string"},
+                }
+            }
+        },
         "entry_points_found": {
             "type": "array",
             "items": {

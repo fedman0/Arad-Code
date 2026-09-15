@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -243,9 +244,11 @@ _SHELL_WHITELIST = {
 
 _GIT_SAFE_SUBCOMMANDS = {
     "log", "blame", "diff", "show", "grep", "shortlog", "ls-files",
-    "ls-tree", "rev-parse", "tag", "branch", "remote", "status",
-    "describe", "cat-file", "check-ignore", "count-objects",
+    "ls-tree", "rev-parse", "status", "describe", "cat-file",
+    "check-ignore", "count-objects",
 }
+
+_FIND_BLOCKED_FLAGS = {"-exec", "-execdir", "-delete", "-ok", "-okdir"}
 
 _SAFE_ENV = {"GIT_TERMINAL_PROMPT": "0"}
 _ENV_PASSTHROUGH = {"PATH", "HOME", "LANG", "LC_ALL", "TZ"}
@@ -269,11 +272,22 @@ def run_shell(repo_path: str, command: str) -> str:
         if sub not in _GIT_SAFE_SUBCOMMANDS:
             return (f"git subcommand '{sub or '(none)'}' not allowed. "
                     f"Allowed: {', '.join(sorted(_GIT_SAFE_SUBCOMMANDS))}")
+    if binary == "find":
+        blocked = [a for a in parts[1:] if a in _FIND_BLOCKED_FLAGS]
+        if blocked:
+            return f"find flag(s) {blocked} not allowed (can execute processes or delete files)"
+    if binary == "sed":
+        if any(a in ("-i", "--in-place") or a.startswith("-i") and len(a) == 2
+               for a in parts[1:]):
+            return "sed -i (in-place edit) not allowed"
+    resolved = shutil.which(binary)
+    if resolved is None:
+        return f"Command '{binary}' not found in PATH"
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
     env.update(_SAFE_ENV)
     try:
         r = subprocess.run(
-            parts,
+            [resolved] + parts[1:],
             shell=False,
             cwd=repo_path,
             capture_output=True,

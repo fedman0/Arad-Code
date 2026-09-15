@@ -9,3 +9,4 @@ build/
 *.db
 config.yaml
 .env
+*.zip
