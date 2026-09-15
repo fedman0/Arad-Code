@@ -1,0 +1,9 @@
+model: gpt-4o
+api_base: https://api.openai.com/v1
+api_key: sk-...
+
+mcp_server: codebase-memory-mcp
+mcp_args: []
+
+db_path: ~/.pentest/evidence.db
+skills_dir: .
