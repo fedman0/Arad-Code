@@ -10,7 +10,7 @@ from .memory_mcp import CodebaseMemoryClient
 from .models import (
     Hypothesis, Evidence, CoverageItem, EntryPoint, Guard,
     SkillResult, ValidationRun, FINDINGS_SCHEMA,
-    FunctionSummary, OpenQuestion, ConflictRecord, AnalysisQuality,
+    FunctionSummary, OpenQuestion, ConflictRecord, AnalysisQuality, ReturnValueContract,
 )
 from .code_analysis import (
     parse_file_structure, find_all_usages, run_semgrep, list_dir, run_shell
@@ -64,7 +64,20 @@ Never claim a guard is absent without reading the relevant code.
 - Use **flag_conflict** when you discover a contradiction: a prior guard claim that doesn't hold, two paths with incompatible preconditions, or a claimed sanitizer that doesn't cover all forms of the input.
 
 ## Open questions
-- Use **log_open_question** for anything that blocks or degrades a finding. Set impact=blocks_finding if the finding must not be reported until answered."""
+- Use **log_open_question** for anything that blocks or degrades a finding. Set impact=blocks_finding if the finding must not be reported until answered.
+
+## Return value contracts
+- For security-critical functions (authorization checks, ownership validation, payment status, lock acquisition), call **record_return_contract** once to document what the return value means.
+- When you find a call site that ignores that return, call **flag_ignored_return** — for must_check contracts this auto-creates a blocks_finding conflict.
+- Call **get_return_contracts** at skill start to see what prior skills already documented.
+
+## Function contracts
+- Use `preconditions` in save_function_summary to record what callers must guarantee before calling (e.g. "caller must own the resource", "tenant context must be set").
+- Use `guarantees` to record what the function ensures when preconditions hold (e.g. "result is scoped to caller tenant", "only returns records the caller owns").
+- When a caller does NOT satisfy a precondition, treat it as a potential authorization bypass.
+
+## Rejected hypotheses
+- When you rule out a hypothesis because a guard is effective, call **reject_hypothesis** with the reason instead of just setting it to refuted. This records WHY so future skills can detect if the guard is later removed."""
 
 TOOLS = [
     {
@@ -317,6 +330,10 @@ TOOLS = [
                     "guards": {"type": "array", "items": {"type": "string"}},
                     "transformations": {"type": "array", "items": {"type": "string"}},
                     "failure_behavior": {"type": "string"},
+                    "preconditions": {"type": "array", "items": {"type": "string"},
+                                      "description": "What callers must guarantee before calling"},
+                    "guarantees": {"type": "array", "items": {"type": "string"},
+                                   "description": "What the function ensures when preconditions hold"},
                     "required_authority": {"type": "array", "items": {"type": "string"}},
                     "unresolved_calls": {"type": "array", "items": {"type": "string"}},
                     "quality_method": {
@@ -403,6 +420,78 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_return_contract",
+            "description": (
+                "Mark a function's return value as security-relevant. "
+                "Call once per function; subsequent flag_ignored_return calls reference it. "
+                "Use for: authorization checks, ownership validation, payment status, lock acquisition."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["function_qualified_name", "file_path", "line", "return_type"],
+                "properties": {
+                    "function_qualified_name": {"type": "string"},
+                    "file_path": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "return_type": {"type": "string"},
+                    "security_relevance": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                    "expected_handling": {"type": "string", "enum": ["must_check", "may_ignore", "context_dependent"]},
+                    "consequence_if_ignored": {"type": "string", "description": "What goes wrong if caller ignores the return"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "flag_ignored_return",
+            "description": (
+                "Mark a call site that ignores a security-relevant return value. "
+                "For must_check contracts, auto-creates a blocks_finding conflict."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["function_qualified_name", "caller_location"],
+                "properties": {
+                    "function_qualified_name": {"type": "string"},
+                    "caller_location": {"type": "string", "description": "file:line or qualified name of the ignoring call site"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_return_contracts",
+            "description": "List return value contracts recorded by prior skills.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reject_hypothesis",
+            "description": (
+                "Mark a hypothesis as rejected with a documented reason. "
+                "Use instead of simply not reporting it — the reason is stored so future skills can "
+                "detect if the ruling control is later removed."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["hypothesis_id", "reason"],
+                "properties": {
+                    "hypothesis_id": {"type": "string"},
+                    "reason": {"type": "string", "description": "Why this hypothesis is ruled out (cite the specific guard/control and file:line)"},
+                },
             },
         },
     },
@@ -604,6 +693,8 @@ class SkillRunner:
                 guards=args.get("guards", []),
                 transformations=args.get("transformations", []),
                 failure_behavior=args.get("failure_behavior", ""),
+                preconditions=args.get("preconditions", []),
+                guarantees=args.get("guarantees", []),
                 required_authority=args.get("required_authority", []),
                 unresolved_calls=args.get("unresolved_calls", []),
                 quality=quality,
@@ -654,6 +745,73 @@ class SkillRunner:
                 if q.resolution_hint:
                     lines.append(f"  hint: {q.resolution_hint}")
             return "\n".join(lines)
+        if name == "record_return_contract":
+            fn_qn = args.get("function_qualified_name", "")
+            fp = args.get("file_path", "")
+            if not fn_qn or not fp:
+                return "function_qualified_name and file_path are required."
+            rc = ReturnValueContract(
+                function_qualified_name=fn_qn,
+                file_path=fp,
+                line=args.get("line", 0),
+                return_type=args.get("return_type", ""),
+                security_relevance=args.get("security_relevance", "high"),
+                expected_handling=args.get("expected_handling", "must_check"),
+                consequence_if_ignored=args.get("consequence_if_ignored", ""),
+                created_by_skill=skill_name,
+            )
+            self._db.save_return_contract(repo_path, rc)
+            return f"Return contract recorded (id={rc.id}, function={fn_qn}, handling={rc.expected_handling})."
+        if name == "flag_ignored_return":
+            fn_qn = args.get("function_qualified_name", "")
+            caller = args.get("caller_location", "")
+            if not fn_qn or not caller:
+                return "function_qualified_name and caller_location are required."
+            rc = self._db.get_return_contract(repo_path, fn_qn)
+            if rc is None:
+                return f"No return contract for {fn_qn}. Call record_return_contract first."
+            rc.ignored_at.append(caller)
+            self._db.save_return_contract(repo_path, rc)
+            if rc.expected_handling == "must_check":
+                cf = ConflictRecord(
+                    kind="capability_mismatch",
+                    description=(
+                        f"Return value of {fn_qn} ignored at {caller}. "
+                        f"Contract requires must_check. Consequence: {rc.consequence_if_ignored}"
+                    ),
+                    left=fn_qn,
+                    right=caller,
+                    severity="blocks_finding",
+                )
+                self._db.save_conflict(repo_path, cf)
+                return f"Flagged ignored return at {caller} (auto_conflict={cf.id}, severity=blocks_finding)."
+            return f"Flagged ignored return at {caller} (handling={rc.expected_handling}, no auto-conflict)."
+        if name == "get_return_contracts":
+            contracts = self._db.list_return_contracts(repo_path)
+            if not contracts:
+                return "No return value contracts recorded yet."
+            lines = []
+            for c in contracts[:20]:
+                lines.append(
+                    f"[{c.id}] {c.function_qualified_name} returns {c.return_type} "
+                    f"handling={c.expected_handling} relevance={c.security_relevance}"
+                )
+                if c.ignored_at:
+                    lines.append(f"  ignored_at: {', '.join(c.ignored_at[:5])}")
+            return "\n".join(lines)
+        if name == "reject_hypothesis":
+            hyp_id = args.get("hypothesis_id", "")
+            reason = args.get("reason", "")
+            if not hyp_id or not reason:
+                return "hypothesis_id and reason are required."
+            hypotheses = self._db.list_hypotheses(repo_path)
+            for h in hypotheses:
+                if h.id == hyp_id:
+                    h.status = "rejected"
+                    h.rejection_reason = reason
+                    self._db.save_hypothesis(repo_path, h)
+                    return f"Hypothesis {hyp_id} rejected. Reason recorded for regression detection."
+            return f"Hypothesis {hyp_id} not found."
         return "Unknown tool"
 
     def _build_initial_context(self, repo_path: str) -> str:
@@ -916,6 +1074,15 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"function_summary invalid: {ex}")
 
+        ignored_returns: list[ReturnValueContract] = []
+        for rc_data in findings.get("ignored_returns", []):
+            try:
+                rc = ReturnValueContract.model_validate(rc_data)
+                rc.created_by_skill = skill_name
+                ignored_returns.append(rc)
+            except Exception as ex:
+                validation_errors.append(f"ignored_return invalid: {ex}")
+
         for h in hypotheses:
             if h.status in ("evidence_supported", "reproduced"):
                 unresolved = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
@@ -956,6 +1123,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             structured_questions=structured_questions,
             function_summaries=fn_summaries,
             conflicts=auto_conflicts,
+            ignored_returns=ignored_returns,
             entry_points_found=entry_points,
             guards_found=guards,
         )

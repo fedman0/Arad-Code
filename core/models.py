@@ -115,9 +115,25 @@ class FunctionSummary(BaseModel):
     guards: list[str] = Field(default_factory=list)
     transformations: list[str] = Field(default_factory=list)
     failure_behavior: str = ""
+    preconditions: list[str] = Field(default_factory=list)
+    guarantees: list[str] = Field(default_factory=list)
     required_authority: list[str] = Field(default_factory=list)
     unresolved_calls: list[str] = Field(default_factory=list)
     quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
+
+
+class ReturnValueContract(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    function_qualified_name: str
+    file_path: str
+    line: int
+    return_type: str
+    security_relevance: Literal["critical", "high", "medium", "low"] = "high"
+    expected_handling: Literal["must_check", "may_ignore", "context_dependent"] = "must_check"
+    consequence_if_ignored: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_by_skill: str = ""
+    ignored_at: list[str] = Field(default_factory=list)
 
 
 class ConflictRecord(BaseModel):
@@ -159,13 +175,14 @@ class Hypothesis(BaseModel):
     runtime_assumptions: Literal["verified", "env_dependent"] = "env_dependent"
     impact_basis: Literal["observed", "inferred"] = "inferred"
     validation: Literal["run", "not_run", "blocked"] = "not_run"
-    status: Literal["initial", "evidence_supported", "reproduced", "refuted", "blocked"] = "initial"
+    status: Literal["initial", "evidence_supported", "reproduced", "refuted", "rejected", "blocked"] = "initial"
 
     severity: int = Field(ge=0, le=10, default=5)
     confidence: int = Field(ge=0, le=10, default=3)
     priority: int = 0
 
     skill_source: str = ""
+    rejection_reason: Optional[str] = None
     commit: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
     cwe: Optional[str] = None
@@ -255,6 +272,7 @@ class SkillResult(BaseModel):
     structured_questions: list[OpenQuestion] = Field(default_factory=list)
     function_summaries: list[FunctionSummary] = Field(default_factory=list)
     conflicts: list[ConflictRecord] = Field(default_factory=list)
+    ignored_returns: list[ReturnValueContract] = Field(default_factory=list)
     coverage_gaps: list[str] = Field(default_factory=list)
     analysis_quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
 
@@ -412,6 +430,8 @@ FINDINGS_SCHEMA = {
                     "guards": {"type": "array", "items": {"type": "string"}},
                     "transformations": {"type": "array", "items": {"type": "string"}},
                     "failure_behavior": {"type": "string"},
+                    "preconditions": {"type": "array", "items": {"type": "string"}},
+                    "guarantees": {"type": "array", "items": {"type": "string"}},
                     "required_authority": {"type": "array", "items": {"type": "string"}},
                     "unresolved_calls": {"type": "array", "items": {"type": "string"}},
                     "quality": {
@@ -446,6 +466,23 @@ FINDINGS_SCHEMA = {
                 "limitations": {"type": "array", "items": {"type": "string"}},
                 "unresolved_calls": {"type": "integer"},
                 "unresolved_symbols": {"type": "integer"},
+            }
+        },
+        "ignored_returns": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["function_qualified_name", "file_path", "line", "return_type"],
+                "properties": {
+                    "function_qualified_name": {"type": "string"},
+                    "file_path": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "return_type": {"type": "string"},
+                    "security_relevance": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+                    "expected_handling": {"type": "string", "enum": ["must_check", "may_ignore", "context_dependent"]},
+                    "consequence_if_ignored": {"type": "string"},
+                    "ignored_at": {"type": "array", "items": {"type": "string"}},
+                }
             }
         },
     },

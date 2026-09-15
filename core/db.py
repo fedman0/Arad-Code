@@ -6,7 +6,7 @@ from typing import Optional
 from .models import (
     Hypothesis, Evidence, CoverageItem, ValidationRun,
     EntryPoint, Guard, SkillResult, ThreatModel,
-    FunctionSummary, OpenQuestion, ConflictRecord,
+    FunctionSummary, OpenQuestion, ConflictRecord, ReturnValueContract,
 )
 
 
@@ -122,6 +122,16 @@ class EvidenceStore:
             severity TEXT,
             status TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS return_value_contracts (
+            id TEXT PRIMARY KEY,
+            repo_path TEXT,
+            function_qualified_name TEXT,
+            data TEXT NOT NULL,
+            created_at TEXT,
+            security_relevance TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_rvc_repo_fn ON return_value_contracts(repo_path, function_qualified_name);
         """)
         self.conn.commit()
 
@@ -319,6 +329,31 @@ class EvidenceStore:
         ).fetchall()
         return [ConflictRecord.model_validate_json(r["data"]) for r in rows]
 
+    def save_return_contract(self, repo_path: str, c: ReturnValueContract) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO return_value_contracts
+               (id, repo_path, function_qualified_name, data, created_at, security_relevance)
+               VALUES (?,?,?,?,?,?)""",
+            (c.id, repo_path, c.function_qualified_name, c.model_dump_json(), c.created_at, c.security_relevance)
+        )
+        self.conn.commit()
+
+    def get_return_contract(self, repo_path: str, function_qualified_name: str) -> Optional[ReturnValueContract]:
+        row = self.conn.execute(
+            "SELECT data FROM return_value_contracts WHERE repo_path=? AND function_qualified_name=? ORDER BY created_at DESC LIMIT 1",
+            (repo_path, function_qualified_name)
+        ).fetchone()
+        if row is None:
+            return None
+        return ReturnValueContract.model_validate_json(row["data"])
+
+    def list_return_contracts(self, repo_path: str) -> list[ReturnValueContract]:
+        rows = self.conn.execute(
+            "SELECT data FROM return_value_contracts WHERE repo_path=? ORDER BY security_relevance, created_at DESC",
+            (repo_path,)
+        ).fetchall()
+        return [ReturnValueContract.model_validate_json(r["data"]) for r in rows]
+
     def mark_stale_by_commit(self, repo_path: str, old_commit: str):
         self.conn.execute(
             "UPDATE evidence SET stale=1 WHERE repo_path=? AND commit_sha=? AND commit_sha != ''",
@@ -345,6 +380,9 @@ class EvidenceStore:
             self.save_function_summary(repo_path, fs, result.commit)
         for cf in result.conflicts:
             self.save_conflict(repo_path, cf)
+        for rc in result.ignored_returns:
+            rc.created_by_skill = rc.created_by_skill or result.skill_name
+            self.save_return_contract(repo_path, rc)
         for oq_text in result.open_questions:
             if isinstance(oq_text, str) and oq_text.strip():
                 oq = OpenQuestion(
