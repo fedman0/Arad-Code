@@ -6,4 +6,4 @@ mcp_server: codebase-memory-mcp
 mcp_args: []
 
 db_path: ~/.pentest/evidence.db
-skills_dir: .
+skills_dir: ""  # leave empty to use ./skills relative to project root
