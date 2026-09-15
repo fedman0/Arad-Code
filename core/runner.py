@@ -543,10 +543,11 @@ class SkillRunner:
                 out["error"] = result.error
             return _json.dumps(out, indent=2)
         if name == "find_all_usages":
-            from .language_adapter import get_adapter_for
+            from .language_adapter import get_default_adapter
             symbol_name = args["symbol_name"]
-            adapter = get_adapter_for(symbol_name)
-            result = adapter.find_references(repo_path, symbol_name, args.get("file_glob"))
+            max_m = args.get("max_matches", 100)
+            adapter = get_default_adapter()
+            result = adapter.find_references(repo_path, symbol_name, args.get("file_glob"), max_m)
             if not result.items:
                 return "No usages found"
             quality_note = ""
@@ -557,8 +558,8 @@ class SkillRunner:
                     f"limitations={result.quality.limitations}]"
                 )
             if result.truncated:
-                quality_note += "\n[results truncated — increase max_matches]"
-            return "\n".join(result.items[:args.get("max_matches", 100)]) + quality_note
+                quality_note += "\n[results truncated at adapter level]"
+            return "\n".join(result.items[:max_m]) + quality_note
         if name == "run_semgrep":
             return run_semgrep(repo_path, args.get("pattern", ""),
                                args.get("language"), args.get("rules"))
@@ -794,7 +795,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             if h.status == "reproduced":
                 h.status = "evidence_supported"
             unresolved_obs = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
-            if unresolved_obs and h.status == "evidence_supported" and h.confidence < 5:
+            if unresolved_obs and h.status in ("evidence_supported", "reproduced"):
                 h.status = "initial"
             h.priority = h.compute_priority()
             hypotheses.append(h)
@@ -849,17 +850,52 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 continue
             try:
                 lines = target.read_text(errors="replace").splitlines()
-                s = max(0, ev.line_start - 1)
-                e = min(len(lines), ev.line_end)
-                actual = "\n".join(lines[s:e])
-                if actual:
-                    ev.snippet = actual
-                ev.analysis_quality.method = "structural"
-                ev.analysis_quality.confidence = "high"
+                total = len(lines)
+                if ev.line_start < 1 or ev.line_start > total:
+                    auto_conflicts.append(ConflictRecord(
+                        kind="stale_reference",
+                        description=(
+                            f"Evidence line {ev.line_start} out of range "
+                            f"(file has {total} lines): {ev.file_path}"
+                        ),
+                        left=f"evidence/{ev.id}",
+                        right=f"{ev.file_path}:{ev.line_start}",
+                        severity="blocks_finding",
+                    ))
+                    ev.analysis_quality.limitations.append(
+                        f"line {ev.line_start} out of range (file has {total} lines)"
+                    )
+                else:
+                    s = ev.line_start - 1
+                    e = min(total, max(ev.line_end, ev.line_start))
+                    ev.snippet = "\n".join(lines[s:e])
+                    ev.analysis_quality.method = "structural"
+                    ev.analysis_quality.confidence = "high"
             except Exception as ex:
                 ev.analysis_quality.limitations.append(f"read error: {ex}")
             verified_evidence.append(ev)
         evidence_items = verified_evidence
+
+        blocked_hyp_ids: set[str] = set()
+        for cf in auto_conflicts:
+            if cf.severity == "blocks_finding":
+                for ev in evidence_items:
+                    if cf.left == f"evidence/{ev.id}":
+                        blocked_hyp_ids.add(ev.hypothesis_id)
+
+        for h in hypotheses:
+            if h.id in blocked_hyp_ids and h.status in ("evidence_supported", "reproduced"):
+                h.status = "initial"
+                auto_conflicts.append(ConflictRecord(
+                    kind="status_inconsistency",
+                    description=(
+                        f"Hypothesis {h.id} downgraded to initial: "
+                        "linked evidence has blocks_finding conflict"
+                    ),
+                    left=h.id,
+                    right="blocks_finding evidence",
+                    severity="blocks_finding",
+                ))
 
         structured_questions: list[OpenQuestion] = []
         for sq_data in findings.get("structured_questions", []):

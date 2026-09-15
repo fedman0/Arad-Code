@@ -106,7 +106,7 @@ class TreeSitterAdapter:
         )
 
     def enumerate_symbols(self, repo_path: str, file_path: str) -> AnalysisResult:
-        from .code_analysis import parse_file_structure, _HAS_TREE_SITTER
+        from .code_analysis import parse_file_structure
         import json
         raw = parse_file_structure(repo_path, file_path)
         try:
@@ -117,22 +117,22 @@ class TreeSitterAdapter:
                                         limitations=[f"parse error: {ex}"]),
                 error=str(ex),
             )
-        suffix = Path(file_path).suffix.lower()
-        ast_available = _HAS_TREE_SITTER and suffix in self._SUPPORTED
-        method = "structural" if ast_available else "textual"
-        conf = "medium" if ast_available else "speculative"
-        limitations = [] if ast_available else [
-            f"tree-sitter unavailable or no grammar for {suffix}; used regex fallback"
-        ]
+        q = data.get("_quality", {})
+        used_ast = q.get("used_ast", False)
+        method = "structural" if used_ast else "textual"
+        conf = "medium" if used_ast else "speculative"
+        reason = q.get("fallback_reason", "tree-sitter unavailable or no grammar for this file type")
+        limitations = [] if used_ast else [reason]
         return AnalysisResult(
             items=data.get("symbols", []),
             quality=AnalysisQuality(method=method, confidence=conf, limitations=limitations),
         )
 
     def find_references(self, repo_path: str, symbol_name: str,
-                        file_glob: Optional[str] = None) -> AnalysisResult:
+                        file_glob: Optional[str] = None,
+                        max_matches: int = 100) -> AnalysisResult:
         from .code_analysis import find_all_usages
-        raw = find_all_usages(repo_path, symbol_name, file_glob)
+        raw = find_all_usages(repo_path, symbol_name, file_glob, max_matches)
         lines = [l for l in raw.splitlines() if l.strip() and l.strip() != "No usages found"]
         return AnalysisResult(
             items=lines,
@@ -144,7 +144,7 @@ class TreeSitterAdapter:
                     "does not resolve overloads or aliased imports",
                 ],
             ),
-            truncated=len(lines) >= 100,
+            truncated=len(lines) >= max_matches,
         )
 
     def resolve_callers(self, repo_path: str, qualified_name: str) -> AnalysisResult:
@@ -196,15 +196,16 @@ class TextualAdapter:
         )
 
     def find_references(self, repo_path: str, symbol_name: str,
-                        file_glob: Optional[str] = None) -> AnalysisResult:
+                        file_glob: Optional[str] = None,
+                        max_matches: int = 100) -> AnalysisResult:
         from .code_analysis import find_all_usages
-        raw = find_all_usages(repo_path, symbol_name, file_glob)
+        raw = find_all_usages(repo_path, symbol_name, file_glob, max_matches)
         lines = [l for l in raw.splitlines() if l.strip() and l.strip() != "No usages found"]
         return AnalysisResult(
             items=lines,
             quality=AnalysisQuality(method="textual", confidence="speculative",
                                     limitations=["grep-based; false positives likely"]),
-            truncated=len(lines) >= 100,
+            truncated=len(lines) >= max_matches,
         )
 
     def resolve_callers(self, repo_path: str, qualified_name: str) -> AnalysisResult:
@@ -220,6 +221,15 @@ class TextualAdapter:
 
 def get_adapter_for(file_path: str) -> LanguageAdapter:
     """Return the best available adapter for the given file extension."""
+    try:
+        from tree_sitter_languages import get_parser as _  # noqa
+        return TreeSitterAdapter()
+    except ImportError:
+        return TextualAdapter()
+
+
+def get_default_adapter() -> LanguageAdapter:
+    """Return the best available adapter regardless of file type."""
     try:
         from tree_sitter_languages import get_parser as _  # noqa
         return TreeSitterAdapter()

@@ -85,15 +85,21 @@ def parse_file_structure(repo_path: str, file_path: str) -> str:
 
     lang = _lang_for_file(file_path)
     if not lang or not _HAS_TREE_SITTER:
-        return _fallback_structure(full.read_text(errors="replace"), file_path)
+        data = json.loads(_fallback_structure(full.read_text(errors="replace"), file_path))
+        data["_quality"] = {"used_ast": False}
+        return json.dumps(data, indent=2)
 
     try:
         parser = get_parser(lang)
         source = full.read_bytes()
         tree = parser.parse(source)
-        return _extract_structure(tree, source, lang, file_path)
-    except Exception as ex:
-        return _fallback_structure(full.read_text(errors="replace"), file_path)
+        data = json.loads(_extract_structure(tree, source, lang, file_path))
+        data["_quality"] = {"used_ast": True}
+        return json.dumps(data, indent=2)
+    except Exception:
+        data = json.loads(_fallback_structure(full.read_text(errors="replace"), file_path))
+        data["_quality"] = {"used_ast": False, "fallback_reason": "tree-sitter parse error"}
+        return json.dumps(data, indent=2)
 
 
 def _extract_structure(tree: Any, source: bytes, lang: str, file_path: str) -> str:
@@ -261,6 +267,8 @@ def run_shell(repo_path: str, command: str) -> str:
         return f"Parse error: {ex}"
     if not parts:
         return "Empty command"
+    if any(p in ("|", "||", "&&", ";", "`") for p in parts):
+        return "Shell operators (|, &&, ;) not allowed in commands"
     binary = Path(parts[0]).name
     if binary not in _SHELL_WHITELIST:
         return (f"Command '{binary}' not in whitelist. "
@@ -285,6 +293,19 @@ def run_shell(repo_path: str, command: str) -> str:
         prog = " ".join(prog_tokens)
         if re.search(r'\bsystem\s*\(', prog) or re.search(r'\bpipe\s*\(', prog):
             return "awk system() and pipe() are not allowed"
+    _XARGS_SAFE = {
+        "grep", "rg", "wc", "head", "tail", "file",
+        "stat", "sha256sum", "md5sum", "sha1sum",
+    }
+    if binary == "xargs":
+        sub_tokens = [p for p in parts[1:] if not p.startswith("-")]
+        if sub_tokens:
+            xsub = Path(sub_tokens[0]).name
+            if xsub not in _XARGS_SAFE:
+                return (
+                    f"xargs with '{xsub}' not allowed. "
+                    f"Safe: {', '.join(sorted(_XARGS_SAFE))}"
+                )
     resolved = shutil.which(binary)
     if resolved is None:
         return f"Command '{binary}' not found in PATH"
