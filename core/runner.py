@@ -9,7 +9,8 @@ from .db import EvidenceStore
 from .memory_mcp import CodebaseMemoryClient
 from .models import (
     Hypothesis, Evidence, CoverageItem, EntryPoint, Guard,
-    SkillResult, ValidationRun, FINDINGS_SCHEMA
+    SkillResult, ValidationRun, FINDINGS_SCHEMA,
+    FunctionSummary, OpenQuestion, ConflictRecord, AnalysisQuality,
 )
 from .code_analysis import (
     parse_file_structure, find_all_usages, run_semgrep, list_dir, run_shell
@@ -49,7 +50,21 @@ A finding REQUIRES:
 
 Invalid: "this pattern suggests SQL injection". Valid: "UserController.Search at Controllers/UserController.cs:47 passes req.query.name directly to UserRepository.Search (read at Repos/UserRepo.cs:12), which calls context.Database.ExecuteSqlRaw($\"SELECT * FROM users WHERE name = '{name}'\") (read at line 18). No parameterization. ORM global filter not applicable to raw SQL (confirmed OnModelCreating at Data/AppDbContext.cs:30 — no query filters on User). No middleware sanitization (read Startup.cs:45-80)."
 
-Never claim a guard is absent without reading the relevant code."""
+Never claim a guard is absent without reading the relevant code.
+
+## Reusable summaries
+- Call **get_open_questions** at the start to see what prior skills couldn't resolve.
+- Call **get_function_summary** before re-analyzing a shared utility (repository, service, validator).
+- Call **save_function_summary** after reading a shared utility so later skills skip re-analyzing it. Include: inputs (origin of each parameter), reads (state/DB accessed), writes (state modified), external_effects, guards (what checks it performs), transformations, failure_behavior, required_authority, unresolved_calls.
+
+## Proof obligations
+- For each hypothesis, populate `proof_obligations` — one entry per claim you need to verify. Mark each `verified` (with evidence_ref=file:line) or `unresolved` (with reason). A hypothesis cannot be `evidence_supported` if it has unresolved proof obligations that affect reachability or guard completeness.
+
+## Conflicts
+- Use **flag_conflict** when you discover a contradiction: a prior guard claim that doesn't hold, two paths with incompatible preconditions, or a claimed sanitizer that doesn't cover all forms of the input.
+
+## Open questions
+- Use **log_open_question** for anything that blocks or degrades a finding. Set impact=blocks_finding if the finding must not be reported until answered."""
 
 TOOLS = [
     {
@@ -279,6 +294,121 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "save_function_summary",
+            "description": (
+                "Persist a reusable security summary for a function so later skills skip re-analyzing it. "
+                "Include: inputs (origin of each parameter), reads (state/DB accessed), "
+                "writes (state modified), external_effects (DB write/HTTP/file), "
+                "guards (what checks it performs), transformations, failure_behavior, "
+                "required_authority (what permissions caller must have), "
+                "unresolved_calls (functions you couldn't analyze)."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["qualified_name", "file_path", "line"],
+                "properties": {
+                    "qualified_name": {"type": "string"},
+                    "file_path": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "inputs": {"type": "array", "items": {"type": "string"}},
+                    "reads": {"type": "array", "items": {"type": "string"}},
+                    "writes": {"type": "array", "items": {"type": "string"}},
+                    "external_effects": {"type": "array", "items": {"type": "string"}},
+                    "guards": {"type": "array", "items": {"type": "string"}},
+                    "transformations": {"type": "array", "items": {"type": "string"}},
+                    "failure_behavior": {"type": "string"},
+                    "required_authority": {"type": "array", "items": {"type": "string"}},
+                    "unresolved_calls": {"type": "array", "items": {"type": "string"}},
+                    "quality_method": {
+                        "type": "string",
+                        "enum": ["semantic", "structural", "textual", "inferred"],
+                        "description": "How this summary was derived",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_function_summary",
+            "description": "Retrieve a previously saved security summary for a function by its qualified name.",
+            "parameters": {
+                "type": "object",
+                "required": ["qualified_name"],
+                "properties": {
+                    "qualified_name": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "log_open_question",
+            "description": (
+                "Record a structured open question that blocks or degrades a finding. "
+                "Use instead of (or in addition to) open_questions in finish(). "
+                "impact=blocks_finding means the finding must not be reported until resolved."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["question", "impact"],
+                "properties": {
+                    "question": {"type": "string"},
+                    "impact": {"type": "string", "enum": ["blocks_finding", "affects_confidence", "informational"]},
+                    "affects_hypothesis_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "hypothesis IDs this question blocks",
+                    },
+                    "resolution_hint": {
+                        "type": "string",
+                        "description": "how a future skill might resolve this",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "flag_conflict",
+            "description": (
+                "Record a contradiction in the analysis: e.g. a guard claimed complete but a bypass path was found, "
+                "or two skills reach opposite conclusions about the same code. "
+                "Conflicts are visible to all subsequent skills."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["kind", "description", "left", "right"],
+                "properties": {
+                    "kind": {"type": "string", "enum": [
+                        "guard_mismatch", "status_inconsistency",
+                        "stale_reference", "contradicting_claims", "capability_mismatch",
+                    ]},
+                    "description": {"type": "string"},
+                    "left": {"type": "string", "description": "first claim, hypothesis_id, or file:line"},
+                    "right": {"type": "string", "description": "conflicting claim, hypothesis_id, or file:line"},
+                    "severity": {"type": "string", "enum": ["blocks_finding", "degrades_confidence", "informational"]},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_open_questions",
+            "description": "Retrieve open questions recorded by prior skills that are still unresolved.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
             "description": "Submit the final structured findings. Call this when analysis is complete.",
             "parameters": {
@@ -425,6 +555,79 @@ class SkillRunner:
                 return "Addendum cannot be empty."
             ok = self._db.amend_threat_model(repo_path, addendum, skill_name)
             return "Amendment recorded." if ok else "No threat model exists yet — call save_threat_model first."
+        if name == "save_function_summary":
+            qn = args.get("qualified_name", "")
+            fp = args.get("file_path", "")
+            line = args.get("line", 0)
+            if not qn or not fp:
+                return "qualified_name and file_path are required."
+            method = args.get("quality_method", "textual")
+            quality = AnalysisQuality(
+                method=method,
+                confidence="medium" if method != "textual" else "low",
+            )
+            fs = FunctionSummary(
+                qualified_name=qn,
+                file_path=fp,
+                line=line,
+                created_by_skill=skill_name,
+                inputs=args.get("inputs", []),
+                reads=args.get("reads", []),
+                writes=args.get("writes", []),
+                external_effects=args.get("external_effects", []),
+                guards=args.get("guards", []),
+                transformations=args.get("transformations", []),
+                failure_behavior=args.get("failure_behavior", ""),
+                required_authority=args.get("required_authority", []),
+                unresolved_calls=args.get("unresolved_calls", []),
+                quality=quality,
+            )
+            self._db.save_function_summary(repo_path, fs)
+            return f"Function summary saved for {qn}."
+        if name == "get_function_summary":
+            qn = args.get("qualified_name", "")
+            fs = self._db.get_function_summary(repo_path, qn)
+            if fs is None:
+                return f"No summary found for {qn}."
+            return fs.model_dump_json(indent=2)
+        if name == "log_open_question":
+            question = args.get("question", "").strip()
+            if not question:
+                return "question cannot be empty."
+            impact = args.get("impact", "informational")
+            oq = OpenQuestion(
+                question=question,
+                raised_by_skill=skill_name,
+                impact=impact,
+                affects_hypothesis_ids=args.get("affects_hypothesis_ids", []),
+                resolution_hint=args.get("resolution_hint"),
+            )
+            self._db.save_open_question(repo_path, oq)
+            return f"Open question recorded (id={oq.id}, impact={impact})."
+        if name == "flag_conflict":
+            kind = args.get("kind", "")
+            desc = args.get("description", "").strip()
+            if not kind or not desc:
+                return "kind and description are required."
+            cf = ConflictRecord(
+                kind=kind,
+                description=desc,
+                left=args.get("left", ""),
+                right=args.get("right", ""),
+                severity=args.get("severity", "degrades_confidence"),
+            )
+            self._db.save_conflict(repo_path, cf)
+            return f"Conflict recorded (id={cf.id}, kind={kind}, severity={cf.severity})."
+        if name == "get_open_questions":
+            questions = self._db.list_open_questions(repo_path, status="open")
+            if not questions:
+                return "No open questions from prior skills."
+            lines = []
+            for q in questions[:20]:
+                lines.append(f"[{q.id}] impact={q.impact} skill={q.raised_by_skill}\n  {q.question}")
+                if q.resolution_hint:
+                    lines.append(f"  hint: {q.resolution_hint}")
+            return "\n".join(lines)
         return "Unknown tool"
 
     def _build_initial_context(self, repo_path: str) -> str:
@@ -445,6 +648,27 @@ class SkillRunner:
         if hypotheses:
             hs = [f"  [{h.id}] {h.violated_invariant} (status={h.status})" for h in hypotheses[:10]]
             parts.append("Existing hypotheses (avoid duplicates):\n" + "\n".join(hs))
+
+        open_questions = self._db.list_open_questions(repo_path, status="open")
+        if open_questions:
+            high = [q for q in open_questions if q.impact == "blocks_finding"]
+            medium = [q for q in open_questions if q.impact == "affects_confidence"]
+            parts_oq = []
+            if high:
+                parts_oq.append("BLOCKING:\n" + "\n".join(
+                    f"  [{q.id}] {q.question}" + (f"\n  hint: {q.resolution_hint}" if q.resolution_hint else "")
+                    for q in high[:10]))
+            if medium:
+                parts_oq.append("CONFIDENCE-AFFECTING:\n" + "\n".join(
+                    f"  [{q.id}] {q.question}" for q in medium[:10]))
+            if parts_oq:
+                parts.append("Open questions from prior skills:\n" + "\n\n".join(parts_oq))
+
+        conflicts = self._db.list_conflicts(repo_path, status="open")
+        if conflicts:
+            cs = [f"  [{c.id}] {c.kind} ({c.severity}): {c.description}" for c in conflicts[:10]]
+            parts.append("Known conflicts:\n" + "\n".join(cs))
+
         return "\n\n".join(parts)
 
     async def run_skill(
@@ -577,6 +801,52 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"evidence[{i}] invalid: {ex}")
 
+        structured_questions: list[OpenQuestion] = []
+        for sq_data in findings.get("structured_questions", []):
+            try:
+                sq = OpenQuestion.model_validate(sq_data)
+                sq.raised_by_skill = skill_name
+                structured_questions.append(sq)
+            except Exception as ex:
+                validation_errors.append(f"structured_question invalid: {ex}")
+
+        fn_summaries: list[FunctionSummary] = []
+        for fs_data in findings.get("function_summaries", []):
+            try:
+                fs = FunctionSummary.model_validate(fs_data)
+                fs.created_by_skill = skill_name
+                fs.commit = commit
+                fn_summaries.append(fs)
+            except Exception as ex:
+                validation_errors.append(f"function_summary invalid: {ex}")
+
+        auto_conflicts: list[ConflictRecord] = []
+        for h in hypotheses:
+            if h.status in ("evidence_supported", "reproduced"):
+                unresolved = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
+                if unresolved:
+                    auto_conflicts.append(ConflictRecord(
+                        kind="status_inconsistency",
+                        description=(
+                            f"Hypothesis {h.id} has status={h.status} but "
+                            f"{len(unresolved)} unresolved proof obligation(s): "
+                            + "; ".join(ob.question for ob in unresolved[:3])
+                        ),
+                        left=h.id,
+                        right=f"proof_obligations[unresolved={len(unresolved)}]",
+                        severity="degrades_confidence",
+                    ))
+            if h.guard_analysis == "complete" and h.guard_coverage == "some_paths":
+                auto_conflicts.append(ConflictRecord(
+                    kind="guard_mismatch",
+                    description=(
+                        f"Hypothesis {h.id} claims guard_analysis=complete but guard_coverage=some_paths"
+                    ),
+                    left=f"{h.id}.guard_analysis=complete",
+                    right=f"{h.id}.guard_coverage=some_paths",
+                    severity="degrades_confidence",
+                ))
+
         open_questions = findings.get("open_questions", []) + validation_errors
 
         result = SkillResult(
@@ -587,6 +857,9 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             evidence=evidence_items,
             coverage=coverage,
             open_questions=open_questions,
+            structured_questions=structured_questions,
+            function_summaries=fn_summaries,
+            conflicts=auto_conflicts,
             entry_points_found=entry_points,
             guards_found=guards,
         )

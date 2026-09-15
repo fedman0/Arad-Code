@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Optional
 from .models import (
     Hypothesis, Evidence, CoverageItem, ValidationRun,
-    EntryPoint, Guard, SkillResult, ThreatModel
+    EntryPoint, Guard, SkillResult, ThreatModel,
+    FunctionSummary, OpenQuestion, ConflictRecord,
 )
 
 
@@ -90,6 +91,36 @@ class EvidenceStore:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             created_by_skill TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS function_summaries (
+            id TEXT PRIMARY KEY,
+            repo_path TEXT,
+            qualified_name TEXT,
+            data TEXT NOT NULL,
+            created_at TEXT,
+            commit_sha TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_fnsummary_repo_qn ON function_summaries(repo_path, qualified_name);
+
+        CREATE TABLE IF NOT EXISTS open_questions (
+            id TEXT PRIMARY KEY,
+            repo_path TEXT,
+            data TEXT NOT NULL,
+            raised_at TEXT,
+            status TEXT,
+            impact TEXT,
+            raised_by_skill TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS conflicts (
+            id TEXT PRIMARY KEY,
+            repo_path TEXT,
+            data TEXT NOT NULL,
+            created_at TEXT,
+            kind TEXT,
+            severity TEXT,
+            status TEXT
         );
         """)
         self.conn.commit()
@@ -230,6 +261,64 @@ class EvidenceStore:
         self.conn.commit()
         return True
 
+    def save_function_summary(self, repo_path: str, summary: FunctionSummary, commit: str = "") -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO function_summaries
+               (id, repo_path, qualified_name, data, created_at, commit_sha)
+               VALUES (?,?,?,?,?,?)""",
+            (summary.id, repo_path, summary.qualified_name,
+             summary.model_dump_json(), summary.created_at, commit or summary.commit)
+        )
+        self.conn.commit()
+
+    def get_function_summary(self, repo_path: str, qualified_name: str) -> Optional[FunctionSummary]:
+        row = self.conn.execute(
+            "SELECT data FROM function_summaries WHERE repo_path=? AND qualified_name=? ORDER BY created_at DESC LIMIT 1",
+            (repo_path, qualified_name)
+        ).fetchone()
+        if row is None:
+            return None
+        return FunctionSummary.model_validate_json(row["data"])
+
+    def list_function_summaries(self, repo_path: str, limit: int = 50) -> list[FunctionSummary]:
+        rows = self.conn.execute(
+            "SELECT data FROM function_summaries WHERE repo_path=? ORDER BY created_at DESC LIMIT ?",
+            (repo_path, limit)
+        ).fetchall()
+        return [FunctionSummary.model_validate_json(r["data"]) for r in rows]
+
+    def save_open_question(self, repo_path: str, q: OpenQuestion) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO open_questions
+               (id, repo_path, data, raised_at, status, impact, raised_by_skill)
+               VALUES (?,?,?,?,?,?,?)""",
+            (q.id, repo_path, q.model_dump_json(), q.raised_at, q.status, q.impact, q.raised_by_skill)
+        )
+        self.conn.commit()
+
+    def list_open_questions(self, repo_path: str, status: str = "open") -> list[OpenQuestion]:
+        rows = self.conn.execute(
+            "SELECT data FROM open_questions WHERE repo_path=? AND status=? ORDER BY raised_at DESC",
+            (repo_path, status)
+        ).fetchall()
+        return [OpenQuestion.model_validate_json(r["data"]) for r in rows]
+
+    def save_conflict(self, repo_path: str, c: ConflictRecord) -> None:
+        self.conn.execute(
+            """INSERT OR REPLACE INTO conflicts
+               (id, repo_path, data, created_at, kind, severity, status)
+               VALUES (?,?,?,?,?,?,?)""",
+            (c.id, repo_path, c.model_dump_json(), c.created_at, c.kind, c.severity, c.status)
+        )
+        self.conn.commit()
+
+    def list_conflicts(self, repo_path: str, status: str = "open") -> list[ConflictRecord]:
+        rows = self.conn.execute(
+            "SELECT data FROM conflicts WHERE repo_path=? AND status=? ORDER BY created_at DESC",
+            (repo_path, status)
+        ).fetchall()
+        return [ConflictRecord.model_validate_json(r["data"]) for r in rows]
+
     def mark_stale_by_commit(self, repo_path: str, old_commit: str):
         self.conn.execute(
             "UPDATE evidence SET stale=1 WHERE repo_path=? AND commit_sha=? AND commit_sha != ''",
@@ -248,6 +337,14 @@ class EvidenceStore:
             self.save_entry_point(repo_path, ep, result.commit)
         for g in result.guards_found:
             self.save_guard(repo_path, g, result.commit)
+        for sq in result.structured_questions:
+            sq.raised_by_skill = sq.raised_by_skill or result.skill_name
+            self.save_open_question(repo_path, sq)
+        for fs in result.function_summaries:
+            fs.created_by_skill = fs.created_by_skill or result.skill_name
+            self.save_function_summary(repo_path, fs, result.commit)
+        for cf in result.conflicts:
+            self.save_conflict(repo_path, cf)
 
     def close(self):
         self.conn.close()
