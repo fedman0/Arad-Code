@@ -529,8 +529,7 @@ def _gate_hypothesis_status(
         return "initial"
     for c in conflicts:
         if c.severity == "blocks_finding" and c.status == "open":
-            if h.id in (c.left, c.right):
-                return "initial"
+            return "initial"
     if any(ob.required_for_finding and ob.status == "unresolved" for ob in h.proof_obligations):
         return "initial"
     if any(ob.required_for_finding and ob.status == "refuted" for ob in h.proof_obligations):
@@ -1036,6 +1035,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     severity="blocks_finding",
                 ))
                 ev.analysis_quality.limitations.append(f"file not found: {ev.file_path}")
+                ev.stale = True
                 verified_evidence.append(ev)
                 continue
             try:
@@ -1056,6 +1056,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     ev.analysis_quality.limitations.append(
                         f"line {ev.line_start} out of range (file has {total} lines)"
                     )
+                    ev.stale = True
                 else:
                     s = ev.line_start - 1
                     e = min(total, max(ev.line_end, ev.line_start))
@@ -1066,13 +1067,6 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 ev.analysis_quality.limitations.append(f"read error: {ex}")
             verified_evidence.append(ev)
         evidence_items = verified_evidence
-
-        blocked_hyp_ids: set[str] = set()
-        for cf in auto_conflicts:
-            if cf.severity == "blocks_finding":
-                for ev in evidence_items:
-                    if cf.left == f"evidence/{ev.id}":
-                        blocked_hyp_ids.add(ev.hypothesis_id)
 
         structured_questions: list[OpenQuestion] = []
         for sq_data in findings.get("structured_questions", []):
@@ -1102,6 +1096,15 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"ignored_return invalid: {ex}")
 
+        llm_conflicts: list[ConflictRecord] = []
+        for i, c_data in enumerate(findings.get("conflicts", [])):
+            try:
+                llm_conflicts.append(ConflictRecord.model_validate(c_data))
+            except Exception as ex:
+                validation_errors.append(f"conflict[{i}] invalid: {ex}")
+
+        all_conflicts = auto_conflicts + llm_conflicts
+
         for h in hypotheses:
             if h.guard_coverage == "all_paths" and h.uncovered_paths:
                 auto_conflicts.append(ConflictRecord(
@@ -1117,9 +1120,12 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
+            ev_ids = {e.id for e in ev_for_h}
             conf_for_h = [
-                c for c in auto_conflicts
-                if h.id in (c.left, c.right) or h.id in c.description
+                c for c in all_conflicts
+                if (h.id in (c.left, c.right)
+                    or h.id in c.description
+                    or any(f"evidence/{eid}" in (c.left, c.right) for eid in ev_ids))
             ]
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h)
 
@@ -1135,7 +1141,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             open_questions=open_questions,
             structured_questions=structured_questions,
             function_summaries=fn_summaries,
-            conflicts=auto_conflicts,
+            conflicts=all_conflicts,
             ignored_returns=ignored_returns,
             entry_points_found=entry_points,
             guards_found=guards,
