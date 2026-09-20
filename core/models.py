@@ -193,6 +193,7 @@ class Hypothesis(BaseModel):
     rejection_controlling_evidence_ids: list[str] = Field(default_factory=list)
     rejection_condition: str = ""
     rejected_by: Optional[Literal["human", "model", "profile"]] = None
+    rejected_at_commit: str = ""
     commit: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
     cwe: Optional[str] = None
@@ -208,7 +209,7 @@ class Hypothesis(BaseModel):
     enables: list[str] = Field(default_factory=list)
 
     def compute_priority(self) -> int:
-        if self.status in ("rejected", "refuted", "blocked", "needs_recheck"):
+        if self.status in ("rejected", "refuted", "blocked"):
             return 0
         if self.exposure == "unreachable":
             return 0
@@ -274,6 +275,7 @@ class NegativeEvidence(BaseModel):
     anchor_line: int
     anchor_text: str
     anchor_stale: bool = False
+    disputed: bool = False
     commit: str = ""
 
 

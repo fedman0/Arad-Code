@@ -405,7 +405,7 @@ _rn3.reconcile(_r3)
 _h_recheck = _st3.get_hypothesis(_r3, _h_human.id)
 check("human_confirmed + all stale evidence → needs_recheck",
       _h_recheck is not None and _h_recheck.status == "needs_recheck")
-check("needs_recheck → priority 0", _h_recheck is not None and _h_recheck.priority == 0)
+check("needs_recheck keeps priority (not zeroed)", _h_recheck is not None and _h_recheck.priority > 0)
 
 _d4, _st4, _r4, _rn4 = _fresh_reconcile_env()
 _h_human_rej = mk(entry_point="/unique-ep-hr", observable_impact="unique-hr-impact")
@@ -420,6 +420,89 @@ _rn4.reconcile(_r4)
 _h_human_rej_after = _st4.get_hypothesis(_r4, _h_human_rej.id)
 check("human rejected stays rejected even with fresh evidence",
       _h_human_rej_after is not None and _h_human_rej_after.status == "rejected")
+
+print("\n[reconcile v2.1.1]")
+
+
+def _fresh_r211_env():
+    d = Path(tempfile.mkdtemp())
+    (d / "handler.py").write_text(
+        "def handle():\n    if user.id != owner_id:\n        raise PermissionError\n    return data\n"
+    )
+    st = EvidenceStore(Path(tempfile.mkdtemp()) / "rec211.db")
+    r = str(d)
+    st.upsert_repo(r, "c1", [])
+    rn = SkillRunner(Config(api_key="d", db_path=str(Path(tempfile.mkdtemp()) / "t.db")), st, None)
+    return d, st, r, rn
+
+
+_d5, _st5, _r5, _rn5 = _fresh_r211_env()
+_h_same_commit_reject = mk(entry_point="/same-commit", observable_impact="oci1")
+_h_same_commit_reject.status = "rejected"
+_h_same_commit_reject.rejected_by = "model"
+_h_same_commit_reject.rejected_at_commit = "c1"
+_st5.save_hypothesis(_r5, _h_same_commit_reject)
+_ev5 = Evidence(hypothesis_id=_h_same_commit_reject.id, kind="code", description="d",
+                file_path="handler.py", line_start=2, line_end=3, snippet="x",
+                stale=False, analysis_quality=_struc_ev2, commit="c1")
+_st5.save_evidence(_r5, _ev5)
+_rn5.reconcile(_r5)
+_h5_after = _st5.get_hypothesis(_r5, _h_same_commit_reject.id)
+check("same-commit reject not re-opened (no new evidence)",
+      _h5_after is not None and _h5_after.status == "rejected")
+
+_d6, _st6, _r6, _rn6 = _fresh_r211_env()
+_h_ne_cwe_mismatch = mk(entry_point="/cwe-ep", observable_impact="cwe-oc", cwe=None)
+_h_ne_cwe_mismatch.status = "evidence_supported"
+_st6.save_hypothesis(_r6, _h_ne_cwe_mismatch)
+_ne_cwe = NegativeEvidence(
+    entry_point="/cwe-ep", safe_from="CWE-79", because="output encoding",
+    anchor_file="handler.py", anchor_line=2,
+    anchor_text="if user.id != owner_id:", commit="c1",
+)
+_st6.save_negative_evidence(_r6, _ne_cwe)
+_rn6.reconcile(_r6)
+_confs6 = _st6.list_all_conflicts(_r6)
+check("NE with null-CWE finding does not create contradiction",
+      not any(c.kind == "contradicting_claims" for c in _confs6))
+
+_d7, _st7, _r7, _rn7 = _fresh_r211_env()
+_h_ep_init = mk(entry_point="/init-ep", observable_impact="init-oc")
+_h_ep_init.status = "initial"
+_st7.save_hypothesis(_r7, _h_ep_init)
+_st7.upsert_coverage(_r7, CoverageItem(kind="entry_point", name="/init-ep", status="no_issue_found"))
+_rn7.reconcile(_r7)
+_cov7 = next((c for c in _st7.coverage_detail(_r7) if c["name"] == "/init-ep"), None)
+check("initial-only hypothesis gives needs_follow_up not reported",
+      _cov7 is not None and _cov7["status"] == "needs_follow_up")
+
+_d8, _st8, _r8, _rn8 = _fresh_r211_env()
+_h_ev_no_anchor = mk(entry_point="/no-anchor", observable_impact="nao")
+_h_ev_no_anchor.status = "evidence_supported"
+_st8.save_hypothesis(_r8, _h_ev_no_anchor)
+_ev_no_anchor = Evidence(hypothesis_id=_h_ev_no_anchor.id, kind="code", description="d",
+                         file_path="handler.py", line_start=2, line_end=3,
+                         snippet="x", stale=False, analysis_quality=_struc_ev2,
+                         anchor_text=None, commit="c1")
+_st8.save_evidence(_r8, _ev_no_anchor)
+_rn8.reconcile(_r8)
+_ev8_after = next((e for e in _st8.list_all_evidence_for_repo(_r8)
+                   if e.hypothesis_id == _h_ev_no_anchor.id), None)
+check("evidence without anchor stays unmodified by reconcile",
+      _ev8_after is not None and not _ev8_after.stale)
+
+_d9, _st9, _r9, _rn9 = _fresh_r211_env()
+_h_hc = mk(entry_point="/hc-profile", observable_impact="hc-prof-oc")
+_h_hc.status = "human_confirmed"
+_st9.save_hypothesis(_r9, _h_hc)
+_ev9 = Evidence(hypothesis_id=_h_hc.id, kind="code", description="fresh",
+                file_path="handler.py", line_start=2, line_end=3, snippet="x",
+                stale=False, analysis_quality=_struc_ev2, commit="c1")
+_st9.save_evidence(_r9, _ev9)
+_rn9.reconcile(_r9)
+_h9_after = _st9.get_hypothesis(_r9, _h_hc.id)
+check("human_confirmed not overridden by profile in reconcile",
+      _h9_after is not None and _h9_after.status == "human_confirmed")
 
 print("\n[resume]")
 rp = "/tmp/regress-resume"

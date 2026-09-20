@@ -221,6 +221,7 @@ class EvidenceStore:
                     h.rejected_by = "human"
                 elif prior.status == "refuted":
                     h.status = prior.status
+                    h.rejected_at_commit = prior.rejected_at_commit
                 h.uncertainty = prior.uncertainty + [u for u in h.uncertainty
                                                      if u not in prior.uncertainty]
         self.conn.execute(
@@ -246,7 +247,23 @@ class EvidenceStore:
         )
         self.conn.commit()
 
-    def upsert_coverage(self, repo_path: str, item: CoverageItem):
+    _COV_RANK: dict = {
+        "reported": 7, "provably_safe": 6, "needs_follow_up": 5,
+        "blocked": 4, "no_issue_found": 3, "ruled_out": 2,
+        "not_applicable": 1, "unseen": 0, "excluded": 0,
+    }
+
+    def upsert_coverage(self, repo_path: str, item: CoverageItem, force: bool = False):
+        if not force:
+            row = self.conn.execute(
+                "SELECT status FROM coverage WHERE repo_path=? AND kind=? AND name=?",
+                (repo_path, item.kind, item.name),
+            ).fetchone()
+            if row:
+                old_rank = self._COV_RANK.get(row["status"], 0)
+                new_rank = self._COV_RANK.get(item.status, 0)
+                if new_rank <= old_rank:
+                    return
         self.conn.execute(
             """INSERT INTO coverage (repo_path, kind, name, status, blocker, exclusion_reason)
                VALUES (?,?,?,?,?,?)
@@ -434,6 +451,32 @@ class EvidenceStore:
                VALUES (?,?,?,?,?,?,?)""",
             (c.id, repo_path, c.model_dump_json(), c.created_at, c.kind, c.severity, c.status)
         )
+        self.conn.commit()
+
+    def list_all_conflicts(self, repo_path: str) -> list[ConflictRecord]:
+        rows = self.conn.execute(
+            "SELECT data FROM conflicts WHERE repo_path=? ORDER BY created_at DESC",
+            (repo_path,),
+        ).fetchall()
+        return [ConflictRecord.model_validate_json(r["data"]) for r in rows]
+
+    def mark_negative_evidence_disputed(self, repo_path: str, ne_id: str) -> None:
+        self.conn.execute(
+            "UPDATE negative_evidence SET anchor_stale=anchor_stale WHERE id=? AND repo_path=?",
+            (ne_id, repo_path),
+        )
+        row = self.conn.execute(
+            "SELECT data FROM negative_evidence WHERE id=? AND repo_path=?",
+            (ne_id, repo_path),
+        ).fetchone()
+        if row:
+            import json as _json
+            d = _json.loads(row["data"])
+            d["disputed"] = True
+            self.conn.execute(
+                "UPDATE negative_evidence SET data=? WHERE id=? AND repo_path=?",
+                (_json.dumps(d), ne_id, repo_path),
+            )
         self.conn.commit()
 
     def list_conflicts(self, repo_path: str, status: str = "open") -> list[ConflictRecord]:

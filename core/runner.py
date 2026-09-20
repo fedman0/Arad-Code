@@ -862,7 +862,7 @@ def _inject_minimum_obligations(h: "Hypothesis") -> None:
 
 
 def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
-                   profile: "ProjectProfile") -> None:
+                   profile: "ProjectProfile", commit: str = "") -> None:
     if profile.is_empty():
         return
 
@@ -876,6 +876,7 @@ def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
         if suppression:
             h.status = "rejected"
             h.rejected_by = "profile"
+            h.rejected_at_commit = commit
             h.rejection_reason = (
                 f"suppressed by .llmsast.yaml: {suppression.reason} "
                 f"(expires {suppression.expires.isoformat()})"
@@ -1492,6 +1493,7 @@ class SkillRunner:
                 if h.id == hyp_id:
                     h.status = "rejected"
                     h.rejected_by = "model"
+                    h.rejected_at_commit = self._get_commit(repo_path)
                     h.rejection_reason = reason
                     h.rejection_condition = condition
                     h.rejection_controlling_evidence_ids = (
@@ -1788,7 +1790,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             # profile first: it sets exposure (which the gate reads) and can
             # reject outright, so running it after let an override of
             # exposure=unreachable still export
-            _apply_profile(h, ev_for_h, profile)
+            _apply_profile(h, ev_for_h, profile, commit=commit)
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
             h.priority = h.compute_priority()
 
@@ -2042,7 +2044,10 @@ When done, call finish() with:
         all_db_evidence = self._db.get_evidence_for_hypothesis(hyp.id)
         db_open_questions = self._db.list_open_questions(repo_path, status="open")
         hyp.status = _gate_hypothesis_status(hyp, all_db_evidence, all_db_conflicts, db_open_questions)
+        if hyp.status == "refuted":
+            hyp.rejected_at_commit = self._get_commit(repo_path)
         self._db.save_hypothesis(repo_path, hyp)
+        self.reconcile(repo_path)
 
         return verdict
 
@@ -2220,7 +2225,8 @@ When done, call finish() with:
             self._db.save_conflict(repo_path, c)
         return h.id
 
-    def _check_anchor_present(self, repo_path: str, ev: "Evidence") -> bool:
+    def _check_anchor_present(self, repo_path: str, ev: "Evidence") -> Optional[bool]:
+        """None = unverifiable (no usable anchor); True/False = anchor present/absent."""
         def _norm(t: str) -> str:
             return " ".join(t.split())
         target = self._resolve_path(repo_path, ev.file_path)
@@ -2233,7 +2239,7 @@ When done, call finish() with:
                 return False
             anchor_norm = _norm(ev.anchor_text or "")
             if not anchor_norm or len(anchor_norm) < _MIN_ANCHOR_LEN:
-                return ev.line_start <= total
+                return None
             s = ev.line_start - 1
             e = min(total, max(ev.line_end, ev.line_start))
             lo, hi = max(0, s - 10), min(total, e + 10)
@@ -2264,10 +2270,15 @@ When done, call finish() with:
             "contradictions_found": 0,
         }
 
+        current_commit = self._get_commit(repo_path)
+
+        # Fix 5: skip evidence without usable anchor (return None = unverifiable)
         all_ev = self._db.list_all_evidence_for_repo(repo_path)
         for ev in all_ev:
             was_stale = ev.stale
             now_present = self._check_anchor_present(repo_path, ev)
+            if now_present is None:
+                continue
             if was_stale and now_present:
                 ev.stale = False
                 self._db.save_evidence(repo_path, ev)
@@ -2303,23 +2314,38 @@ When done, call finish() with:
             all_h_ev = self._db.get_all_evidence_for_hypothesis(h.id)
             valid_ev = [e for e in all_h_ev if not e.stale]
 
+            # Fix 4: needs_recheck keeps the original priority (don't zero it)
             if h.status == "human_confirmed" and all_h_ev and all(e.stale for e in all_h_ev):
                 h.status = "needs_recheck"
-                h.priority = 0
                 summary["hypotheses_updated"] += 1
                 self._db.save_hypothesis(repo_path, h)
                 continue
 
             old_status = h.status
-            if h.status in ("rejected", "refuted") and h.rejected_by in ("model", "profile", None):
-                h.status = "initial"
+
+            # Fix 1: commit-gated re-open — only unlock model/profile rejections and
+            # refuted verdicts when new evidence from a different commit is present.
+            if h.status in ("rejected", "refuted") and h.rejected_by != "human":
+                if current_commit and h.rejected_at_commit == current_commit:
+                    # rejection is from this very commit — nothing new has arrived
+                    pass
+                else:
+                    ev_from_current = [
+                        e for e in all_h_ev
+                        if e.commit == current_commit and not e.stale
+                    ]
+                    if ev_from_current:
+                        h.status = "initial"
+
             conflicts = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
             _apply_quality_caps(h, valid_ev)
             _inject_minimum_obligations(h)
-            _apply_profile(h, valid_ev, profile)
+            # Fix 7: profile suppression must not override a human confirmation
+            if h.status != "human_confirmed":
+                _apply_profile(h, valid_ev, profile, commit=current_commit)
             h.status = _gate_hypothesis_status(h, valid_ev, conflicts, all_open_questions)
             h.priority = h.compute_priority()
-            if h.status in ("rejected", "refuted", "blocked", "needs_recheck"):
+            if h.status in ("rejected", "refuted", "blocked"):
                 h.priority = 0
             if h.status != old_status:
                 summary["hypotheses_updated"] += 1
@@ -2328,26 +2354,29 @@ When done, call finish() with:
         hypotheses = self._db.list_hypotheses(repo_path)
         ne_fresh = [ne for ne in self._db.list_negative_evidence(repo_path) if not ne.anchor_stale]
 
-        existing_contradiction_lefts: set[str] = set()
-        for c in self._db.list_conflicts(repo_path, "open"):
+        # Fix 2d: dedupe on (ne.id, h.id) across ALL conflicts (including resolved)
+        existing_contradiction_pairs: set[tuple[str, str]] = set()
+        for c in self._db.list_all_conflicts(repo_path):
             if c.kind == "contradicting_claims" and c.left.startswith("ne/"):
-                existing_contradiction_lefts.add(c.left)
+                existing_contradiction_pairs.add((c.left, c.right))
 
         for ne in ne_fresh:
             ne_ep = _norm_ep(ne.entry_point)
             ne_cwe = _normalise_cwe(ne.safe_from)
             ne_left = f"ne/{ne.id}"
-            if ne_left in existing_contradiction_lefts:
-                continue
             for h in hypotheses:
                 if h.status in ("rejected", "refuted", "blocked", "needs_recheck"):
+                    continue
+                if (ne_left, h.id) in existing_contradiction_pairs:
                     continue
                 h_ep = _norm_ep(h.entry_point.split("->")[0].strip().split(" (")[0].strip())
                 h_cwe = _normalise_cwe(h.cwe)
                 if h_ep != ne_ep:
                     continue
-                if ne_cwe and h_cwe and ne_cwe != h_cwe:
+                # Fix 2c: both CWEs must be non-null and equal; empty CWE = no match
+                if not (ne_cwe and h_cwe and ne_cwe == h_cwe):
                     continue
+                # Fix 2e: degrades_confidence, mark NE disputed
                 cf = ConflictRecord(
                     kind="contradicting_claims",
                     description=(
@@ -2356,10 +2385,11 @@ When done, call finish() with:
                     ),
                     left=ne_left,
                     right=h.id,
-                    severity="blocks_finding",
+                    severity="degrades_confidence",
                 )
                 self._db.save_conflict(repo_path, cf)
-                existing_contradiction_lefts.add(ne_left)
+                self._db.mark_negative_evidence_disputed(repo_path, ne.id)
+                existing_contradiction_pairs.add((ne_left, h.id))
                 summary["contradictions_found"] += 1
 
         coverage_items = self._db.coverage_detail(repo_path)
@@ -2377,12 +2407,16 @@ When done, call finish() with:
 
         for item in coverage_items:
             item_ep = _norm_ep(item["name"])
-            active = [h for h in h_by_ep.get(item_ep, [])
-                      if h.status in ("evidence_supported", "reproduced", "human_confirmed", "initial")]
+            # Fix 3: initial → needs_follow_up (not reported); only evidence-backed ≥ reported
+            active_supported = [h for h in h_by_ep.get(item_ep, [])
+                                 if h.status in ("evidence_supported", "reproduced", "human_confirmed")]
+            active_initial = [h for h in h_by_ep.get(item_ep, []) if h.status == "initial"]
             fresh_ne = ne_by_ep.get(item_ep, [])
             new_status = item["status"]
-            if active:
+            if active_supported:
                 new_status = "reported"
+            elif active_initial:
+                new_status = "needs_follow_up"
             elif fresh_ne:
                 new_status = "provably_safe"
             if new_status != item["status"]:
@@ -2391,7 +2425,7 @@ When done, call finish() with:
                     kind=item["kind"], name=item["name"], status=new_status,
                     blocker=item["blocker"], exclusion_reason=item["exclusion_reason"],
                 )
-                self._db.upsert_coverage(repo_path, cov)
+                self._db.upsert_coverage(repo_path, cov, force=True)
                 summary["coverage_updated"] += 1
 
         return summary
