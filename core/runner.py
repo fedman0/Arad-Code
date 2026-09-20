@@ -682,11 +682,11 @@ a finding through the gate."""
 
 
 _SEMANTIC_TOOLS = frozenset({
-    "trace_path", "get_code_snippet", "query_graph",
+    "trace_path", "query_graph",
 })
 _STRUCTURAL_TOOLS = frozenset({
     "parse_file_structure", "find_all_usages", "search_graph",
-    "search_code", "read_file", "run_semgrep",
+    "run_semgrep", "get_code_snippet",
 })
 _METHOD_ORDER = ("textual", "inferred", "structural", "semantic")
 
@@ -697,12 +697,16 @@ def _tool_base(name: str) -> str:
 
 
 def _cap_method_from_calls(method: str, called: frozenset[str]) -> str:
-    """Cap a claimed analysis method to what the actual tool calls support.
+    """Cap a claimed analysis method against the set of tool names called.
+
+    Used by tests. Production code uses _cap_method_per_evidence which is
+    stricter: semantic requires a matching per-evidence tool call, not just
+    any call in the run.
 
     semantic  → allowed only if a call-chain tool was used
-    structural → allowed only if a code-reading tool was used
+    structural → allowed only if a code-structure tool was used
     textual   → always allowed
-    inferred  → always allowed (peer/static inference, no code read required)
+    inferred  → always allowed
     """
     if method == "semantic" and not (called & _SEMANTIC_TOOLS):
         method = "structural"
@@ -722,6 +726,71 @@ def _extract_called_tools(messages: list[dict]) -> frozenset[str]:
             if raw:
                 names.add(_tool_base(raw))
     return frozenset(names)
+
+
+def _build_tool_call_index(messages: list[dict]) -> list[tuple[str, dict]]:
+    """Return list of (bare_tool_name, parsed_args) for every tool call in the run."""
+    index: list[tuple[str, dict]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            name = _tool_base(tc.get("function", {}).get("name", ""))
+            if not name:
+                continue
+            try:
+                args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+            except Exception:
+                args = {}
+            index.append((name, args))
+    return index
+
+
+def _args_match_evidence(args: dict, ev_file: str, ev_desc: str) -> bool:
+    """True if any string arg value references the evidence's file or subject."""
+    from pathlib import Path as _P
+    ev_base = _P(ev_file or "").stem.lower()
+    ev_file_l = (ev_file or "").lower()
+    haystack = ev_file_l + " " + (ev_desc or "").lower()
+    for v in args.values():
+        if not isinstance(v, str) or len(v) < 4:
+            continue
+        v_l = v.lower()
+        if v_l in haystack:
+            return True
+        if ev_base and len(ev_base) >= 4 and ev_base in v_l:
+            return True
+    return False
+
+
+def _cap_method_per_evidence(
+    method: str,
+    ev_file: str,
+    ev_desc: str,
+    tool_index: list[tuple[str, dict]],
+    run_tools: frozenset[str],
+) -> str:
+    """Per-evidence method cap.
+
+    semantic  — per-evidence: a _SEMANTIC_TOOLS call whose args mention
+                this evidence's file or description must exist.
+    structural — per-run: any structural tool must have been called at all
+                (a file read covers all evidence from that file).
+    textual   — always allowed.
+    inferred  — always allowed.
+    """
+    if method not in ("semantic", "structural"):
+        return method
+    if method == "semantic":
+        if not any(
+            name in _SEMANTIC_TOOLS and _args_match_evidence(args, ev_file, ev_desc)
+            for name, args in tool_index
+        ):
+            method = "structural"
+    if method == "structural":
+        if not (run_tools & (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS)):
+            method = "textual"
+    return method
 
 
 def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]") -> None:
@@ -1550,13 +1619,17 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         evidence_items, ev_conflicts = self._verify_evidence_items(repo_path, evidence_items)
         auto_conflicts.extend(ev_conflicts)
 
-        called_tools = _extract_called_tools(messages)
+        tool_index = _build_tool_call_index(messages)
+        run_tools = frozenset(name for name, _ in tool_index)
         for ev in evidence_items:
-            capped = _cap_method_from_calls(ev.analysis_quality.method, called_tools)
+            capped = _cap_method_per_evidence(
+                ev.analysis_quality.method, ev.file_path, ev.description,
+                tool_index, run_tools,
+            )
             if capped != ev.analysis_quality.method:
                 ev.analysis_quality.limitations.append(
                     f"method downgraded {ev.analysis_quality.method}→{capped}: "
-                    f"no supporting tool call found in this run"
+                    f"no matching tool call found for this evidence"
                 )
                 ev.analysis_quality.method = capped
 
@@ -2003,6 +2076,13 @@ When done, call finish() with:
             e_raw.setdefault("commit", commit)
             evidence.append(Evidence.model_validate(e_raw))
         evidence, ev_conflicts = self._verify_evidence_items(repo_path, evidence)
+        for e in evidence:
+            if e.analysis_quality.method == "semantic":
+                e.analysis_quality.method = "structural"
+                e.analysis_quality.limitations.append(
+                    "method capped to structural: tool-call history unavailable "
+                    "for workflow submissions"
+                )
         all_open_questions = self._db.list_open_questions(repo_path, "open")
         _apply_quality_caps(h, evidence)
         _inject_minimum_obligations(h)

@@ -267,7 +267,7 @@ class AradCodeApp(App):
                          model=_model or None, config_file=config or None)
         db = EvidenceStore(cfg.resolved_db())
         mcp = CodebaseMemoryClient(cfg)
-        mcp_manager = MCPManager.from_claude_config()
+        mcp_manager = MCPManager.from_claude_config(mcp_allow=cfg.mcp_allow)
         runner = SkillRunner(cfg, db, mcp, mcp_manager=mcp_manager)
         return cfg, db, mcp, runner
 

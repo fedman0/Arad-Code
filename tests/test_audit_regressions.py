@@ -17,6 +17,7 @@ from core.profile import load_profile
 from core.runner import (
     SkillRunner, _gate_hypothesis_status, _apply_profile,
     _cap_method_from_calls, _extract_called_tools,
+    _cap_method_per_evidence, _build_tool_call_index,
 )
 from core.sarif import build_sarif, _rule_id, _safe_uri
 
@@ -91,16 +92,24 @@ check("scoped blocker still blocks",
 print("\n[method cap from tool calls]")
 _no_tools: frozenset[str] = frozenset()
 _with_trace = frozenset({"trace_path"})
-_with_read = frozenset({"read_file"})
+_with_parse = frozenset({"parse_file_structure"})
+_with_snippet = frozenset({"get_code_snippet"})
 _with_grep = frozenset({"grep"})
+_with_read = frozenset({"read_file"})
 check("semantic with trace_path → semantic",
       _cap_method_from_calls("semantic", _with_trace) == "semantic")
-check("semantic without call-chain tool → structural",
-      _cap_method_from_calls("semantic", _with_read) == "structural")
+check("semantic without call-chain tool but with structural → structural",
+      _cap_method_from_calls("semantic", _with_parse) == "structural")
+check("semantic with only read_file → textual (read_file not in structural tools)",
+      _cap_method_from_calls("semantic", _with_read) == "textual")
 check("semantic with no tools → textual",
       _cap_method_from_calls("semantic", _no_tools) == "textual")
-check("structural with read_file → structural",
-      _cap_method_from_calls("structural", _with_read) == "structural")
+check("structural with parse_file_structure → structural",
+      _cap_method_from_calls("structural", _with_parse) == "structural")
+check("structural with get_code_snippet → structural",
+      _cap_method_from_calls("structural", _with_snippet) == "structural")
+check("structural with read_file only → textual (read_file not a structural tool)",
+      _cap_method_from_calls("structural", _with_read) == "textual")
 check("structural with grep only → textual",
       _cap_method_from_calls("structural", _with_grep) == "textual")
 check("structural with no tools → textual",
@@ -109,11 +118,14 @@ check("textual always passes",
       _cap_method_from_calls("textual", _no_tools) == "textual")
 check("inferred always passes",
       _cap_method_from_calls("inferred", _no_tools) == "inferred")
+
 _msgs = [
     {"role": "user", "content": "go"},
     {"role": "assistant", "tool_calls": [
-        {"function": {"name": "trace_path"}},
-        {"function": {"name": "mcp__codebase-memory-mcp__get_code_snippet"}},
+        {"function": {"name": "trace_path",
+                      "arguments": '{"function_name": "auth.login.handle"}'}},
+        {"function": {"name": "mcp__codebase-memory-mcp__get_code_snippet",
+                      "arguments": '{"qualified_name": "auth.login"}'}},
     ]},
     {"role": "assistant", "content": "done"},
 ]
@@ -121,6 +133,26 @@ _extracted = _extract_called_tools(_msgs)
 check("extracts bare name from plain tool", "trace_path" in _extracted)
 check("strips mcp prefix from mcp tool", "get_code_snippet" in _extracted)
 check("non-tool message ignored", "go" not in _extracted)
+
+_index = _build_tool_call_index(_msgs)
+check("index length matches tool calls", len(_index) == 2)
+check("index contains trace_path", any(n == "trace_path" for n, _ in _index))
+
+_run_tools = frozenset(n for n, _ in _index)
+check("per-evidence semantic match on file basename",
+      _cap_method_per_evidence("semantic", "src/auth/login.py", "", _index, _run_tools) == "semantic")
+check("per-evidence semantic no match → structural (structural tool present)",
+      _cap_method_per_evidence("semantic", "src/other/module.py", "", _index, _run_tools) == "structural")
+_no_index: list = []
+_no_run_tools: frozenset[str] = frozenset()
+check("per-evidence semantic no tools → textual",
+      _cap_method_per_evidence("semantic", "src/foo.py", "", _no_index, _no_run_tools) == "textual")
+check("per-evidence structural with structural tools → structural",
+      _cap_method_per_evidence("structural", "any.py", "", _no_index, _run_tools) == "structural")
+check("per-evidence structural no tools → textual",
+      _cap_method_per_evidence("structural", "any.py", "", _no_index, _no_run_tools) == "textual")
+check("per-evidence textual always passes",
+      _cap_method_per_evidence("textual", "any.py", "", _no_index, _no_run_tools) == "textual")
 
 print("\n[schema]")
 req = FINDINGS_SCHEMA["properties"]["hypotheses"]["items"]["required"]

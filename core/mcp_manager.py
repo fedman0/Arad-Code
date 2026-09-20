@@ -33,23 +33,28 @@ def _is_readonly_tool(name: str, annotations: Any = None) -> bool:
 
 
 class MCPManager:
-    def __init__(self, configs: dict):
+    def __init__(self, configs: dict, mcp_allow: dict | None = None):
         self._configs = configs
+        self._mcp_allow: dict[str, list[str]] = mcp_allow or {}
         self._sessions: dict[str, Any] = {}
         self._stacks: dict[str, AsyncExitStack] = {}
         self._tools_cache: dict[str, list] = {}
 
     @classmethod
-    def from_claude_config(cls, config_path: str = "~/.claude.json") -> "MCPManager":
+    def from_claude_config(
+        cls,
+        config_path: str = "~/.claude.json",
+        mcp_allow: dict | None = None,
+    ) -> "MCPManager":
         path = Path(config_path).expanduser()
         if not path.exists():
-            return cls({})
+            return cls({}, mcp_allow=mcp_allow)
         try:
             with open(path) as f:
                 data = json.load(f)
         except Exception:
-            return cls({})
-        return cls(data.get("mcpServers", {}))
+            return cls({}, mcp_allow=mcp_allow)
+        return cls(data.get("mcpServers", {}), mcp_allow=mcp_allow)
 
     async def _connect(self, name: str) -> None:
         if name in self._sessions:
@@ -117,7 +122,9 @@ class MCPManager:
                 if name not in self._tools_cache:
                     result = await self._sessions[name].list_tools()
                     self._tools_cache[name] = getattr(result, "tools", []) or []
-                allow_list: set[str] = set(cfg.get("mcp_allow") or [])
+                allow_list: set[str] = set(
+                    self._mcp_allow.get(name) or cfg.get("mcp_allow") or []
+                )
                 for tool in self._tools_cache[name]:
                     annotations = getattr(tool, "annotations", None)
                     if tool.name not in allow_list and not _is_readonly_tool(tool.name, annotations):

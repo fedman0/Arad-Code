@@ -19,6 +19,7 @@ class Config:
     temperature: float = 0.0
     profile_path: str = ""
     trust_repo_profile: bool = False
+    mcp_allow: dict = field(default_factory=dict)
 
     def resolved_db(self) -> Path:
         return Path(self.db_path).expanduser()
@@ -63,6 +64,7 @@ def load_config(
         temperature=data.get("temperature", 0.0),
         profile_path=data.get("profile_path", ""),
         trust_repo_profile=bool(data.get("trust_repo_profile", False)),
+        mcp_allow=data.get("mcp_allow", {}),
     )
 
     if not cfg.api_key:
