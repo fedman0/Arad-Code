@@ -154,6 +154,16 @@ check("per-evidence structural no tools → textual",
 check("per-evidence textual always passes",
       _cap_method_per_evidence("textual", "any.py", "", _no_index, _no_run_tools) == "textual")
 
+_enum_index = _build_tool_call_index([{"role": "assistant", "tool_calls": [
+    {"function": {"name": "trace_path",
+                  "arguments": '{"function_name": "unrelated", "mode": "calls", "direction": "both"}'}}
+]}])
+_enum_run = frozenset(n for n, _ in _enum_index)
+check("enum arg 'both' in desc does not trigger semantic match",
+      _cap_method_per_evidence("semantic", "foo.py", "handles both directions", _enum_index, _enum_run) == "structural")
+check("control key 'mode' value does not trigger structural match",
+      _cap_method_per_evidence("semantic", "calls.py", "mode something", _enum_index, _enum_run) == "structural")
+
 print("\n[schema]")
 req = FINDINGS_SCHEMA["properties"]["hypotheses"]["items"]["required"]
 for f in ("reachability", "input_control", "guard_coverage", "exposure"):

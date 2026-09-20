@@ -746,13 +746,25 @@ def _build_tool_call_index(messages: list[dict]) -> list[tuple[str, dict]]:
     return index
 
 
+_IDENTITY_ARG_KEYS = frozenset({
+    "function_name", "qualified_name", "query", "file_path",
+    "name_pattern", "symbol", "path",
+})
+
+
 def _args_match_evidence(args: dict, ev_file: str, ev_desc: str) -> bool:
-    """True if any string arg value references the evidence's file or subject."""
+    """True if any identity arg value references the evidence's file or subject.
+
+    Only _IDENTITY_ARG_KEYS are checked — control/enum args (mode, direction,
+    limit, etc.) are skipped so accidental substring matches don't fire.
+    """
     from pathlib import Path as _P
     ev_base = _P(ev_file or "").stem.lower()
     ev_file_l = (ev_file or "").lower()
     haystack = ev_file_l + " " + (ev_desc or "").lower()
-    for v in args.values():
+    for k, v in args.items():
+        if k not in _IDENTITY_ARG_KEYS:
+            continue
         if not isinstance(v, str) or len(v) < 4:
             continue
         v_l = v.lower()
