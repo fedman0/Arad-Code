@@ -13,6 +13,7 @@ from .models import (
     Hypothesis, Evidence, CoverageItem, EntryPoint, Guard,
     SkillResult, ValidationRun, FINDINGS_SCHEMA,
     FunctionSummary, OpenQuestion, ConflictRecord, AnalysisQuality, ReturnValueContract,
+    NegativeEvidence,
 )
 from .code_analysis import (
     parse_file_structure, find_all_usages, run_semgrep, list_dir, run_shell
@@ -641,6 +642,21 @@ def _gate_hypothesis_status(
 _QUALITY_CONF_CAP = {"textual": 4, "inferred": 3, "structural": 7, "semantic": 10}
 _MIN_ANCHOR_LEN = 12
 
+_NE_INSTRUCTION = """# Negative Evidence (proof of absence)
+
+For every entry point that has NO finding, record why it is safe using the
+`negative_evidence` array in your finish() call.  Each item requires:
+- `entry_point`: the route/handler you checked (e.g. "POST /orders/{id}/cancel")
+- `safe_from`: the CWE or bug class (e.g. "CWE-639")
+- `because`: one-line human reason (≤120 chars)
+- `anchor_file`, `anchor_line`, `anchor_text`: the exact line of code (≥10 chars)
+  that constitutes the guard — the same text must be present in the file.
+
+Only emit NE for entry points you actually read code for. An empty array is
+better than a fabricated one. The anchor is verified mechanically; if the text
+is not found at or near that line, the NE is marked stale automatically.
+"""
+
 # Injected into every skill prompt. Skills describe WHAT to look for; this
 # describes what a finding must carry to survive the gate. Kept here rather
 # than duplicated across 44 skill files so it cannot drift from the engine.
@@ -1048,6 +1064,48 @@ class SkillRunner:
                 ev.stale = True
             verified.append(ev)
         return verified, conflicts
+
+    def _verify_negative_evidence(
+        self, repo_path: str, items: list[NegativeEvidence]
+    ) -> list[NegativeEvidence]:
+        """Verify NE anchor_text exists at or near anchor_line. Marks stale if missing."""
+        def _norm(t: str) -> str:
+            return " ".join(t.split())
+
+        for ne in items:
+            target = self._resolve_path(repo_path, ne.anchor_file)
+            if target is None or not target.is_file():
+                ne.anchor_stale = True
+                continue
+            try:
+                lines = target.read_text(errors="replace").splitlines()
+                total = len(lines)
+                anchor_norm = _norm(ne.anchor_text)
+                if len(anchor_norm) < _MIN_ANCHOR_LEN:
+                    ne.anchor_stale = True
+                    continue
+                s = max(0, ne.anchor_line - 1)
+                # check in ±10-line window
+                lo, hi = max(0, s - 10), min(total, s + 11)
+                window = _norm("\n".join(lines[lo:hi]))
+                if anchor_norm not in window:
+                    ne.anchor_stale = True
+            except Exception:
+                ne.anchor_stale = True
+        return items
+
+    def check_negative_evidence_staleness(self, repo_path: str) -> list[NegativeEvidence]:
+        """Re-verify all stored NE anchors without LLM. Returns items that went stale."""
+        existing = self._db.list_negative_evidence(repo_path)
+        if not existing:
+            return []
+        self._verify_negative_evidence(repo_path, existing)
+        newly_stale: list[NegativeEvidence] = []
+        for ne in existing:
+            if ne.anchor_stale:
+                self._db.mark_negative_evidence_stale(repo_path, ne.id)
+                newly_stale.append(ne)
+        return newly_stale
 
     def _read_file(self, repo_path: str, file_path: str,
                    start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
@@ -1484,6 +1542,7 @@ class SkillRunner:
         extra_context: str = "",
         max_iterations: int = 30,
         verbose: bool = False,
+        negative_evidence: bool = False,
     ) -> SkillResult:
         skill_text = self._load_skill(skill_name)
         commit = self._get_commit(repo_path)
@@ -1495,7 +1554,7 @@ class SkillRunner:
 {skill_text}
 
 {OUTPUT_CONTRACT}
-
+{_NE_INSTRUCTION if negative_evidence else ""}
 # Known Context
 {known_context}
 {f"# Additional Context\n{extra_context}" if extra_context else ""}
@@ -1722,6 +1781,27 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         open_questions = findings.get("open_questions", []) + validation_errors
 
+        if negative_evidence:
+            ne_raw = findings.get("negative_evidence") or []
+            ne_items: list[NegativeEvidence] = []
+            for ne_data in ne_raw:
+                try:
+                    ne = NegativeEvidence(
+                        entry_point=ne_data["entry_point"],
+                        safe_from=ne_data["safe_from"],
+                        because=ne_data["because"],
+                        anchor_file=ne_data["anchor_file"],
+                        anchor_line=int(ne_data["anchor_line"]),
+                        anchor_text=ne_data["anchor_text"],
+                        commit=commit,
+                    )
+                    ne_items.append(ne)
+                except Exception:
+                    pass
+            self._verify_negative_evidence(repo_path, ne_items)
+            for ne in ne_items:
+                self._db.save_negative_evidence(repo_path, ne)
+
         result = SkillResult(
             skill_name=skill_name,
             repo_path=repo_path,
@@ -1742,7 +1822,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
     async def _run_skill_list(self, skills: list[str], repo_path: str,
                               verbose: bool, resume: bool,
-                              on_progress=None) -> list[SkillResult]:
+                              on_progress=None,
+                              negative_evidence: bool = False) -> list[SkillResult]:
         """Run skills, recording each completion so an interrupted scan can resume.
 
         A scan is many minutes of paid LLM calls; losing all of it to one Ctrl+C
@@ -1765,7 +1846,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     on_progress(name, "skipped", None)
                 continue
             try:
-                result = await self.run_skill(name, repo_path, verbose=verbose)
+                result = await self.run_skill(name, repo_path, verbose=verbose,
+                                             negative_evidence=negative_evidence)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 if on_progress:
                     on_progress(name, "interrupted", None)
@@ -1790,14 +1872,18 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         return names
 
     async def run_phase(self, phase: str, repo_path: str, verbose: bool = False,
-                        resume: bool = False, on_progress=None) -> list[SkillResult]:
+                        resume: bool = False, on_progress=None,
+                        negative_evidence: bool = False) -> list[SkillResult]:
         return await self._run_skill_list(
-            self._phase_skills(phase), repo_path, verbose, resume, on_progress)
+            self._phase_skills(phase), repo_path, verbose, resume, on_progress,
+            negative_evidence=negative_evidence)
 
     async def run_all(self, repo_path: str, verbose: bool = False,
-                      resume: bool = False, on_progress=None) -> list[SkillResult]:
+                      resume: bool = False, on_progress=None,
+                      negative_evidence: bool = False) -> list[SkillResult]:
         return await self._run_skill_list(
-            self._all_skills(), repo_path, verbose, resume, on_progress)
+            self._all_skills(), repo_path, verbose, resume, on_progress,
+            negative_evidence=negative_evidence)
 
     async def verify_hypothesis(self, hyp_id: str, repo_path: str,
                                  verbose: bool = False) -> dict:

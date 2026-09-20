@@ -8,6 +8,7 @@ from .models import (
     Hypothesis, Evidence, CoverageItem, ValidationRun,
     EntryPoint, Guard, SkillResult, ThreatModel,
     FunctionSummary, OpenQuestion, ConflictRecord, ReturnValueContract,
+    NegativeEvidence,
 )
 
 
@@ -154,6 +155,23 @@ class EvidenceStore:
             decided_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_triage_repo ON triage_decisions(repo_path);
+
+        CREATE TABLE IF NOT EXISTS negative_evidence (
+            id TEXT PRIMARY KEY,
+            repo_path TEXT NOT NULL,
+            entry_point TEXT NOT NULL,
+            safe_from TEXT NOT NULL,
+            because TEXT NOT NULL,
+            anchor_file TEXT NOT NULL,
+            anchor_line INTEGER NOT NULL,
+            anchor_text TEXT NOT NULL,
+            anchor_stale INTEGER DEFAULT 0,
+            commit_sha TEXT DEFAULT '',
+            created_at REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ne_repo ON negative_evidence(repo_path);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ne_ep_safe
+            ON negative_evidence(repo_path, entry_point, safe_from);
         """)
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(triage_decisions)")}
         if "fingerprint" not in cols:
@@ -593,6 +611,46 @@ class EvidenceStore:
                     impact="informational",
                 )
                 self.save_open_question(repo_path, oq)
+
+    def save_negative_evidence(self, repo_path: str, ne: NegativeEvidence) -> None:
+        import time
+        self.conn.execute(
+            """INSERT INTO negative_evidence
+               (id, repo_path, entry_point, safe_from, because,
+                anchor_file, anchor_line, anchor_text, anchor_stale, commit_sha, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(repo_path, entry_point, safe_from) DO UPDATE SET
+                 id=excluded.id,
+                 because=excluded.because,
+                 anchor_file=excluded.anchor_file,
+                 anchor_line=excluded.anchor_line,
+                 anchor_text=excluded.anchor_text,
+                 anchor_stale=excluded.anchor_stale,
+                 commit_sha=excluded.commit_sha""",
+            (ne.id, repo_path, ne.entry_point, ne.safe_from, ne.because,
+             ne.anchor_file, ne.anchor_line, ne.anchor_text,
+             int(ne.anchor_stale), ne.commit, time.time()),
+        )
+        self.conn.commit()
+
+    def list_negative_evidence(self, repo_path: str) -> list[NegativeEvidence]:
+        rows = self.conn.execute(
+            "SELECT * FROM negative_evidence WHERE repo_path=? ORDER BY entry_point, safe_from",
+            (repo_path,),
+        ).fetchall()
+        return [NegativeEvidence(
+            id=r["id"], entry_point=r["entry_point"], safe_from=r["safe_from"],
+            because=r["because"], anchor_file=r["anchor_file"],
+            anchor_line=r["anchor_line"], anchor_text=r["anchor_text"],
+            anchor_stale=bool(r["anchor_stale"]), commit=r["commit_sha"] or "",
+        ) for r in rows]
+
+    def mark_negative_evidence_stale(self, repo_path: str, ne_id: str) -> None:
+        self.conn.execute(
+            "UPDATE negative_evidence SET anchor_stale=1 WHERE id=? AND repo_path=?",
+            (ne_id, repo_path),
+        )
+        self.conn.commit()
 
     def close(self):
         self.conn.close()

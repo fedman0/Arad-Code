@@ -262,6 +262,18 @@ class Evidence(BaseModel):
     anchor_text: Optional[str] = None
 
 
+class NegativeEvidence(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    entry_point: str
+    safe_from: str
+    because: str
+    anchor_file: str
+    anchor_line: int
+    anchor_text: str
+    anchor_stale: bool = False
+    commit: str = ""
+
+
 class CoverageItem(BaseModel):
     kind: Literal["entry_point", "actor", "resource", "state_transition", "trust_boundary",
                   "sensitive_op", "error_path", "async_path", "environment"]
@@ -562,6 +574,29 @@ FINDINGS_SCHEMA = {
                     "ignored_at": {"type": "array", "items": {"type": "string"}},
                 }
             }
+        },
+    },
+    "negative_evidence": {
+        "type": "array",
+        "description": (
+            "Proof of absence: for each entry point with NO finding, "
+            "record the specific guard that makes it safe. "
+            "Only emit when explicitly instructed to collect negative evidence."
+        ),
+        "items": {
+            "type": "object",
+            "properties": {
+                "entry_point": {"type": "string"},
+                "safe_from": {"type": "string", "description": "CWE-ID or bug class"},
+                "because": {"type": "string", "description": "One-line reason, ≤120 chars"},
+                "anchor_file": {"type": "string"},
+                "anchor_line": {"type": "integer"},
+                "anchor_text": {"type": "string",
+                                "description": "Exact code text of the guard (≥10 chars)"},
+            },
+            "required": ["entry_point", "safe_from", "because",
+                         "anchor_file", "anchor_line", "anchor_text"],
+            "additionalProperties": False,
         },
     },
     "required": ["hypotheses", "coverage", "open_questions"]

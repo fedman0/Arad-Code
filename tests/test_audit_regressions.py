@@ -10,7 +10,7 @@ from core.config import Config
 from core.db import EvidenceStore
 from core.models import (
     AnalysisQuality, ConflictRecord, CoverageItem, EntryPoint, Evidence,
-    Guard, Hypothesis, OpenQuestion, ProofObligation, FINDINGS_SCHEMA,
+    Guard, Hypothesis, NegativeEvidence, OpenQuestion, ProofObligation, FINDINGS_SCHEMA,
 )
 from core.peer_analysis import find_deviations, deviation_to_hypothesis
 from core.profile import load_profile
@@ -302,6 +302,46 @@ rescanned = mk(entry_point=ha.entry_point, violated_invariant=ha.violated_invari
                observable_impact=ha.observable_impact)
 check("triage survives a rescan with a new id",
       (store.get_triage_decision(rescanned) or {}).get("decision") == "accept")
+
+print("\n[negative evidence]")
+_ne_dir = Path(tempfile.mkdtemp())
+(_ne_dir / "app.py").write_text("x = 1\nif order.owner_id != current_user.id:\n    raise\n")
+_ne_store = EvidenceStore(Path(tempfile.mkdtemp()) / "ne.db")
+_ne_repo = str(_ne_dir)
+_ne_store.upsert_repo(_ne_repo, "c1", [])
+_ne_runner = SkillRunner(Config(api_key="d", db_path=str(Path(tempfile.mkdtemp()) / "t.db")),
+                         _ne_store, None)
+
+_ne = NegativeEvidence(
+    entry_point="POST /orders/{id}/cancel",
+    safe_from="CWE-639",
+    because="ownership check at handler entry",
+    anchor_file="app.py",
+    anchor_line=2,
+    anchor_text="if order.owner_id != current_user.id:",
+)
+_ne_store.save_negative_evidence(_ne_repo, _ne)
+_loaded = _ne_store.list_negative_evidence(_ne_repo)
+check("NE round-trips through DB", len(_loaded) == 1 and _loaded[0].entry_point == _ne.entry_point)
+
+stale = _ne_runner.check_negative_evidence_staleness(_ne_repo)
+check("valid anchor is not stale", len(stale) == 0)
+
+_ne2 = NegativeEvidence(
+    entry_point="DELETE /orders/{id}",
+    safe_from="CWE-639",
+    because="ownership check",
+    anchor_file="app.py",
+    anchor_line=2,
+    anchor_text="if order.owner_id == current_user.id:",
+)
+_ne_store.save_negative_evidence(_ne_repo, _ne2)
+stale2 = _ne_runner.check_negative_evidence_staleness(_ne_repo)
+check("absent anchor text becomes stale", len(stale2) == 1)
+_stale_rec = next((n for n in _ne_store.list_negative_evidence(_ne_repo)
+                   if n.entry_point == "DELETE /orders/{id}"), None)
+check("stale is persisted in DB",
+      _stale_rec is not None and _stale_rec.anchor_stale is True)
 
 print("\n[resume]")
 rp = "/tmp/regress-resume"
