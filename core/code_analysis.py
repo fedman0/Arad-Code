@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 try:
     from tree_sitter import Language, Parser
-    from tree_sitter_languages import get_language, get_parser
+    from tree_sitter_language_pack import get_language, get_parser
     _HAS_TREE_SITTER = True
 except ImportError:
     _HAS_TREE_SITTER = False

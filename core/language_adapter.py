@@ -236,7 +236,7 @@ def get_adapter_for(file_path: str) -> LanguageAdapter:
     if ext not in _TREE_SITTER_EXTENSIONS:
         return TextualAdapter()
     try:
-        from tree_sitter_languages import get_parser as _  # noqa
+        from tree_sitter_language_pack import get_parser as _  # noqa
         return TreeSitterAdapter()
     except ImportError:
         return TextualAdapter()
@@ -245,7 +245,7 @@ def get_adapter_for(file_path: str) -> LanguageAdapter:
 def get_default_adapter() -> LanguageAdapter:
     """Return the best available adapter regardless of file type."""
     try:
-        from tree_sitter_languages import get_parser as _  # noqa
+        from tree_sitter_language_pack import get_parser as _  # noqa
         return TreeSitterAdapter()
     except ImportError:
         return TextualAdapter()

@@ -5,5 +5,5 @@ click>=8.0.0
 pyyaml>=6.0.0
 rich>=13.0.0
 aiofiles>=23.0.0
-tree-sitter>=0.21.0
-tree-sitter-languages>=1.10.0
+tree-sitter>=0.23.0
+tree-sitter-language-pack>=1.0.0
