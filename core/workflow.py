@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 _VOTE_COUNT = 3
 _VOTE_THRESHOLD = 2
 _VOTE_RETRIES = 2
+_PARALLEL_CONCURRENCY = 10
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -79,6 +80,7 @@ class WorkflowContext:
             for p in self._phases:
                 if p.name == name:
                     return p
+            raise ValueError(f"Unknown phase name {name!r}; declare it with ctx.phase() first")
         return self._current_phase
 
     async def phase(self, name: str, *, title: str = "", detail: str = "") -> PhaseInfo:
@@ -136,17 +138,19 @@ class WorkflowContext:
             self._emit("agent_error", {"record": rec, "error": str(exc)})
             return {"error": str(exc)}
 
-    async def parallel(self, tasks: list) -> list:
-        coros = []
-        for t in tasks:
-            if inspect.isawaitable(t):
-                coros.append(t)
-            elif callable(t):
-                r = t()
-                coros.append(r if inspect.isawaitable(r) else asyncio.sleep(0, result=r))
-            else:
-                coros.append(asyncio.sleep(0, result=t))
-        raw = await asyncio.gather(*coros, return_exceptions=True)
+    async def parallel(self, tasks: list, *, concurrency: int = _PARALLEL_CONCURRENCY) -> list:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _run(t):
+            async with sem:
+                if inspect.isawaitable(t):
+                    return await t
+                elif callable(t):
+                    r = t()
+                    return await r if inspect.isawaitable(r) else r
+                return t
+
+        raw = await asyncio.gather(*[_run(t) for t in tasks], return_exceptions=True)
         return [{"error": str(r)} if isinstance(r, BaseException) else r for r in raw]
 
     async def pipeline(self, items: list, *fns) -> list:
@@ -158,8 +162,9 @@ class WorkflowContext:
                 coros.append(r if inspect.isawaitable(r) else asyncio.sleep(0, result=r))
             raw = await asyncio.gather(*coros, return_exceptions=True)
             next_results = []
-            for r in raw:
+            for item, r in zip(results, raw):
                 if isinstance(r, BaseException):
+                    self._emit("pipeline_error", {"item": item, "error": str(r)})
                     continue
                 if isinstance(r, list):
                     next_results.extend(r)
@@ -180,7 +185,7 @@ class WorkflowContext:
         _repo = repo_path or self._repo_path
 
         if _round > _VOTE_RETRIES:
-            return {**finding, "confirmed": False, "verification_note": f"inconclusive after {_VOTE_RETRIES + 1} rounds"}
+            return {**finding, "confirmed": None, "verification_note": f"inconclusive after {_VOTE_RETRIES + 1} rounds"}
 
         perspective_notes = [
             "Try to REFUTE this finding. Look for missing checks, wrong assumptions, unreachable paths.",
@@ -188,11 +193,14 @@ class WorkflowContext:
             "Verify from the perspective of the attacker. What exact steps are needed? Are they realistic?",
         ]
 
+        finding_stripped = {k: v for k, v in finding.items()
+                            if k not in ("votes", "verification_note")}
+
         vote_prompts = [
             (
                 f"Adversarially verify this security finding ({i+1}/{_VOTE_COUNT}). "
                 f"{perspective_notes[i % len(perspective_notes)]}\n\n"
-                f"Finding:\n{finding}\n\n"
+                f"Finding:\n{finding_stripped}\n\n"
                 f"Answer with is_real (true/false), reasoning, confidence (1-10), "
                 f"and refutation (what would make this NOT a vulnerability)."
             )
@@ -228,6 +236,22 @@ class WorkflowContext:
             finding, runner=_runner, repo_path=_repo, _round=_round + 1
         )
 
+    async def submit_finding(
+        self,
+        hypothesis: dict,
+        evidence: Optional[list[dict]] = None,
+    ) -> str:
+        """Persist a workflow finding through the gate + quality caps + DB.
+
+        Workflow scripts MUST call this (not just verify_finding) to make
+        findings appear in reports. verify_finding only returns votes;
+        this method applies _apply_quality_caps, _gate_hypothesis_status,
+        and saves to the DB — the same path normal skills take.
+        """
+        if self._runner is None:
+            raise RuntimeError("submit_finding requires a runner — call ctx.bind(runner, repo_path) first")
+        return self._runner.submit_workflow_finding(self._repo_path, hypothesis, evidence)
+
     def phases(self) -> list[PhaseInfo]:
         return list(self._phases)
 
@@ -257,6 +281,7 @@ async def run_workflow_script(
     mod.pipeline = ctx.pipeline
     mod.phase = ctx.phase
     mod.verify_finding = ctx.verify_finding
+    mod.submit_finding = ctx.submit_finding
     mod.args = args
 
     spec.loader.exec_module(mod)

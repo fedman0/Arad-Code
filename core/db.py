@@ -160,6 +160,11 @@ class EvidenceStore:
             self.conn.execute("ALTER TABLE triage_decisions ADD COLUMN fingerprint TEXT")
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_triage_fp ON triage_decisions(fingerprint)")
+        hyp_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(hypotheses)")}
+        if "fingerprint" not in hyp_cols:
+            self.conn.execute("ALTER TABLE hypotheses ADD COLUMN fingerprint TEXT")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_hyp_fp ON hypotheses(repo_path, fingerprint)")
         self.conn.commit()
 
     def upsert_repo(self, path: str, commit: str, languages: list[str], notes: str = ""):
@@ -176,12 +181,24 @@ class EvidenceStore:
 
     def save_hypothesis(self, repo_path: str, h: Hypothesis):
         h.priority = h.compute_priority()
+        fp = h.fingerprint()
+        existing = self.conn.execute(
+            "SELECT id FROM hypotheses WHERE repo_path=? AND fingerprint=?",
+            (repo_path, fp),
+        ).fetchone()
+        if existing and existing["id"] != h.id:
+            old_id = h.id
+            h.id = existing["id"]
+            self.conn.execute(
+                "UPDATE evidence SET hypothesis_id=? WHERE hypothesis_id=?",
+                (h.id, old_id),
+            )
         self.conn.execute(
             """INSERT OR REPLACE INTO hypotheses
-               (id, repo_path, data, created_at, status, severity, confidence, priority, skill_source, commit_sha)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               (id, repo_path, data, created_at, status, severity, confidence, priority, skill_source, commit_sha, fingerprint)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (h.id, repo_path, h.model_dump_json(), h.created_at,
-             h.status, h.severity, h.confidence, h.priority, h.skill_source, h.commit)
+             h.status, h.severity, h.confidence, h.priority, h.skill_source, h.commit, fp)
         )
         self.conn.commit()
 

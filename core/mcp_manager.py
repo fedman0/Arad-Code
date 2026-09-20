@@ -1,8 +1,21 @@
 from __future__ import annotations
 import json
+import logging
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
+
+_READONLY_TOOL_PREFIXES = (
+    "read_", "list_", "get_", "search_", "grep_", "query_",
+    "describe_", "show_", "fetch_", "find_", "check_",
+)
+
+
+def _is_readonly_tool(name: str) -> bool:
+    n = name.lower()
+    return any(n.startswith(p) for p in _READONLY_TOOL_PREFIXES)
 
 
 class MCPManager:
@@ -54,7 +67,8 @@ class MCPManager:
                 await session.initialize()
                 self._sessions[name] = session
                 self._stacks[name] = stack
-            except Exception:
+            except Exception as exc:
+                _log.warning("MCP server %r failed to connect: %s", name, exc)
                 await stack.aclose()
 
         elif transport in ("sse", "http"):
@@ -75,7 +89,8 @@ class MCPManager:
                 await session.initialize()
                 self._sessions[name] = session
                 self._stacks[name] = stack
-            except Exception:
+            except Exception as exc:
+                _log.warning("MCP server %r failed to connect: %s", name, exc)
                 await stack.aclose()
 
     async def list_all_tools(self) -> list[dict]:
@@ -89,6 +104,8 @@ class MCPManager:
                     result = await self._sessions[name].list_tools()
                     self._tools_cache[name] = getattr(result, "tools", []) or []
                 for tool in self._tools_cache[name]:
+                    if not _is_readonly_tool(tool.name):
+                        continue
                     schema = getattr(tool, "inputSchema", None) or {"type": "object"}
                     all_tools.append({
                         "type": "function",
@@ -98,8 +115,8 @@ class MCPManager:
                             "parameters": schema,
                         },
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("MCP server %r: error listing tools: %s", name, exc)
         return all_tools
 
     async def call_tool(self, mcp_name: str, tool_name: str, args: dict) -> str:

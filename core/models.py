@@ -182,7 +182,7 @@ class Hypothesis(BaseModel):
     runtime_assumptions: Literal["verified", "env_dependent"] = "env_dependent"
     impact_basis: Literal["observed", "inferred"] = "inferred"
     validation: Literal["run", "not_run", "blocked"] = "not_run"
-    status: Literal["initial", "evidence_supported", "reproduced", "refuted", "rejected", "blocked"] = "initial"
+    status: Literal["initial", "evidence_supported", "reproduced", "human_confirmed", "refuted", "rejected", "blocked"] = "initial"
 
     severity: int = Field(ge=0, le=10, default=5)
     confidence: int = Field(ge=0, le=10, default=3)
@@ -233,10 +233,16 @@ class Hypothesis(BaseModel):
         and lose the human's triage decision. `observable_impact` is included
         because entry_point + invariant alone collapsed distinct findings on one
         endpoint (read-IDOR and delete-IDOR) onto a single decision.
+
+        Line numbers are stripped from entry_point so a reindented file does not
+        change the fingerprint and lose triage decisions.
         """
         import hashlib
-        basis = "|".join(_norm_fp(p) for p in
-                         (self.entry_point, self.violated_invariant, self.observable_impact))
+        import re as _re
+        ep_no_lineno = _re.sub(r':\d+$', '', self.entry_point or "")
+        ep_stable = _norm_fp(ep_no_lineno)
+        basis = "|".join([ep_stable, _norm_fp(self.violated_invariant)[:120],
+                          _norm_fp(self.observable_impact)[:80]])
         return hashlib.sha256(basis.encode()).hexdigest()[:16]
 
 

@@ -1,7 +1,7 @@
 """SARIF 2.1.0 export for SAST findings.
 
 Produces GitHub code-scanning compatible SARIF from Hypothesis + Evidence objects.
-Only hypotheses with status in {evidence_supported, reproduced} are included.
+Only hypotheses with status in {evidence_supported, reproduced, human_confirmed} are included.
 """
 from __future__ import annotations
 import hashlib
@@ -58,7 +58,7 @@ _CWE_TO_STRIDE: dict[str, tuple[str, ...]] = {
 }
 _DEFAULT_STRIDE: tuple[str, ...] = ("T", "I")
 
-_EMIT_STATUSES = {"evidence_supported", "reproduced"}
+_EMIT_STATUSES = {"evidence_supported", "reproduced", "human_confirmed"}
 
 
 def _int_severity(val: int) -> str:

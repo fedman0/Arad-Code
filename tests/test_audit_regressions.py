@@ -59,26 +59,31 @@ check("_load_skill works", len(runner._load_skill("map-entry-points")) > 100)
 check("_all_skills non-empty", len(runner._all_skills()) > 30)
 
 print("\n[gate]")
+_struc_ev = AnalysisQuality(method="structural")
 h = mk(reachability="proven",
        proof_obligations=[ProofObligation(question="q", status="verified")])
 check("promotes a clean hypothesis",
-      _gate_hypothesis_status(h, [ev(h)], []) == "evidence_supported")
+      _gate_hypothesis_status(h, [ev(h, analysis_quality=_struc_ev)], []) == "evidence_supported")
 check("blocks on unresolved obligation",
       _gate_hypothesis_status(mk(proof_obligations=[ProofObligation(question="q")]),
-                              [ev(h)], []) == "initial")
+                              [ev(h, analysis_quality=_struc_ev)], []) == "initial")
 check("blocked verdict is preserved",
-      _gate_hypothesis_status(mk(status="blocked"), [ev(h)], []) == "blocked")
+      _gate_hypothesis_status(mk(status="blocked"), [ev(h, analysis_quality=_struc_ev)], []) == "blocked")
 check("refuted verdict is preserved",
-      _gate_hypothesis_status(mk(status="refuted"), [ev(h)], []) == "refuted")
+      _gate_hypothesis_status(mk(status="refuted"), [ev(h, analysis_quality=_struc_ev)], []) == "refuted")
+check("human_confirmed is preserved by gate",
+      _gate_hypothesis_status(mk(status="human_confirmed"), [ev(h, analysis_quality=_struc_ev)], []) == "human_confirmed")
 check("unreachable never exports",
-      _gate_hypothesis_status(mk(exposure="unreachable"), [ev(h)], []) == "initial")
+      _gate_hypothesis_status(mk(exposure="unreachable"), [ev(h, analysis_quality=_struc_ev)], []) == "initial")
+check("textual-only evidence cannot reach evidence_supported",
+      _gate_hypothesis_status(h, [ev(h)], []) == "initial")
 h2 = mk()
 vague = OpenQuestion(question="v", impact="blocks_finding", affects_hypothesis_ids=[])
 check("unscoped blocker does not freeze the repo",
-      _gate_hypothesis_status(h2, [ev(h2)], [], [vague]) == "evidence_supported")
+      _gate_hypothesis_status(h2, [ev(h2, analysis_quality=_struc_ev)], [], [vague]) == "evidence_supported")
 scoped = OpenQuestion(question="s", impact="blocks_finding", affects_hypothesis_ids=[h2.id])
 check("scoped blocker still blocks",
-      _gate_hypothesis_status(h2, [ev(h2)], [], [scoped]) == "initial")
+      _gate_hypothesis_status(h2, [ev(h2, analysis_quality=_struc_ev)], [], [scoped]) == "initial")
 
 print("\n[schema]")
 req = FINDINGS_SCHEMA["properties"]["hypotheses"]["items"]["required"]
@@ -228,6 +233,11 @@ check("a different commit invalidates", completed_skills(rp, "c2") == set())
 check("non-git repo is never resumable", completed_skills(rp, "") == set())
 clear_run_state(rp)
 
-print()
-print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILURES: {FAILS}")
-sys.exit(1 if FAILS else 0)
+def test_all_regressions():
+    assert not FAILS, f"{len(FAILS)} FAILURES: {FAILS}"
+
+
+if __name__ == "__main__":
+    print()
+    print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILURES: {FAILS}")
+    sys.exit(1 if FAILS else 0)

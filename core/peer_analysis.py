@@ -114,7 +114,7 @@ class Deviation:
         nonconformers = n - 1 - len(self.peers_with_marker)
         # several members lacking the marker means it is merely common, not a
         # convention, so a straggler is not strong evidence
-        if nonconformers > 0:
+        if n > 1 and (nonconformers / (n - 1)) > MAX_NONCONFORMERS_RATIO:
             return 5
         if c >= 0.9 and n >= 8:
             return 8

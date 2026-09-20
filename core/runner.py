@@ -610,7 +610,7 @@ def _gate_hypothesis_status(
     be able to promote as well as demote — otherwise every hypothesis stays
     `initial` forever and nothing is ever exported.
     """
-    if h.status in ("rejected", "refuted", "blocked"):
+    if h.status in ("rejected", "refuted", "blocked", "human_confirmed"):
         return h.status
 
     valid_ev = [e for e in evidence if not e.stale]
@@ -630,6 +630,10 @@ def _gate_hypothesis_status(
         if (q.impact == "blocks_finding" and q.status == "open"
                 and h.id in q.affects_hypothesis_ids):
             return "initial"
+
+    strong_methods = {"structural", "semantic"}
+    if not any(e.analysis_quality.method in strong_methods for e in valid_ev):
+        return "initial"
 
     return "reproduced" if h.status == "reproduced" else "evidence_supported"
 
@@ -1019,7 +1023,9 @@ class SkillRunner:
                 rows = [h for h in rows if h.status == args["status"]]
             if args.get("min_priority") is not None:
                 rows = [h for h in rows if h.priority >= int(args["min_priority"])]
-            rows = rows[:int(args.get("limit") or 40)]
+            total_count = len(rows)
+            limit = int(args.get("limit") or 40)
+            rows = rows[:limit]
             if not rows:
                 return "No hypotheses match."
             out = []
@@ -1031,6 +1037,8 @@ class SkillRunner:
                     f"   invariant: {h.violated_invariant}\n"
                     f"   impact: {h.observable_impact}"
                 )
+            if len(rows) < total_count:
+                out.append(f"[showing {len(rows)}/{total_count} — use limit/status/min_priority to filter]")
             return "\n".join(out)
         if name == "get_hypothesis":
             h = self._db.get_hypothesis(repo_path, args.get("hypothesis_id", ""))
@@ -1067,7 +1075,18 @@ class SkillRunner:
             resolution = args.get("resolution", "")
             if not qid or not resolution:
                 return "question_id and resolution are both required."
+            q_obj = next((q for q in self._db.list_open_questions(repo_path, "open")
+                          if q.id == qid), None)
             ok = self._db.resolve_open_question(repo_path, qid, resolution, skill_name)
+            if ok and q_obj:
+                all_open_questions = self._db.list_open_questions(repo_path, "open")
+                for h_id in q_obj.affects_hypothesis_ids:
+                    h = self._db.get_hypothesis(repo_path, h_id)
+                    if h and h.status not in ("rejected", "refuted", "blocked", "human_confirmed"):
+                        ev_for_h = self._db.get_evidence_for_hypothesis(h.id)
+                        conf_for_h = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
+                        h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
+                        self._db.save_hypothesis(repo_path, h)
             return (f"Open question {qid} resolved." if ok
                     else f"No open question {qid!r} in this repository.")
         if name == "amend_hypothesis":
@@ -1089,11 +1108,18 @@ class SkillRunner:
                 changes.append(f"exposure {old}->{h.exposure}")
             for target in args.get("enables") or []:
                 if target not in h.enables:
+                    if self._db.get_hypothesis(repo_path, target) is None:
+                        return f"Cannot enable {target!r}: no such hypothesis in this repository."
                     h.enables.append(target)
                     changes.append(f"enables+={target}")
             if not changes:
                 return "Nothing to amend."
             h.uncertainty.append(f"amended by {skill_name}: {reason}")
+            ev_for_h = self._db.get_evidence_for_hypothesis(h.id)
+            _apply_quality_caps(h, ev_for_h)
+            conf_for_h = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
+            all_open_questions = self._db.list_open_questions(repo_path, "open")
+            h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
             h.priority = h.compute_priority()
             self._db.save_hypothesis(repo_path, h)
             return f"Amended {hyp_id}: {', '.join(changes)}."
@@ -1841,8 +1867,18 @@ When done, call finish() with:
                         end = content.rfind("}") + 1
                         if start >= 0 and end > start:
                             result = json.loads(content[start:end])
+                        else:
+                            import logging as _logging
+                            _logging.getLogger(__name__).warning(
+                                "run_prompt: model returned non-JSON text (len=%d); result will be empty dict",
+                                len(content),
+                            )
                     except Exception:
-                        result = content
+                        import logging as _logging
+                        _logging.getLogger(__name__).warning(
+                            "run_prompt: model response not parseable as JSON (len=%d); result will be empty dict",
+                            len(content),
+                        )
                 break
 
             finish_args = None
@@ -1860,11 +1896,15 @@ When done, call finish() with:
                     result_text = "Result recorded."
                 elif name.startswith("mcp__") and self._mcp_manager:
                     name_parts = name.split("__", 2)
-                    if len(name_parts) == 3:
-                        _, mcp_name, tool_name = name_parts
-                        result_text = await self._mcp_manager.call_tool(mcp_name, tool_name, args)
+                    if len(name_parts) != 3:
+                        result_text = f"Malformed MCP tool name (expected mcp__server__tool): {name}"
                     else:
-                        result_text = f"Invalid MCP tool name: {name}"
+                        _, mcp_name, tool_name = name_parts
+                        if "__" in mcp_name:
+                            result_text = (f"Ambiguous MCP server name contains '__': {mcp_name} — "
+                                           "rename the server in ~/.claude.json")
+                        else:
+                            result_text = await self._mcp_manager.call_tool(mcp_name, tool_name, args)
                 else:
                     result_text = await self._execute_tool(name, args, repo_path or ".")
 
@@ -1881,6 +1921,39 @@ When done, call finish() with:
                 break
 
         return result
+
+    def submit_workflow_finding(
+        self,
+        repo_path: str,
+        h_data: dict,
+        evidence_data: Optional[list[dict]] = None,
+    ) -> str:
+        """Route a workflow-originated finding through the same FP machine as skill findings.
+
+        Applies quality caps, minimum obligations, gate, and persists to DB.
+        Returns the (possibly merged) hypothesis id.
+        """
+        commit = self._db.get_commit(repo_path) or ""
+        h_data = dict(h_data)
+        h_data.setdefault("commit", commit)
+        if h_data.get("status") == "reproduced":
+            h_data["status"] = "evidence_supported"
+        h = Hypothesis.model_validate(h_data)
+        evidence: list[Evidence] = []
+        for e_raw in evidence_data or []:
+            e_raw = dict(e_raw)
+            e_raw.setdefault("hypothesis_id", h.id)
+            e_raw.setdefault("commit", commit)
+            evidence.append(Evidence.model_validate(e_raw))
+        all_open_questions = self._db.list_open_questions(repo_path, "open")
+        _apply_quality_caps(h, evidence)
+        _inject_minimum_obligations(h)
+        h.status = _gate_hypothesis_status(h, evidence, [], all_open_questions)
+        h.priority = h.compute_priority()
+        self._db.save_hypothesis(repo_path, h)
+        for e in evidence:
+            self._db.save_evidence(repo_path, e)
+        return h.id
 
     async def close(self) -> None:
         await self._mcp.close()

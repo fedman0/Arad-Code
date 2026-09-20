@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -100,12 +101,27 @@ def clear_run_state(repo_path: str) -> None:
         pass
 
 
+def _working_tree_hash(repo_path: str) -> str:
+    """Hash of uncommitted changes so a dirty tree invalidates the cache."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_path, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return ""
+        return hashlib.sha256(result.stdout.encode()).hexdigest()[:12]
+    except Exception:
+        return ""
+
+
 def mark_skill_done(repo_path: str, commit: str, skill_name: str) -> None:
     if not commit:
         return
     state = load_run_state(repo_path)
-    if state.get("commit") != commit:
-        state = {"commit": commit, "completed": []}
+    wt_hash = _working_tree_hash(repo_path)
+    if state.get("commit") != commit or state.get("wt_hash", "") != wt_hash:
+        state = {"commit": commit, "wt_hash": wt_hash, "completed": []}
     completed = state.setdefault("completed", [])
     if skill_name not in completed:
         completed.append(skill_name)
@@ -119,10 +135,14 @@ def completed_skills(repo_path: str, commit: str) -> set[str]:
     An empty commit means the target is not a git repo, so there is nothing to
     invalidate against — resuming would skip skills no matter how the files
     changed, so nothing is ever resumable.
+
+    A dirty working tree (uncommitted edits) also invalidates the cache so that
+    skills re-run after the developer changes code without committing.
     """
     if not commit:
         return set()
     state = load_run_state(repo_path)
-    if state.get("commit") != commit:
+    wt_hash = _working_tree_hash(repo_path)
+    if state.get("commit") != commit or state.get("wt_hash", "") != wt_hash:
         return set()
     return set(state.get("completed", []))
