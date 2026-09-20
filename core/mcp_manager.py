@@ -13,7 +13,21 @@ _READONLY_TOOL_PREFIXES = (
 )
 
 
-def _is_readonly_tool(name: str) -> bool:
+def _is_readonly_tool(name: str, annotations: Any = None) -> bool:
+    """Return True only if the tool is safe to expose to an LLM.
+
+    Priority:
+    1. If the server provided an MCP annotations object, trust readOnlyHint.
+       readOnlyHint=True → allow; readOnlyHint=False → deny; absent → fall through.
+    2. Fall back to prefix matching for servers that don't annotate.
+    3. Unannotated tools whose names don't match a read-only prefix are denied.
+    """
+    if annotations is not None:
+        hint = getattr(annotations, "readOnlyHint", None)
+        if hint is True:
+            return True
+        if hint is False:
+            return False
     n = name.lower()
     return any(n.startswith(p) for p in _READONLY_TOOL_PREFIXES)
 
@@ -103,8 +117,10 @@ class MCPManager:
                 if name not in self._tools_cache:
                     result = await self._sessions[name].list_tools()
                     self._tools_cache[name] = getattr(result, "tools", []) or []
+                allow_list: set[str] = set(cfg.get("mcp_allow") or [])
                 for tool in self._tools_cache[name]:
-                    if not _is_readonly_tool(tool.name):
+                    annotations = getattr(tool, "annotations", None)
+                    if tool.name not in allow_list and not _is_readonly_tool(tool.name, annotations):
                         continue
                     schema = getattr(tool, "inputSchema", None) or {"type": "object"}
                     all_tools.append({

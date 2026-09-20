@@ -799,6 +799,132 @@ class SkillRunner:
         except (ValueError, OSError):
             return None
 
+    def _verify_evidence_items(
+        self, repo_path: str, items: list[Evidence]
+    ) -> tuple[list[Evidence], list[ConflictRecord]]:
+        """Verify evidence file paths, line ranges, and anchor text.
+
+        Shared by run_skill and submit_workflow_finding so workflow findings
+        get the same integrity checks as skill findings.
+        Returns (verified_items, conflict_records).
+        """
+        def _norm(t: str) -> str:
+            return " ".join(t.split())
+
+        verified: list[Evidence] = []
+        conflicts: list[ConflictRecord] = []
+        for ev in items:
+            target = self._resolve_path(repo_path, ev.file_path)
+            if target is None or not target.is_file():
+                conflicts.append(ConflictRecord(
+                    kind="stale_reference",
+                    description=f"Evidence file does not exist: {ev.file_path}",
+                    left=f"evidence/{ev.id}",
+                    right=ev.file_path,
+                    severity="blocks_finding",
+                ))
+                ev.analysis_quality.limitations.append(f"file not found: {ev.file_path}")
+                ev.stale = True
+                verified.append(ev)
+                continue
+            try:
+                lines = target.read_text(errors="replace").splitlines()
+                total = len(lines)
+                if (ev.line_start < 1 or ev.line_start > total
+                        or ev.line_end < ev.line_start or ev.line_end > total):
+                    conflicts.append(ConflictRecord(
+                        kind="stale_reference",
+                        description=(
+                            f"Evidence line {ev.line_start} out of range "
+                            f"(file has {total} lines): {ev.file_path}"
+                        ),
+                        left=f"evidence/{ev.id}",
+                        right=f"{ev.file_path}:{ev.line_start}",
+                        severity="blocks_finding",
+                    ))
+                    ev.analysis_quality.limitations.append(
+                        f"line {ev.line_start} out of range (file has {total} lines)"
+                    )
+                    ev.stale = True
+                else:
+                    s = ev.line_start - 1
+                    e = min(total, max(ev.line_end, ev.line_start))
+                    ev.snippet = "\n".join(lines[s:e])
+                    anchor_norm = _norm(ev.anchor_text or "")
+                    if anchor_norm and len(anchor_norm) < _MIN_ANCHOR_LEN:
+                        ev.analysis_quality.limitations.append(
+                            f"anchor_text {ev.anchor_text!r:.30} too short to verify "
+                            f"(<{_MIN_ANCHOR_LEN} chars); treated as absent"
+                        )
+                        anchor_norm = ""
+                    if not anchor_norm:
+                        ev.analysis_quality.limitations.append(
+                            "no usable anchor_text; line range verified but content unverified"
+                        )
+                        if ev.analysis_quality.confidence == "high":
+                            ev.analysis_quality.confidence = "medium"
+                    elif anchor_norm in _norm(ev.snippet):
+                        pass
+                    else:
+                        lo = max(0, s - 10)
+                        hi = min(total, e + 10)
+                        hits = [li for li in range(lo + 1, hi + 1)
+                                if anchor_norm in _norm("\n".join(lines[li - 1:hi]))
+                                and anchor_norm not in _norm("\n".join(lines[li:hi]))]
+                        if len(hits) == 1:
+                            li = hits[0]
+                            span = max(1, ev.line_end - ev.line_start + 1)
+                            ev.line_start = li
+                            ev.line_end = min(total, li + span - 1)
+                            ev.snippet = "\n".join(lines[li - 1:ev.line_end])
+                            ev.analysis_quality.confidence = "medium"
+                            ev.analysis_quality.limitations.append(
+                                "anchor_text found outside claimed range; line numbers corrected"
+                            )
+                        elif hits:
+                            conflicts.append(ConflictRecord(
+                                kind="stale_reference",
+                                description=(
+                                    f"Evidence anchor_text is absent from the claimed range and "
+                                    f"ambiguous nearby ({len(hits)} matches) in {ev.file_path}"
+                                ),
+                                left=f"evidence/{ev.id}",
+                                right=f"{ev.file_path}:{ev.line_start}",
+                                severity="blocks_finding",
+                            ))
+                            ev.analysis_quality.limitations.append(
+                                f"anchor_text ambiguous ({len(hits)} matches within ±10 lines); "
+                                "citation unverified"
+                            )
+                            ev.stale = True
+                        else:
+                            conflicts.append(ConflictRecord(
+                                kind="stale_reference",
+                                description=(
+                                    f"Evidence anchor_text not found at or near claimed lines "
+                                    f"in {ev.file_path}:{ev.line_start}"
+                                ),
+                                left=f"evidence/{ev.id}",
+                                right=f"{ev.file_path}:{ev.line_start}",
+                                severity="blocks_finding",
+                            ))
+                            ev.analysis_quality.limitations.append(
+                                f"anchor_text {ev.anchor_text!r:.40} not found in ±10 lines"
+                            )
+                            ev.stale = True
+            except Exception as ex:
+                conflicts.append(ConflictRecord(
+                    kind="stale_reference",
+                    description=f"Evidence could not be read and stays unverified: {ev.file_path} ({ex})",
+                    left=f"evidence/{ev.id}",
+                    right=ev.file_path,
+                    severity="blocks_finding",
+                ))
+                ev.analysis_quality.limitations.append(f"read error, content unverified: {ex}")
+                ev.stale = True
+            verified.append(ev)
+        return verified, conflicts
+
     def _read_file(self, repo_path: str, file_path: str,
                    start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         target = self._resolve_path(repo_path, file_path)
@@ -1085,6 +1211,7 @@ class SkillRunner:
                     if h and h.status not in ("rejected", "refuted", "blocked", "human_confirmed"):
                         ev_for_h = self._db.get_evidence_for_hypothesis(h.id)
                         conf_for_h = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
+                        _inject_minimum_obligations(h)
                         h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
                         self._db.save_hypothesis(repo_path, h)
             return (f"Open question {qid} resolved." if ok
@@ -1117,6 +1244,7 @@ class SkillRunner:
             h.uncertainty.append(f"amended by {skill_name}: {reason}")
             ev_for_h = self._db.get_evidence_for_hypothesis(h.id)
             _apply_quality_caps(h, ev_for_h)
+            _inject_minimum_obligations(h)
             conf_for_h = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
             all_open_questions = self._db.list_open_questions(repo_path, "open")
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
@@ -1376,132 +1504,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"evidence[{i}] invalid: {ex}")
 
-        verified_evidence: list[Evidence] = []
-        for ev in evidence_items:
-            target = self._resolve_path(repo_path, ev.file_path)
-            if target is None or not target.is_file():
-                auto_conflicts.append(ConflictRecord(
-                    kind="stale_reference",
-                    description=f"Evidence file does not exist: {ev.file_path}",
-                    left=f"evidence/{ev.id}",
-                    right=ev.file_path,
-                    severity="blocks_finding",
-                ))
-                ev.analysis_quality.limitations.append(f"file not found: {ev.file_path}")
-                ev.stale = True
-                verified_evidence.append(ev)
-                continue
-            try:
-                lines = target.read_text(errors="replace").splitlines()
-                total = len(lines)
-                if (ev.line_start < 1 or ev.line_start > total
-                        or ev.line_end < ev.line_start or ev.line_end > total):
-                    auto_conflicts.append(ConflictRecord(
-                        kind="stale_reference",
-                        description=(
-                            f"Evidence line {ev.line_start} out of range "
-                            f"(file has {total} lines): {ev.file_path}"
-                        ),
-                        left=f"evidence/{ev.id}",
-                        right=f"{ev.file_path}:{ev.line_start}",
-                        severity="blocks_finding",
-                    ))
-                    ev.analysis_quality.limitations.append(
-                        f"line {ev.line_start} out of range (file has {total} lines)"
-                    )
-                    ev.stale = True
-                else:
-                    s = ev.line_start - 1
-                    e = min(total, max(ev.line_end, ev.line_start))
-                    ev.snippet = "\n".join(lines[s:e])
-                    # confirming the file has these lines is textual verification;
-                    # it must not upgrade what the model reported about its method
-                    def _norm(t: str) -> str:
-                        return " ".join(t.split())
-
-                    anchor_norm = _norm(ev.anchor_text or "")
-                    # a one-character anchor like ")" verifies nothing; treating it
-                    # as valid scored a junk anchor above honestly omitting one
-                    if anchor_norm and len(anchor_norm) < _MIN_ANCHOR_LEN:
-                        ev.analysis_quality.limitations.append(
-                            f"anchor_text {ev.anchor_text!r:.30} too short to verify "
-                            f"(<{_MIN_ANCHOR_LEN} chars); treated as absent"
-                        )
-                        anchor_norm = ""
-                    if not anchor_norm:
-                        ev.analysis_quality.limitations.append(
-                            "no usable anchor_text; line range verified but content unverified"
-                        )
-                        if ev.analysis_quality.confidence == "high":
-                            ev.analysis_quality.confidence = "medium"
-                    else:
-                        if anchor_norm in _norm(ev.snippet):
-                            pass
-                        else:
-                            lo = max(0, s - 10)
-                            hi = min(total, e + 10)
-                            # match over a sliding window, not per line, so a
-                            # multi-line anchor can match at all
-                            hits = [li for li in range(lo + 1, hi + 1)
-                                    if anchor_norm in _norm("\n".join(lines[li - 1:hi]))
-                                    and anchor_norm not in _norm("\n".join(lines[li:hi]))]
-                            if len(hits) == 1:
-                                li = hits[0]
-                                span = max(1, ev.line_end - ev.line_start + 1)
-                                ev.line_start = li
-                                ev.line_end = min(total, li + span - 1)
-                                ev.snippet = "\n".join(lines[li - 1:ev.line_end])
-                                ev.analysis_quality.confidence = "medium"
-                                ev.analysis_quality.limitations.append(
-                                    "anchor_text found outside claimed range; line numbers corrected"
-                                )
-                            elif hits:
-                                # the anchor is demonstrably absent from the cited
-                                # range, so the citation is wrong either way
-                                auto_conflicts.append(ConflictRecord(
-                                    kind="stale_reference",
-                                    description=(
-                                        f"Evidence anchor_text is absent from the claimed range and "
-                                        f"ambiguous nearby ({len(hits)} matches) in {ev.file_path}"
-                                    ),
-                                    left=f"evidence/{ev.id}",
-                                    right=f"{ev.file_path}:{ev.line_start}",
-                                    severity="blocks_finding",
-                                ))
-                                ev.analysis_quality.limitations.append(
-                                    f"anchor_text ambiguous ({len(hits)} matches within ±10 lines); "
-                                    "citation unverified"
-                                )
-                                ev.stale = True
-                            else:
-                                auto_conflicts.append(ConflictRecord(
-                                    kind="stale_reference",
-                                    description=(
-                                        f"Evidence anchor_text not found at or near claimed lines "
-                                        f"in {ev.file_path}:{ev.line_start}"
-                                    ),
-                                    left=f"evidence/{ev.id}",
-                                    right=f"{ev.file_path}:{ev.line_start}",
-                                    severity="blocks_finding",
-                                ))
-                                ev.analysis_quality.limitations.append(
-                                    f"anchor_text {ev.anchor_text!r:.40} not found in ±10 lines"
-                                )
-                                ev.stale = True
-            except Exception as ex:
-                # without marking it stale the model's unverified snippet
-                # survives and the gate promotes the finding on it
-                auto_conflicts.append(ConflictRecord(
-                    kind="stale_reference",
-                    description=f"Evidence could not be read and stays unverified: {ev.file_path} ({ex})",
-                    left=f"evidence/{ev.id}",
-                    right=ev.file_path,
-                    severity="blocks_finding",
-                ))
-                ev.analysis_quality.limitations.append(f"read error, content unverified: {ex}")
-                ev.stale = True
-            verified_evidence.append(ev)
-        evidence_items = verified_evidence
+        evidence_items, ev_conflicts = self._verify_evidence_items(repo_path, evidence_items)
+        auto_conflicts.extend(ev_conflicts)
 
         structured_questions: list[OpenQuestion] = []
         for sq_data in findings.get("structured_questions", []):
@@ -1945,14 +1949,19 @@ When done, call finish() with:
             e_raw.setdefault("hypothesis_id", h.id)
             e_raw.setdefault("commit", commit)
             evidence.append(Evidence.model_validate(e_raw))
+        evidence, ev_conflicts = self._verify_evidence_items(repo_path, evidence)
         all_open_questions = self._db.list_open_questions(repo_path, "open")
         _apply_quality_caps(h, evidence)
         _inject_minimum_obligations(h)
-        h.status = _gate_hypothesis_status(h, evidence, [], all_open_questions)
+        db_conflicts = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
+        all_conflicts = db_conflicts + ev_conflicts
+        h.status = _gate_hypothesis_status(h, evidence, all_conflicts, all_open_questions)
         h.priority = h.compute_priority()
         self._db.save_hypothesis(repo_path, h)
         for e in evidence:
             self._db.save_evidence(repo_path, e)
+        for c in ev_conflicts:
+            self._db.save_conflict(repo_path, c)
         return h.id
 
     async def close(self) -> None:

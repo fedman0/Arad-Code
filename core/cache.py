@@ -102,15 +102,31 @@ def clear_run_state(repo_path: str) -> None:
 
 
 def _working_tree_hash(repo_path: str) -> str:
-    """Hash of uncommitted changes so a dirty tree invalidates the cache."""
+    """Hash of uncommitted changes so a dirty tree invalidates the cache.
+
+    Uses `git diff HEAD` (actual content) rather than `git status --porcelain`
+    (only filenames) so that editing a file twice produces different hashes.
+    Falls back to porcelain output if diff fails (e.g. empty repo with no HEAD).
+    """
     try:
-        result = subprocess.run(
+        diff = subprocess.run(
+            ["git", "-C", repo_path, "diff", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if diff.returncode == 0:
+            porcelain = subprocess.run(
+                ["git", "-C", repo_path, "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5,
+            )
+            combined = diff.stdout + porcelain.stdout
+            return hashlib.sha256(combined.encode()).hexdigest()[:12]
+        porcelain = subprocess.run(
             ["git", "-C", repo_path, "status", "--porcelain"],
             capture_output=True, text=True, timeout=5,
         )
-        if result.returncode != 0:
+        if porcelain.returncode != 0:
             return ""
-        return hashlib.sha256(result.stdout.encode()).hexdigest()[:12]
+        return hashlib.sha256(porcelain.stdout.encode()).hexdigest()[:12]
     except Exception:
         return ""
 

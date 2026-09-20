@@ -193,6 +193,13 @@ class EvidenceStore:
                 "UPDATE evidence SET hypothesis_id=? WHERE hypothesis_id=?",
                 (h.id, old_id),
             )
+            prior = self.get_hypothesis(repo_path, h.id)
+            if prior and prior.status in ("rejected", "refuted", "human_confirmed"):
+                h.status = prior.status
+                if prior.status == "rejected" and prior.rejection_reason:
+                    h.rejection_reason = prior.rejection_reason
+                h.uncertainty = prior.uncertainty + [u for u in h.uncertainty
+                                                     if u not in prior.uncertainty]
         self.conn.execute(
             """INSERT OR REPLACE INTO hypotheses
                (id, repo_path, data, created_at, status, severity, confidence, priority, skill_source, commit_sha, fingerprint)
