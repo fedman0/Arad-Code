@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import sqlite3
 import json
 from pathlib import Path
@@ -15,6 +16,9 @@ class EvidenceStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path))
         self.conn.row_factory = sqlite3.Row
+        # two concurrent pentest invocations on one store lost updates
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
     def _init_schema(self):
@@ -74,14 +78,20 @@ class EvidenceStore:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             repo_path TEXT,
             data TEXT NOT NULL,
-            commit_sha TEXT
+            commit_sha TEXT,
+            handler_qn TEXT,
+            path TEXT,
+            UNIQUE(repo_path, handler_qn, path)
         );
 
         CREATE TABLE IF NOT EXISTS guards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             repo_path TEXT,
             data TEXT NOT NULL,
-            commit_sha TEXT
+            commit_sha TEXT,
+            location_qn TEXT,
+            line INTEGER,
+            UNIQUE(repo_path, location_qn, line)
         );
 
         CREATE TABLE IF NOT EXISTS threat_models (
@@ -201,16 +211,24 @@ class EvidenceStore:
         self.conn.commit()
 
     def save_entry_point(self, repo_path: str, ep: EntryPoint, commit: str):
+        # without the conflict clause a second p1 run duplicated every row, which
+        # inflated peer cluster sizes and dragged conformity toward the cutoff
         self.conn.execute(
-            "INSERT INTO entry_points (repo_path, data, commit_sha) VALUES (?,?,?)",
-            (repo_path, ep.model_dump_json(), commit)
+            """INSERT INTO entry_points (repo_path, data, commit_sha, handler_qn, path)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(repo_path, handler_qn, path) DO UPDATE SET
+                 data=excluded.data, commit_sha=excluded.commit_sha""",
+            (repo_path, ep.model_dump_json(), commit, ep.handler_qn, ep.path)
         )
         self.conn.commit()
 
     def save_guard(self, repo_path: str, g: Guard, commit: str):
         self.conn.execute(
-            "INSERT INTO guards (repo_path, data, commit_sha) VALUES (?,?,?)",
-            (repo_path, g.model_dump_json(), commit)
+            """INSERT INTO guards (repo_path, data, commit_sha, location_qn, line)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(repo_path, location_qn, line) DO UPDATE SET
+                 data=excluded.data, commit_sha=excluded.commit_sha""",
+            (repo_path, g.model_dump_json(), commit, g.location_qn, g.line)
         )
         self.conn.commit()
 
@@ -349,8 +367,8 @@ class EvidenceStore:
         q.resolved_by = resolved_by
         q.resolution_hint = resolution
         self.conn.execute(
-            "UPDATE open_questions SET data=?, status=? WHERE id=?",
-            (q.model_dump_json(), q.status, question_id)
+            "UPDATE open_questions SET data=?, status=? WHERE id=? AND repo_path=?",
+            (q.model_dump_json(), q.status, question_id, repo_path)
         )
         self.conn.commit()
         return True
@@ -417,12 +435,27 @@ class EvidenceStore:
         ).fetchall()
         return [Evidence.model_validate_json(r["data"]) for r in rows]
 
-    def get_conflicts_for_hypothesis(self, hypothesis_id: str) -> list[ConflictRecord]:
-        rows = self.conn.execute(
-            "SELECT data FROM conflicts WHERE data LIKE ? AND status='open'",
-            (f'%{hypothesis_id}%',)
-        ).fetchall()
-        return [ConflictRecord.model_validate_json(r["data"]) for r in rows]
+    def get_conflicts_for_hypothesis(self, hypothesis_id: str,
+                                     repo_path: Optional[str] = None) -> list[ConflictRecord]:
+        # the old LIKE over the whole blob had no repo filter and matched an
+        # 8-hex id inside longer hex tokens, letting one repo's conflict block
+        # an unrelated finding in another
+        if repo_path:
+            rows = self.conn.execute(
+                "SELECT data FROM conflicts WHERE repo_path=? AND status='open'",
+                (repo_path,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT data FROM conflicts WHERE status='open'"
+            ).fetchall()
+        pattern = re.compile(rf"\b{re.escape(hypothesis_id)}\b")
+        out = []
+        for r in rows:
+            c = ConflictRecord.model_validate_json(r["data"])
+            if (hypothesis_id in (c.left, c.right)) or pattern.search(c.description):
+                out.append(c)
+        return out
 
     def mark_stale_by_commit(self, repo_path: str, old_commit: str):
         self.conn.execute(

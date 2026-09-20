@@ -92,7 +92,11 @@ def _rule_id(h: Hypothesis) -> str:
     cwe = _normalise_cwe(h.cwe)
     if cwe:
         return cwe
-    return _slugify(h.violated_invariant)
+    # the slug is truncated to 80 chars, so two long invariants sharing a prefix
+    # collapsed into one rule and inherited the first one's severity and level
+    slug = _slugify(h.violated_invariant)
+    digest = hashlib.sha256(h.violated_invariant.encode()).hexdigest()[:8]
+    return f"{slug}-{digest}"
 
 
 def _security_severity(h: Hypothesis) -> str:
@@ -106,9 +110,16 @@ def _fingerprint(rule_id: str, file_uri: str, snippet: str) -> str:
 
 
 def _safe_uri(raw: str) -> Optional[str]:
-    if not raw or ".." in raw or raw.startswith("/"):
+    if not raw:
         return None
-    return raw.replace("\\", "/")
+    uri = raw.replace("\\", "/")
+    while uri.startswith("./"):
+        uri = uri[2:]
+    while "//" in uri:
+        uri = uri.replace("//", "/")
+    if not uri or uri.startswith("/") or ".." in uri.split("/"):
+        return None
+    return uri
 
 
 def _build_rule(rule_id: str, h: Hypothesis) -> dict[str, Any]:
@@ -137,22 +148,33 @@ def _build_rule(rule_id: str, h: Hypothesis) -> dict[str, Any]:
     return rule
 
 
-def _build_locations(evidence_for_hyp: list[Evidence]) -> list[dict[str, Any]]:
+def _build_locations(
+    evidence_for_hyp: list[Evidence],
+) -> tuple[list[dict[str, Any]], list[Evidence]]:
+    """Return locations alongside the evidence each one came from.
+
+    The fingerprint has to hash the snippet belonging to the location it
+    describes; pairing locations[0] with evidence[0] silently mismatched
+    whenever an earlier evidence item had an unusable path.
+    """
     locations: list[dict[str, Any]] = []
+    used: list[Evidence] = []
     for ev in evidence_for_hyp:
         uri = _safe_uri(ev.file_path)
         if not uri:
             continue
+        start = max(1, ev.line_start)
         locations.append({
             "physicalLocation": {
                 "artifactLocation": {"uri": uri, "uriBaseId": "%SRCROOT%"},
                 "region": {
-                    "startLine": max(1, ev.line_start),
-                    "endLine": max(1, ev.line_end),
+                    "startLine": start,
+                    "endLine": max(start, ev.line_end),
                 },
             },
         })
-    return locations
+        used.append(ev)
+    return locations, used
 
 
 def _synthetic_location() -> dict[str, Any]:
@@ -189,7 +211,7 @@ def build_sarif(
             rules_by_id[rule_id] = _build_rule(rule_id, h)
 
         ev_list = evidence_by_hyp.get(h.id, [])
-        locations = _build_locations(ev_list)
+        locations, located_evidence = _build_locations(ev_list)
         is_synthetic = not locations
         if is_synthetic:
             locations = [_synthetic_location()]
@@ -223,12 +245,15 @@ def build_sarif(
         if is_synthetic:
             result["properties"]["synthetic_location"] = True
 
-        if locations and not is_synthetic:
-            loc = locations[0]
-            uri = loc.get("physicalLocation", {}).get("artifactLocation", {}).get("uri", "")
-            snippet = ev_list[0].snippet if ev_list else ""
-            fp = _fingerprint(rule_id, uri, snippet)
-            result["partialFingerprints"] = {"primaryLocationLineHash": fp}
+        if not is_synthetic:
+            uri = (locations[0].get("physicalLocation", {})
+                   .get("artifactLocation", {}).get("uri", ""))
+            fp = _fingerprint(rule_id, uri, located_evidence[0].snippet)
+        else:
+            # a finding with no usable location still needs a stable identity,
+            # or code scanning reopens it as a new alert on every run
+            fp = _fingerprint(rule_id, "", f"{h.entry_point}|{h.violated_invariant}")
+        result["partialFingerprints"] = {"primaryLocationLineHash": fp}
 
         results.append(result)
 

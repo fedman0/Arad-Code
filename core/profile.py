@@ -65,15 +65,29 @@ class ProjectProfile:
     source_path: Optional[Path] = None
 
     def is_empty(self) -> bool:
+        # expired/rejected entries must count: a profile whose suppressions have
+        # all expired would otherwise drop the "these no longer apply" notice,
+        # which is exactly when the anti-rot warning matters
         return not (self.sanitizers or self.auth_decorators or self.auth_middleware
-                    or self.trusted_sources or self.exposure_overrides or self.suppressions)
+                    or self.trusted_sources or self.exposure_overrides
+                    or self.suppressions or self.expired_suppressions
+                    or self.rejected_suppressions)
 
     def auth_markers(self) -> list[str]:
         return self.auth_decorators + self.auth_middleware
 
     def exposure_for(self, entry_path: str) -> Optional[str]:
+        # entry_point is formatted "GET /admin/users -> handler.qn", so an
+        # anchored pattern like "/admin/*" never matched and the feature was dead
+        haystack = entry_path or ""
         for pattern, exposure in self.exposure_overrides.items():
-            if fnmatch.fnmatch(entry_path or "", pattern):
+            candidates = {pattern}
+            if not pattern.startswith("*"):
+                candidates.add(f"*{pattern}")
+            if not pattern.endswith("*"):
+                candidates.add(f"{pattern}*")
+                candidates.add(f"*{pattern}*")
+            if any(fnmatch.fnmatch(haystack, c) for c in candidates):
                 return exposure
         return None
 
@@ -88,6 +102,18 @@ class ProjectProfile:
         return [s for s in self.sanitizers if cwe and cwe.upper() in
                 [n.upper() for n in s.neutralizes]]
 
+    @staticmethod
+    def _safe(text: str, limit: int = 200) -> str:
+        """Flatten a profile value before it is interpolated into the prompt.
+
+        Values are written by whoever owns the repo, not necessarily the
+        operator, and a multi-line `reason` could otherwise open its own
+        `# Skill Contract` section and issue instructions to the model.
+        """
+        flat = " ".join(str(text or "").split())
+        flat = flat.replace("#", "").replace("`", "'")
+        return flat[:limit]
+
     def to_prompt(self) -> str:
         """Render the profile for injection into the skill prompt.
 
@@ -101,9 +127,9 @@ class ProjectProfile:
         if self.auth_decorators or self.auth_middleware:
             lines = []
             if self.auth_decorators:
-                lines.append(f"  decorators: {', '.join(self.auth_decorators)}")
+                lines.append("  decorators: " + ", ".join(self._safe(d, 80) for d in self.auth_decorators))
             if self.auth_middleware:
-                lines.append(f"  middleware: {', '.join(self.auth_middleware)}")
+                lines.append("  middleware: " + ", ".join(self._safe(m, 80) for m in self.auth_middleware))
             parts.append(
                 "These markers ARE valid authorization. An entry point carrying one is "
                 "authenticated — do not report it as missing auth:\n" + "\n".join(lines)
@@ -113,7 +139,9 @@ class ProjectProfile:
             lines = []
             for s in self.sanitizers:
                 completeness = "complete" if s.complete else "partial (still verify context)"
-                lines.append(f"  {s.qn} neutralizes {', '.join(s.neutralizes)} — {completeness}")
+                lines.append(f"  {self._safe(s.qn, 120)} neutralizes "
+                             + ", ".join(self._safe(n, 20) for n in s.neutralizes)
+                             + f" — {completeness}")
             parts.append(
                 "These functions are verified sanitizers. Data passing through a complete "
                 "sanitizer is NOT tainted for the listed CWEs:\n" + "\n".join(lines)
@@ -123,24 +151,27 @@ class ProjectProfile:
             parts.append(
                 "These input sources are trusted by organizational policy — do not treat "
                 "them as attacker-controlled:\n" +
-                "\n".join(f"  {t}" for t in self.trusted_sources)
+                "\n".join(f"  {self._safe(t)}" for t in self.trusted_sources)
             )
 
         if self.exposure_overrides:
             parts.append(
                 "Exposure overrides — use these values instead of inferring exposure:\n" +
-                "\n".join(f"  {p} -> {e}" for p, e in self.exposure_overrides.items())
+                "\n".join(f"  {self._safe(p, 120)} -> {e}"
+                          for p, e in self.exposure_overrides.items())
             )
 
         if self.suppressions:
-            lines = [f"  {s.rule} in {s.path} — {s.reason} (expires {s.expires.isoformat()})"
+            lines = [f"  {self._safe(s.rule, 60)} in {self._safe(s.path, 80)} — "
+                     f"{self._safe(s.reason)} (expires {s.expires.isoformat()})"
                      for s in self.suppressions]
             parts.append(
                 "Known-accepted risks. Do not raise these as findings:\n" + "\n".join(lines)
             )
 
         if self.expired_suppressions:
-            lines = [f"  {s.rule} in {s.path} (expired {s.expires.isoformat()})"
+            lines = [f"  {self._safe(s.rule, 60)} in {self._safe(s.path, 80)} "
+                     f"(expired {s.expires.isoformat()})"
                      for s in self.expired_suppressions]
             parts.append(
                 "These suppressions EXPIRED and are no longer in effect — analyze these "
@@ -258,6 +289,12 @@ def load_profile(repo_path: str | Path, today: Optional[date] = None, *,
             continue
         if expires is None:
             profile.rejected_suppressions.append(f"{label}: missing or malformed 'expires' (need YYYY-MM-DD)")
+            continue
+        if rule == "*" and path_glob in ("**", "*"):
+            profile.rejected_suppressions.append(
+                f"{label}: refuses to suppress every rule in every file; "
+                "scope the rule or the path"
+            )
             continue
         suppression = Suppression(rule=rule, path=path_glob, reason=reason, expires=expires)
         if suppression.is_expired(today):

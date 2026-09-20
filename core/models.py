@@ -228,11 +228,15 @@ class Hypothesis(BaseModel):
         """Identity that survives a rescan, for triage and dedup.
 
         `id` is a fresh uuid every run, so anything keyed on it is orphaned by
-        the next scan.
+        the next scan. `cwe` is deliberately excluded: it is optional, so a run
+        that omits it would produce a different fingerprint for the same finding
+        and lose the human's triage decision. `observable_impact` is included
+        because entry_point + invariant alone collapsed distinct findings on one
+        endpoint (read-IDOR and delete-IDOR) onto a single decision.
         """
         import hashlib
         basis = "|".join(_norm_fp(p) for p in
-                         (self.entry_point, self.violated_invariant, self.cwe or ""))
+                         (self.entry_point, self.violated_invariant, self.observable_impact))
         return hashlib.sha256(basis.encode()).hexdigest()[:16]
 
 
@@ -328,8 +332,12 @@ FINDINGS_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
+                # reachability/input_control/guard_coverage/exposure drive the gate:
+                # when omitted they default to "unknown", the engine injects
+                # unresolved obligations, and the finding can never be exported
                 "required": ["actor", "capability", "entry_point", "security_boundary",
-                             "violated_invariant", "observable_impact", "severity", "confidence"],
+                             "violated_invariant", "observable_impact", "severity", "confidence",
+                             "reachability", "input_control", "guard_coverage", "exposure"],
                 "properties": {
                     "actor": {"type": "string"},
                     "capability": {"type": "string"},
@@ -406,11 +414,13 @@ FINDINGS_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["kind", "description", "file_path", "line_start", "line_end", "snippet"],
+                "required": ["kind", "description", "file_path", "line_start", "line_end",
+                             "snippet", "hypothesis_index"],
                 "properties": {
                     "hypothesis_index": {
                         "type": "integer",
-                        "description": "0-based index into the hypotheses array this evidence supports"
+                        "description": "0-based index into the hypotheses array this evidence supports. "
+                                       "REQUIRED — evidence without it cannot be attributed and is rejected."
                     },
                     "kind": {"type": "string", "enum": ["code", "config", "test", "trace", "runtime"]},
                     "description": {"type": "string"},

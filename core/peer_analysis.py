@@ -10,8 +10,13 @@ from .models import (
 )
 from .profile import ProjectProfile
 
-MIN_CLUSTER_SIZE = 3
+# 3 meant a "convention" inferred from two samples; at 5 a deviation is a real
+# outlier rather than noise
+MIN_CLUSTER_SIZE = 5
 MIN_CONFORMITY = 0.75
+# one straggler against a merely-common marker is weak evidence, so a cluster
+# where several members lack the marker is not a convention at all
+MAX_NONCONFORMERS_RATIO = 0.25
 
 _PARAM_SEGMENT = re.compile(r"^(\{.*\}|<.*>|:.+|\[.*\])$")
 _VERSION_SEGMENT = re.compile(r"^v\d+(\.\d+)?$")
@@ -45,14 +50,19 @@ def _cluster_key(ep: EntryPoint) -> str:
     bucket, which both drowned a genuine outlier and flagged /health and /login
     for not matching an average that spanned the whole API. The first
     domain-meaningful segment is the real unit of convention.
+
+    `kind` is part of the key because a queue consumer and an HTTP route are not
+    peers: comparing them flagged consumers for lacking route auth decorators.
     """
     literal = [s for s in _normalize_path(ep.path).strip("/").split("/") if s and s != "*"]
     meaningful = [s for s in literal if not _is_generic(s)]
     if meaningful:
-        return "/" + meaningful[0]
-    if literal:
-        return "/" + literal[0]
-    return Path(ep.file_path or "").parent.as_posix() or "<root>"
+        segment = "/" + meaningful[0]
+    elif literal:
+        segment = "/" + literal[0]
+    else:
+        segment = Path(ep.file_path or "").parent.as_posix() or "<root>"
+    return f"{ep.kind}:{segment}"
 
 
 def _guard_markers(g: Guard) -> set[str]:
@@ -72,9 +82,12 @@ def _markers_for(ep: EntryPoint, guards_by_qn: dict[str, list[Guard]],
     for g in guards_by_qn.get(ep.handler_qn, []):
         markers |= _guard_markers(g)
     if profile:
-        haystack = f"{ep.notes} {' '.join(ep.auth_decorators)}"
+        # only declared decorators count. Matching profile markers against
+        # ep.notes treated "TODO: add @requires_scope here" as proof the route
+        # WAS protected — configuring a profile suppressed real findings
+        declared = {d.strip() for d in ep.auth_decorators if d and d.strip()}
         for marker in profile.auth_markers():
-            if marker and marker in haystack:
+            if marker and any(marker == d or marker in d for d in declared):
                 markers.add(marker)
     return markers
 
@@ -83,9 +96,13 @@ def _markers_for(ep: EntryPoint, guards_by_qn: dict[str, list[Guard]],
 class Deviation:
     entry_point: EntryPoint
     cluster_key: str
-    missing_marker: str
+    missing_markers: list[str] = field(default_factory=list)
     peers_with_marker: list[EntryPoint] = field(default_factory=list)
     cluster_size: int = 0
+
+    @property
+    def missing_marker(self) -> str:
+        return ", ".join(self.missing_markers)
 
     @property
     def conformity(self) -> float:
@@ -94,13 +111,16 @@ class Deviation:
 
     def confidence(self) -> int:
         c, n = self.conformity, self.cluster_size
+        nonconformers = n - 1 - len(self.peers_with_marker)
+        # several members lacking the marker means it is merely common, not a
+        # convention, so a straggler is not strong evidence
+        if nonconformers > 0:
+            return 5
         if c >= 0.9 and n >= 8:
             return 8
         if c >= 0.85 and n >= 5:
             return 7
-        if c >= MIN_CONFORMITY and n >= MIN_CLUSTER_SIZE:
-            return 6
-        return 5
+        return 6
 
 
 def find_deviations(entry_points: list[EntryPoint], guards: list[Guard],
@@ -124,14 +144,12 @@ def find_deviations(entry_points: list[EntryPoint], guards: list[Guard],
         if len(members) < MIN_CLUSTER_SIZE:
             continue
         marker_sets = {id(ep): _markers_for(ep, guards_by_qn, profile) for ep in members}
-        marker_counts: dict[str, int] = defaultdict(int)
-        for markers in marker_sets.values():
-            for m in markers:
-                marker_counts[m] += 1
 
         for ep in members:
             own = marker_sets[id(ep)]
-            for marker, count in marker_counts.items():
+            missing: list[str] = []
+            strongest: list[EntryPoint] = []
+            for marker in {m for s in marker_sets.values() for m in s}:
                 if marker in own:
                     continue
                 peers_with = [p for p in members
@@ -140,13 +158,27 @@ def find_deviations(entry_points: list[EntryPoint], guards: list[Guard],
                     continue
                 if len(peers_with) / (len(members) - 1) < MIN_CONFORMITY:
                     continue
-                deviations.append(Deviation(
-                    entry_point=ep,
-                    cluster_key=key,
-                    missing_marker=marker,
-                    peers_with_marker=peers_with,
-                    cluster_size=len(members),
-                ))
+                missing.append(marker)
+                if len(peers_with) > len(strongest):
+                    strongest = peers_with
+            if not missing:
+                continue
+            if all(m.startswith("guard-token:") for m in missing) and len(missing) < 2:
+                peer_guard_sets = {
+                    frozenset(m for m in marker_sets[id(p)] if m.startswith("guard-token:"))
+                    for p in strongest
+                }
+                if len(peer_guard_sets) != 1:
+                    continue
+            # one finding per route: emitting one per marker made a reviewer
+            # triage the same endpoint several times
+            deviations.append(Deviation(
+                entry_point=ep,
+                cluster_key=key,
+                missing_markers=sorted(missing),
+                peers_with_marker=strongest,
+                cluster_size=len(members),
+            ))
     return deviations
 
 

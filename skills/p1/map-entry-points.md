@@ -37,6 +37,22 @@
 Standard FINDINGS_SCHEMA. Populate entry_points_found list.
 Hypotheses only for clear cases where both the path AND absence of any auth layer is confirmed.
 
+Every `entry_points_found` entry MUST carry:
+- `kind` — route / consumer / job / command / hook / callback. Peer comparison
+  groups by kind, so a mislabelled consumer gets compared against HTTP routes.
+- `auth_decorators` — every authorization marker present on that handler, verbatim
+  (`@requires_scope`, `[Authorize(Policy="X")]`, `@login_required`). Use an empty
+  list when there is genuinely none. This is the single field peer-consistency
+  analysis reads: if you leave it empty on a protected route, that route becomes
+  the apparent outlier and a real unprotected one is hidden.
+- `notes` — describe the handler, never restate a decorator that is absent.
+  Write "public by design" rather than "missing @requires_scope".
+- `path` — the route template or the queue/topic/command name for non-routes.
+
+Prefer `parse_file_structure` over grep when enumerating handlers: it returns
+decorators and exact line ranges, which raises evidence quality from textual
+(confidence capped at 4) to structural (capped at 7).
+
 ## Stop condition
 When all HTTP routes, consumers, jobs, and CLI commands are enumerated.
 

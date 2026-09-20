@@ -11,6 +11,11 @@ def cache_root() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
     path = Path(base) / "pentest"
     path.mkdir(parents=True, exist_ok=True)
+    # suppression reasons carry business context, so keep the cache private
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
     return path
 
 
@@ -96,6 +101,8 @@ def clear_run_state(repo_path: str) -> None:
 
 
 def mark_skill_done(repo_path: str, commit: str, skill_name: str) -> None:
+    if not commit:
+        return
     state = load_run_state(repo_path)
     if state.get("commit") != commit:
         state = {"commit": commit, "completed": []}
@@ -107,7 +114,14 @@ def mark_skill_done(repo_path: str, commit: str, skill_name: str) -> None:
 
 
 def completed_skills(repo_path: str, commit: str) -> set[str]:
-    """Skills already finished at this commit; a different commit invalidates all."""
+    """Skills already finished at this commit; a different commit invalidates all.
+
+    An empty commit means the target is not a git repo, so there is nothing to
+    invalidate against — resuming would skip skills no matter how the files
+    changed, so nothing is ever resumable.
+    """
+    if not commit:
+        return set()
     state = load_run_state(repo_path)
     if state.get("commit") != commit:
         return set()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -609,7 +610,7 @@ def _gate_hypothesis_status(
     be able to promote as well as demote — otherwise every hypothesis stays
     `initial` forever and nothing is ever exported.
     """
-    if h.status in ("rejected", "refuted", "closed"):
+    if h.status in ("rejected", "refuted", "blocked"):
         return h.status
 
     valid_ev = [e for e in evidence if not e.stale]
@@ -635,6 +636,45 @@ def _gate_hypothesis_status(
 
 _QUALITY_CONF_CAP = {"textual": 4, "inferred": 3, "structural": 7, "semantic": 10}
 _MIN_ANCHOR_LEN = 12
+
+# Injected into every skill prompt. Skills describe WHAT to look for; this
+# describes what a finding must carry to survive the gate. Kept here rather
+# than duplicated across 44 skill files so it cannot drift from the engine.
+OUTPUT_CONTRACT = """# Output contract (applies to every finding you report)
+
+The engine gates findings. One missing field and a real vulnerability is
+silently dropped. Before calling finish(), check each item below.
+
+## Every evidence item
+- `hypothesis_index`: REQUIRED. 0-based index into your `hypotheses` array.
+  Evidence without it is discarded and the hypothesis it belonged to is left
+  with no support, so it cannot be reported.
+- `anchor_text`: a distinctive literal substring (>= 12 characters) copied
+  verbatim from the cited lines. The engine re-reads the file and checks it.
+  A short or generic anchor counts as no anchor and lowers confidence.
+- `analysis_quality.method`: report honestly how you established this.
+  `semantic` = followed real call edges via trace_path/get_code_snippet.
+  `structural` = parsed the file via parse_file_structure/find_all_usages.
+  `textual` = grep or read_file only.  `inferred` = reasoning, not observation.
+  This caps the finding's confidence (textual 4, inferred 3, structural 7,
+  semantic 10), so grep-only evidence cannot produce a high-confidence finding.
+  Prefer parse_file_structure and find_all_usages over grep where you can.
+
+## Every hypothesis
+- `reachability`, `input_control`, `guard_coverage`, `exposure`: all REQUIRED.
+  Leaving one unset makes the engine add an unresolved obligation that blocks
+  the finding from ever being reported.
+- `proof_obligations`: state the claims your finding depends on. Mark one
+  `verified` ONLY when a specific evidence item establishes it, and cite that
+  evidence in `evidence_ref`. Mark `unresolved` when you could not confirm it.
+  An unresolved required obligation blocks the finding — that is intended:
+  report it as an open question rather than guessing.
+- `exposure`: who can actually reach the entry point. `unreachable` withdraws
+  the finding, so use it when you prove no actor can get there.
+
+A finding with honest `unresolved` obligations is more useful than one that
+claims `verified` without evidence. Do not mark obligations verified to force
+a finding through the gate."""
 
 
 def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]") -> None:
@@ -705,6 +745,7 @@ class SkillRunner:
         self._llm = LLMClient(cfg)
         self._db = db
         self._mcp = mcp
+        self._skills_dir = cfg.resolved_skills()
         self._profile_cache: dict[str, ProjectProfile] = {}
 
     def _profile(self, repo_path: str) -> ProjectProfile:
@@ -716,7 +757,6 @@ class SkillRunner:
                 use_cache=True,
             )
         return self._profile_cache[repo_path]
-        self._skills_dir = cfg.resolved_skills()
 
     def _load_skill(self, skill_name: str) -> str:
         for phase_dir in sorted(self._skills_dir.iterdir()):
@@ -1165,6 +1205,8 @@ class SkillRunner:
 # Skill Contract
 {skill_text}
 
+{OUTPUT_CONTRACT}
+
 # Known Context
 {known_context}
 {f"# Additional Context\n{extra_context}" if extra_context else ""}
@@ -1275,8 +1317,20 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         for i, e_data in enumerate(findings.get("evidence", [])):
             try:
                 e_data = dict(e_data)
-                hyp_idx = e_data.pop("hypothesis_index", 0)
-                if not (0 <= hyp_idx < len(hypotheses)):
+                # defaulting to 0 attached every unlabeled item to the first
+                # hypothesis, promoting it on other findings' evidence while the
+                # rest were left with none
+                if "hypothesis_index" in e_data:
+                    hyp_idx = e_data.pop("hypothesis_index")
+                elif len(hypotheses) == 1:
+                    hyp_idx = 0
+                else:
+                    validation_errors.append(
+                        f"evidence[{i}]: hypothesis_index missing and {len(hypotheses)} "
+                        "hypotheses present; cannot attribute evidence"
+                    )
+                    continue
+                if not isinstance(hyp_idx, int) or not (0 <= hyp_idx < len(hypotheses)):
                     validation_errors.append(f"evidence[{i}]: hypothesis_index {hyp_idx} out of range")
                     continue
                 e_data["hypothesis_id"] = hypotheses[hyp_idx].id
@@ -1288,7 +1342,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         verified_evidence: list[Evidence] = []
         for ev in evidence_items:
             target = self._resolve_path(repo_path, ev.file_path)
-            if target is None or not target.exists():
+            if target is None or not target.is_file():
                 auto_conflicts.append(ConflictRecord(
                     kind="stale_reference",
                     description=f"Evidence file does not exist: {ev.file_path}",
@@ -1325,40 +1379,63 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     ev.snippet = "\n".join(lines[s:e])
                     # confirming the file has these lines is textual verification;
                     # it must not upgrade what the model reported about its method
-                    if not ev.anchor_text:
+                    def _norm(t: str) -> str:
+                        return " ".join(t.split())
+
+                    anchor_norm = _norm(ev.anchor_text or "")
+                    # a one-character anchor like ")" verifies nothing; treating it
+                    # as valid scored a junk anchor above honestly omitting one
+                    if anchor_norm and len(anchor_norm) < _MIN_ANCHOR_LEN:
                         ev.analysis_quality.limitations.append(
-                            "no anchor_text supplied; line range verified but content unverified"
+                            f"anchor_text {ev.anchor_text!r:.30} too short to verify "
+                            f"(<{_MIN_ANCHOR_LEN} chars); treated as absent"
+                        )
+                        anchor_norm = ""
+                    if not anchor_norm:
+                        ev.analysis_quality.limitations.append(
+                            "no usable anchor_text; line range verified but content unverified"
                         )
                         if ev.analysis_quality.confidence == "high":
                             ev.analysis_quality.confidence = "medium"
-                    if ev.anchor_text:
-                        def _norm(t: str) -> str:
-                            return " ".join(t.split())
-                        anchor_norm = _norm(ev.anchor_text)
+                    else:
                         if anchor_norm in _norm(ev.snippet):
                             pass
                         else:
                             lo = max(0, s - 10)
                             hi = min(total, e + 10)
-                            hits = [li for li, ln in enumerate(lines[lo:hi], start=lo + 1)
-                                    if anchor_norm in _norm(ln)]
-                            # relocate only on an unambiguous, substantial anchor: a
-                            # short or repeated one would snap to an arbitrary line
-                            if len(anchor_norm) >= _MIN_ANCHOR_LEN and len(hits) == 1:
+                            # match over a sliding window, not per line, so a
+                            # multi-line anchor can match at all
+                            hits = [li for li in range(lo + 1, hi + 1)
+                                    if anchor_norm in _norm("\n".join(lines[li - 1:hi]))
+                                    and anchor_norm not in _norm("\n".join(lines[li:hi]))]
+                            if len(hits) == 1:
                                 li = hits[0]
+                                span = max(1, ev.line_end - ev.line_start + 1)
                                 ev.line_start = li
-                                ev.line_end = li
-                                ev.snippet = "\n".join(lines[li - 1:min(total, li + 2)])
+                                ev.line_end = min(total, li + span - 1)
+                                ev.snippet = "\n".join(lines[li - 1:ev.line_end])
                                 ev.analysis_quality.confidence = "medium"
                                 ev.analysis_quality.limitations.append(
                                     "anchor_text found outside claimed range; line numbers corrected"
                                 )
                             elif hits:
-                                ev.analysis_quality.confidence = "low"
+                                # the anchor is demonstrably absent from the cited
+                                # range, so the citation is wrong either way
+                                auto_conflicts.append(ConflictRecord(
+                                    kind="stale_reference",
+                                    description=(
+                                        f"Evidence anchor_text is absent from the claimed range and "
+                                        f"ambiguous nearby ({len(hits)} matches) in {ev.file_path}"
+                                    ),
+                                    left=f"evidence/{ev.id}",
+                                    right=f"{ev.file_path}:{ev.line_start}",
+                                    severity="blocks_finding",
+                                ))
                                 ev.analysis_quality.limitations.append(
-                                    f"anchor_text ambiguous ({len(hits)} matches within ±10 lines, "
-                                    f"length {len(anchor_norm)}); line numbers left as claimed"
+                                    f"anchor_text ambiguous ({len(hits)} matches within ±10 lines); "
+                                    "citation unverified"
                                 )
+                                ev.stale = True
                             else:
                                 auto_conflicts.append(ConflictRecord(
                                     kind="stale_reference",
@@ -1375,7 +1452,17 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                                 )
                                 ev.stale = True
             except Exception as ex:
-                ev.analysis_quality.limitations.append(f"read error: {ex}")
+                # without marking it stale the model's unverified snippet
+                # survives and the gate promotes the finding on it
+                auto_conflicts.append(ConflictRecord(
+                    kind="stale_reference",
+                    description=f"Evidence could not be read and stays unverified: {ev.file_path} ({ex})",
+                    left=f"evidence/{ev.id}",
+                    right=ev.file_path,
+                    severity="blocks_finding",
+                ))
+                ev.analysis_quality.limitations.append(f"read error, content unverified: {ex}")
+                ev.stale = True
             verified_evidence.append(ev)
         evidence_items = verified_evidence
 
@@ -1436,16 +1523,22 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
             ev_ids = {e.id for e in ev_for_h}
+            # word-boundary match: an 8-hex id is a substring of longer hex tokens,
+            # so a plain `in` let one finding's conflict block an unrelated one
+            id_re = re.compile(rf"\b{re.escape(h.id)}\b")
             conf_for_h = [
                 c for c in all_conflicts
                 if (h.id in (c.left, c.right)
-                    or h.id in c.description
+                    or id_re.search(c.description)
                     or any(f"evidence/{eid}" in (c.left, c.right) for eid in ev_ids))
             ]
             _apply_quality_caps(h, ev_for_h)
             _inject_minimum_obligations(h)
-            h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
+            # profile first: it sets exposure (which the gate reads) and can
+            # reject outright, so running it after let an override of
+            # exposure=unreachable still export
             _apply_profile(h, ev_for_h, profile)
+            h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
             h.priority = h.compute_priority()
 
         open_questions = findings.get("open_questions", []) + validation_errors
@@ -1479,7 +1572,12 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         commit = self._get_commit(repo_path)
         done = completed_skills(repo_path, commit) if resume else set()
         if not resume:
+            # only drop progress for the skills this invocation will redo;
+            # `--phase p4` used to wipe a completed full run's record
+            keep = {s for s in completed_skills(repo_path, commit) if s not in skills}
             clear_run_state(repo_path)
+            for name in keep:
+                mark_skill_done(repo_path, commit, name)
 
         results: list[SkillResult] = []
         for name in skills:
