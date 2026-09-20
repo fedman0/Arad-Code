@@ -1,5 +1,6 @@
 from __future__ import annotations
 import fnmatch
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -29,14 +30,30 @@ class Suppression:
     def is_expired(self, today: Optional[date] = None) -> bool:
         return (today or date.today()) > self.expires
 
-    def matches(self, rule: str, file_path: str) -> bool:
-        if self.rule != "*" and self.rule.lower() not in (rule or "").lower():
+    def matches(self, cwe: str, rule_text: str, file_path: str) -> bool:
+        # a path-scoped suppression needs a real path; matching "" against "*"
+        # would silently suppress every hypothesis that has no evidence yet
+        if not file_path or not fnmatch.fnmatch(file_path, self.path):
             return False
-        return fnmatch.fnmatch(file_path or "", self.path)
+        rule = self.rule.lower().strip()
+        if rule == "*":
+            return True
+        if rule.startswith("cwe-"):
+            return (cwe or "").lower().strip() == rule
+        # token match, so "sql-injection" needs both words present rather than
+        # matching any prose containing the substring
+        wanted = {t for t in re.split(r"[^a-z0-9]+", rule) if t}
+        present = {t for t in re.split(r"[^a-z0-9]+", (rule_text or "").lower()) if t}
+        cwe_token = (cwe or "").lower().replace("-", "")
+        if cwe_token:
+            present.add(cwe_token)
+        return bool(wanted) and wanted <= present
 
 
 @dataclass
 class ProjectProfile:
+    trusted: bool = False
+    ignored_repo_profile: Optional[Path] = None
     sanitizers: list[Sanitizer] = field(default_factory=list)
     auth_decorators: list[str] = field(default_factory=list)
     auth_middleware: list[str] = field(default_factory=list)
@@ -60,9 +77,10 @@ class ProjectProfile:
                 return exposure
         return None
 
-    def suppression_for(self, rule: str, file_path: str) -> Optional[Suppression]:
+    def suppression_for(self, cwe: str, rule_text: str,
+                        file_path: str) -> Optional[Suppression]:
         for s in self.suppressions:
-            if s.matches(rule, file_path):
+            if s.matches(cwe, rule_text, file_path):
                 return s
         return None
 
@@ -132,6 +150,17 @@ class ProjectProfile:
         return "\n\n".join(parts)
 
 
+def _jsonable(value):
+    """YAML parses bare dates into date objects, which json cannot serialize."""
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()[:10]
+    return value
+
+
 def _parse_expires(raw) -> Optional[date]:
     if isinstance(raw, date):
         return raw
@@ -145,20 +174,49 @@ def _parse_expires(raw) -> Optional[date]:
     return None
 
 
-def load_profile(repo_path: str | Path, today: Optional[date] = None) -> ProjectProfile:
-    """Load .llmsast.yaml from a target repo root. Absent file yields an empty profile."""
-    path = Path(repo_path) / PROFILE_FILENAME
-    if not path.exists():
-        return ProjectProfile()
-    try:
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-    except (yaml.YAMLError, OSError):
-        return ProjectProfile(source_path=path)
-    if not isinstance(data, dict):
-        return ProjectProfile(source_path=path)
+def load_profile(repo_path: str | Path, today: Optional[date] = None, *,
+                 external_path: Optional[str | Path] = None,
+                 trust_repo_profile: bool = False,
+                 use_cache: bool = False) -> ProjectProfile:
+    """Load a project profile.
 
-    profile = ProjectProfile(source_path=path)
+    A profile can suppress findings and declare inputs trusted, so a profile
+    committed inside the target repository is attacker-controlled on any codebase
+    you did not write: a malicious PR adding `trusted_sources: ["all HTTP request
+    bodies"]` would blind the scan. An in-repo profile is therefore ignored unless
+    explicitly trusted; prefer `external_path`, which the target cannot modify.
+    """
+    repo_file = Path(repo_path) / PROFILE_FILENAME
+
+    if external_path:
+        path = Path(external_path).expanduser()
+        if not path.exists():
+            return ProjectProfile()
+    elif trust_repo_profile:
+        path = repo_file
+        if not path.exists():
+            return ProjectProfile()
+    else:
+        return ProjectProfile(
+            ignored_repo_profile=repo_file if repo_file.exists() else None)
+
+    data = None
+    if use_cache:
+        from .cache import read_profile_cache
+        data = read_profile_cache(str(repo_path), path)
+    if data is None:
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except (yaml.YAMLError, OSError):
+            return ProjectProfile(source_path=path, trusted=True)
+        if use_cache and isinstance(data, dict):
+            from .cache import write_profile_cache
+            write_profile_cache(str(repo_path), path, _jsonable(data))
+    if not isinstance(data, dict):
+        return ProjectProfile(source_path=path, trusted=True)
+
+    profile = ProjectProfile(source_path=path, trusted=True)
 
     for raw in data.get("sanitizers") or []:
         if isinstance(raw, dict) and raw.get("qn"):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -16,6 +17,7 @@ from .code_analysis import (
     parse_file_structure, find_all_usages, run_semgrep, list_dir, run_shell
 )
 from .profile import ProjectProfile, load_profile
+from .cache import clear_run_state, completed_skills, mark_skill_done
 
 SYSTEM_PROMPT = """You are an expert security researcher performing authorized penetration testing on a codebase.
 
@@ -427,6 +429,86 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_hypotheses",
+            "description": (
+                "List hypotheses already in the evidence store, with severity, exposure, "
+                "entry point and impact. Required for chain composition and deduplication — "
+                "never invent a hypothesis ID, always get it from here."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string",
+                               "description": "Filter by status, e.g. evidence_supported, reproduced, initial"},
+                    "min_priority": {"type": "integer", "description": "Only return priority >= this"},
+                    "limit": {"type": "integer", "description": "Max rows (default 40)"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_hypothesis",
+            "description": (
+                "Full detail for one hypothesis including its evidence, proof obligations "
+                "and counterevidence. Use before composing it into a chain."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["hypothesis_id"],
+                "properties": {"hypothesis_id": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_open_question",
+            "description": (
+                "Close an open question once you have answered it from the code. "
+                "Blocking questions suppress findings until resolved, so resolve every "
+                "question you can actually answer."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["question_id", "resolution"],
+                "properties": {
+                    "question_id": {"type": "string"},
+                    "resolution": {"type": "string",
+                                   "description": "The answer, citing file:line evidence"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "amend_hypothesis",
+            "description": (
+                "Adjust an existing hypothesis: raise or lower confidence with a reason, "
+                "or link it into a chain via `enables`. Use when your analysis changes "
+                "the standing of a finding a previous skill recorded."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["hypothesis_id", "reason"],
+                "properties": {
+                    "hypothesis_id": {"type": "string"},
+                    "confidence": {"type": "integer", "minimum": 0, "maximum": 10},
+                    "exposure": {"type": "string",
+                                 "enum": ["internet", "authenticated", "internal",
+                                          "admin_only", "unreachable"]},
+                    "enables": {"type": "array", "items": {"type": "string"},
+                                "description": "Hypothesis IDs this one unlocks"},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "record_return_contract",
             "description": (
                 "Mark a function's return value as security-relevant. "
@@ -521,30 +603,38 @@ def _gate_hypothesis_status(
     conflicts: "list[ConflictRecord]",
     open_questions: "list[OpenQuestion] | None" = None,
 ) -> str:
-    if h.status in ("rejected", "closed"):
+    """Derive status from the evidence rather than trusting what the model claimed.
+
+    The model never sends `status` (it is not in FINDINGS_SCHEMA), so this must
+    be able to promote as well as demote — otherwise every hypothesis stays
+    `initial` forever and nothing is ever exported.
+    """
+    if h.status in ("rejected", "refuted", "closed"):
         return h.status
-    status = "evidence_supported" if h.status == "reproduced" else h.status
-    if status != "evidence_supported":
-        return status
+
     valid_ev = [e for e in evidence if not e.stale]
     if not valid_ev:
+        return "initial"
+    if h.exposure == "unreachable":
         return "initial"
     for c in conflicts:
         if c.severity == "blocks_finding" and c.status == "open":
             return "initial"
-    if any(ob.required_for_finding and ob.status == "unresolved" for ob in h.proof_obligations):
+    if any(ob.required_for_finding and ob.status in ("unresolved", "refuted")
+           for ob in h.proof_obligations):
         return "initial"
-    if any(ob.required_for_finding and ob.status == "refuted" for ob in h.proof_obligations):
-        return "initial"
-    if open_questions:
-        for q in open_questions:
-            if q.impact == "blocks_finding" and q.status == "open":
-                if not q.affects_hypothesis_ids or h.id in q.affects_hypothesis_ids:
-                    return "initial"
-    return status
+    for q in open_questions or []:
+        # only an explicitly scoped question blocks; a blocking question with no
+        # affected ids would otherwise freeze every finding in the repository
+        if (q.impact == "blocks_finding" and q.status == "open"
+                and h.id in q.affects_hypothesis_ids):
+            return "initial"
+
+    return "reproduced" if h.status == "reproduced" else "evidence_supported"
 
 
 _QUALITY_CONF_CAP = {"textual": 4, "inferred": 3, "structural": 7, "semantic": 10}
+_MIN_ANCHOR_LEN = 12
 
 
 def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]") -> None:
@@ -596,10 +686,9 @@ def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
     if override:
         h.exposure = override
 
-    rule_text = " ".join(filter(None, [h.cwe, h.violated_invariant, h.skill_source]))
-    paths = [e.file_path for e in evidence if e.file_path]
-    for path in paths or [""]:
-        suppression = profile.suppression_for(rule_text, path)
+    rule_text = " ".join(filter(None, [h.violated_invariant, h.skill_source, h.capability]))
+    for path in [e.file_path for e in evidence if e.file_path]:
+        suppression = profile.suppression_for(h.cwe or "", rule_text, path)
         if suppression:
             h.status = "rejected"
             h.rejection_reason = (
@@ -616,6 +705,17 @@ class SkillRunner:
         self._llm = LLMClient(cfg)
         self._db = db
         self._mcp = mcp
+        self._profile_cache: dict[str, ProjectProfile] = {}
+
+    def _profile(self, repo_path: str) -> ProjectProfile:
+        if repo_path not in self._profile_cache:
+            self._profile_cache[repo_path] = load_profile(
+                repo_path,
+                external_path=self._cfg.profile_path or None,
+                trust_repo_profile=self._cfg.trust_repo_profile,
+                use_cache=True,
+            )
+        return self._profile_cache[repo_path]
         self._skills_dir = cfg.resolved_skills()
 
     def _load_skill(self, skill_name: str) -> str:
@@ -862,6 +962,90 @@ class SkillRunner:
             )
             self._db.save_return_contract(repo_path, rc)
             return f"Return contract recorded (id={rc.id}, function={fn_qn}, handling={rc.expected_handling})."
+        if name == "list_hypotheses":
+            rows = self._db.list_hypotheses(repo_path)
+            if args.get("status"):
+                rows = [h for h in rows if h.status == args["status"]]
+            if args.get("min_priority") is not None:
+                rows = [h for h in rows if h.priority >= int(args["min_priority"])]
+            rows = rows[:int(args.get("limit") or 40)]
+            if not rows:
+                return "No hypotheses match."
+            out = []
+            for h in rows:
+                out.append(
+                    f"[{h.id}] sev={h.severity} conf={h.confidence} prio={h.priority} "
+                    f"status={h.status} exposure={h.exposure}\n"
+                    f"   entry: {h.entry_point}\n"
+                    f"   invariant: {h.violated_invariant}\n"
+                    f"   impact: {h.observable_impact}"
+                )
+            return "\n".join(out)
+        if name == "get_hypothesis":
+            h = self._db.get_hypothesis(repo_path, args.get("hypothesis_id", ""))
+            if h is None:
+                return f"No hypothesis {args.get('hypothesis_id')!r} in this repository."
+            ev = self._db.get_evidence_for_hypothesis(h.id)
+            parts = [
+                f"[{h.id}] status={h.status} sev={h.severity} conf={h.confidence} "
+                f"prio={h.priority} exposure={h.exposure}",
+                f"actor: {h.actor}",
+                f"capability: {h.capability}",
+                f"entry_point: {h.entry_point}",
+                f"violated_invariant: {h.violated_invariant}",
+                f"observable_impact: {h.observable_impact}",
+                f"reachability={h.reachability} input_control={h.input_control} "
+                f"guard_coverage={h.guard_coverage}",
+            ]
+            if h.execution_path:
+                parts.append("execution_path:\n" + "\n".join(f"  {s}" for s in h.execution_path))
+            if h.counterevidence:
+                parts.append("counterevidence:\n" + "\n".join(f"  {c}" for c in h.counterevidence))
+            if h.proof_obligations:
+                parts.append("proof_obligations:\n" + "\n".join(
+                    f"  [{ob.status}/{ob.claim_type}] {ob.question}" for ob in h.proof_obligations))
+            if ev:
+                parts.append("evidence:\n" + "\n".join(
+                    f"  {e.file_path}:{e.line_start}-{e.line_end} "
+                    f"({e.analysis_quality.method}) {e.description}" for e in ev))
+            if h.composed_of:
+                parts.append(f"composed_of: {', '.join(h.composed_of)}")
+            return "\n".join(parts)
+        if name == "resolve_open_question":
+            qid = args.get("question_id", "")
+            resolution = args.get("resolution", "")
+            if not qid or not resolution:
+                return "question_id and resolution are both required."
+            ok = self._db.resolve_open_question(repo_path, qid, resolution, skill_name)
+            return (f"Open question {qid} resolved." if ok
+                    else f"No open question {qid!r} in this repository.")
+        if name == "amend_hypothesis":
+            hyp_id = args.get("hypothesis_id", "")
+            reason = args.get("reason", "")
+            if not hyp_id or not reason:
+                return "hypothesis_id and reason are both required."
+            h = self._db.get_hypothesis(repo_path, hyp_id)
+            if h is None:
+                return f"No hypothesis {hyp_id!r} in this repository."
+            changes = []
+            if args.get("confidence") is not None:
+                old = h.confidence
+                h.confidence = max(0, min(10, int(args["confidence"])))
+                changes.append(f"confidence {old}->{h.confidence}")
+            if args.get("exposure"):
+                old = h.exposure
+                h.exposure = args["exposure"]
+                changes.append(f"exposure {old}->{h.exposure}")
+            for target in args.get("enables") or []:
+                if target not in h.enables:
+                    h.enables.append(target)
+                    changes.append(f"enables+={target}")
+            if not changes:
+                return "Nothing to amend."
+            h.uncertainty.append(f"amended by {skill_name}: {reason}")
+            h.priority = h.compute_priority()
+            self._db.save_hypothesis(repo_path, h)
+            return f"Amended {hyp_id}: {', '.join(changes)}."
         if name == "flag_ignored_return":
             fn_qn = args.get("function_qualified_name", "")
             caller = args.get("caller_location", "")
@@ -922,7 +1106,7 @@ class SkillRunner:
 
     def _build_initial_context(self, repo_path: str) -> str:
         parts: list[str] = []
-        profile_text = load_profile(repo_path).to_prompt()
+        profile_text = self._profile(repo_path).to_prompt()
         if profile_text:
             parts.append(profile_text)
         threat_model = self._db.get_threat_model(repo_path)
@@ -1139,8 +1323,14 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     s = ev.line_start - 1
                     e = min(total, max(ev.line_end, ev.line_start))
                     ev.snippet = "\n".join(lines[s:e])
-                    ev.analysis_quality.method = "structural"
-                    ev.analysis_quality.confidence = "high"
+                    # confirming the file has these lines is textual verification;
+                    # it must not upgrade what the model reported about its method
+                    if not ev.anchor_text:
+                        ev.analysis_quality.limitations.append(
+                            "no anchor_text supplied; line range verified but content unverified"
+                        )
+                        if ev.analysis_quality.confidence == "high":
+                            ev.analysis_quality.confidence = "medium"
                     if ev.anchor_text:
                         def _norm(t: str) -> str:
                             return " ".join(t.split())
@@ -1150,17 +1340,24 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                         else:
                             lo = max(0, s - 10)
                             hi = min(total, e + 10)
-                            window = "\n".join(lines[lo:hi])
-                            if anchor_norm in _norm(window):
-                                for li, ln in enumerate(lines[lo:hi], start=lo + 1):
-                                    if anchor_norm in _norm(ln):
-                                        ev.line_start = li
-                                        ev.line_end = li
-                                        ev.snippet = "\n".join(lines[li - 1:min(total, li + 2)])
-                                        break
+                            hits = [li for li, ln in enumerate(lines[lo:hi], start=lo + 1)
+                                    if anchor_norm in _norm(ln)]
+                            # relocate only on an unambiguous, substantial anchor: a
+                            # short or repeated one would snap to an arbitrary line
+                            if len(anchor_norm) >= _MIN_ANCHOR_LEN and len(hits) == 1:
+                                li = hits[0]
+                                ev.line_start = li
+                                ev.line_end = li
+                                ev.snippet = "\n".join(lines[li - 1:min(total, li + 2)])
                                 ev.analysis_quality.confidence = "medium"
                                 ev.analysis_quality.limitations.append(
                                     "anchor_text found outside claimed range; line numbers corrected"
+                                )
+                            elif hits:
+                                ev.analysis_quality.confidence = "low"
+                                ev.analysis_quality.limitations.append(
+                                    f"anchor_text ambiguous ({len(hits)} matches within ±10 lines, "
+                                    f"length {len(anchor_norm)}); line numbers left as claimed"
                                 )
                             else:
                                 auto_conflicts.append(ConflictRecord(
@@ -1234,7 +1431,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         db_open_questions = self._db.list_open_questions(repo_path, status="open")
         all_open_questions = db_open_questions + structured_questions
-        profile = load_profile(repo_path)
+        profile = self._profile(repo_path)
 
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
@@ -1271,24 +1468,59 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         self._db.save_skill_result(repo_path, result)
         return result
 
-    async def run_phase(self, phase: str, repo_path: str,
-                        verbose: bool = False) -> list[SkillResult]:
+    async def _run_skill_list(self, skills: list[str], repo_path: str,
+                              verbose: bool, resume: bool,
+                              on_progress=None) -> list[SkillResult]:
+        """Run skills, recording each completion so an interrupted scan can resume.
+
+        A scan is many minutes of paid LLM calls; losing all of it to one Ctrl+C
+        is the difference between a tool you can stop and one you must babysit.
+        """
+        commit = self._get_commit(repo_path)
+        done = completed_skills(repo_path, commit) if resume else set()
+        if not resume:
+            clear_run_state(repo_path)
+
+        results: list[SkillResult] = []
+        for name in skills:
+            if name in done:
+                if on_progress:
+                    on_progress(name, "skipped", None)
+                continue
+            try:
+                result = await self.run_skill(name, repo_path, verbose=verbose)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                if on_progress:
+                    on_progress(name, "interrupted", None)
+                raise
+            results.append(result)
+            mark_skill_done(repo_path, commit, name)
+            if on_progress:
+                on_progress(name, "done", result)
+        return results
+
+    def _phase_skills(self, phase: str) -> list[str]:
         phase_dir = self._skills_dir / phase
         if not phase_dir.exists():
             raise FileNotFoundError(f"Phase dir not found: {phase_dir}")
-        results = []
-        for sf in sorted(phase_dir.glob("*.md")):
-            results.append(await self.run_skill(sf.stem, repo_path, verbose=verbose))
-        return results
+        return [sf.stem for sf in sorted(phase_dir.glob("*.md"))]
 
-    async def run_all(self, repo_path: str, verbose: bool = False) -> list[SkillResult]:
-        results = []
+    def _all_skills(self) -> list[str]:
+        names: list[str] = []
         for phase_dir in sorted(self._skills_dir.iterdir()):
-            if not phase_dir.is_dir():
-                continue
-            for sf in sorted(phase_dir.glob("*.md")):
-                results.append(await self.run_skill(sf.stem, repo_path, verbose=verbose))
-        return results
+            if phase_dir.is_dir():
+                names.extend(sf.stem for sf in sorted(phase_dir.glob("*.md")))
+        return names
+
+    async def run_phase(self, phase: str, repo_path: str, verbose: bool = False,
+                        resume: bool = False, on_progress=None) -> list[SkillResult]:
+        return await self._run_skill_list(
+            self._phase_skills(phase), repo_path, verbose, resume, on_progress)
+
+    async def run_all(self, repo_path: str, verbose: bool = False,
+                      resume: bool = False, on_progress=None) -> list[SkillResult]:
+        return await self._run_skill_list(
+            self._all_skills(), repo_path, verbose, resume, on_progress)
 
     async def verify_hypothesis(self, hyp_id: str, repo_path: str,
                                  verbose: bool = False) -> dict:

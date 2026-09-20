@@ -5,13 +5,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .models import EntryPoint, Guard, Hypothesis, Evidence, AnalysisQuality
+from .models import (
+    EntryPoint, Guard, Hypothesis, Evidence, AnalysisQuality, ProofObligation,
+)
 from .profile import ProjectProfile
 
 MIN_CLUSTER_SIZE = 3
 MIN_CONFORMITY = 0.75
 
 _PARAM_SEGMENT = re.compile(r"^(\{.*\}|<.*>|:.+|\[.*\])$")
+_VERSION_SEGMENT = re.compile(r"^v\d+(\.\d+)?$")
+_GENERIC_SEGMENTS = {
+    "api", "rest", "rpc", "graphql", "web", "app", "public", "private",
+    "internal", "external", "service", "services", "svc", "gateway",
+}
+_GUARD_STOPWORDS = {
+    "self", "true", "false", "none", "null", "not", "and", "or", "is", "in",
+    "if", "the", "request", "req", "ctx", "context", "current", "get", "id",
+}
 
 
 def _normalize_path(path: str) -> str:
@@ -23,21 +34,43 @@ def _normalize_path(path: str) -> str:
     return "/" + "/".join(segments)
 
 
+def _is_generic(segment: str) -> bool:
+    return segment in _GENERIC_SEGMENTS or bool(_VERSION_SEGMENT.match(segment))
+
+
 def _cluster_key(ep: EntryPoint) -> str:
-    """Group peers that a reader would expect to be protected the same way."""
+    """Group peers a reader would expect to be protected the same way.
+
+    Keying on the leading path segments put every route under one `/api/v1`
+    bucket, which both drowned a genuine outlier and flagged /health and /login
+    for not matching an average that spanned the whole API. The first
+    domain-meaningful segment is the real unit of convention.
+    """
     literal = [s for s in _normalize_path(ep.path).strip("/").split("/") if s and s != "*"]
-    if len(literal) >= 2:
-        return "/" + "/".join(literal[:2])
+    meaningful = [s for s in literal if not _is_generic(s)]
+    if meaningful:
+        return "/" + meaningful[0]
     if literal:
         return "/" + literal[0]
     return Path(ep.file_path or "").parent.as_posix() or "<root>"
+
+
+def _guard_markers(g: Guard) -> set[str]:
+    """Turn free-text checked_data into comparable tokens.
+
+    `guard:user.id == order.owner_id` is never byte-identical between two
+    handlers, so using it whole produced no signal at all.
+    """
+    tokens = {t for t in re.split(r"[^a-zA-Z0-9_]+", (g.checked_data or "").lower())
+              if len(t) > 2 and t not in _GUARD_STOPWORDS and not t.isdigit()}
+    return {f"guard-token:{t}" for t in tokens}
 
 
 def _markers_for(ep: EntryPoint, guards_by_qn: dict[str, list[Guard]],
                  profile: Optional[ProjectProfile]) -> set[str]:
     markers = {d.strip() for d in ep.auth_decorators if d and d.strip()}
     for g in guards_by_qn.get(ep.handler_qn, []):
-        markers.add(f"guard:{g.checked_data}")
+        markers |= _guard_markers(g)
     if profile:
         haystack = f"{ep.notes} {' '.join(ep.auth_decorators)}"
         for marker in profile.auth_markers():
@@ -117,7 +150,22 @@ def find_deviations(entry_points: list[EntryPoint], guards: list[Guard],
     return deviations
 
 
-def deviation_to_hypothesis(d: Deviation, commit: str = "") -> tuple[Hypothesis, Evidence]:
+def _read_snippet(repo_path: Optional[str], file_path: str, line: int,
+                  span: int = 3) -> str:
+    if not repo_path or not file_path:
+        return ""
+    try:
+        target = (Path(repo_path) / file_path).resolve()
+        target.relative_to(Path(repo_path).resolve())
+        lines = target.read_text(errors="replace").splitlines()
+    except (OSError, ValueError):
+        return ""
+    lo = max(0, line - 1)
+    return "\n".join(lines[lo:lo + span])
+
+
+def deviation_to_hypothesis(d: Deviation, commit: str = "",
+                            repo_path: Optional[str] = None) -> tuple[Hypothesis, Evidence]:
     ep = d.entry_point
     peer_list = ", ".join(f"{p.path} ({Path(p.file_path).name}:{p.line})"
                           for p in d.peers_with_marker[:6])
@@ -148,7 +196,22 @@ def deviation_to_hypothesis(d: Deviation, commit: str = "") -> tuple[Hypothesis,
         input_control="unknown",
         skill_source="peer-consistency",
         commit=commit,
-        proof_obligations=[],
+        exposure="unspecified",
+        proof_obligations=[
+            ProofObligation(
+                question=(
+                    f"Is the absence of {d.missing_marker!r} on {ep.path} a defect rather "
+                    "than an intentional exception (health check, login, public webhook)?"
+                ),
+                status="unresolved", claim_type="guard", required_for_finding=True,
+                reason="engine-detected peer deviation; not verified against code",
+            ),
+            ProofObligation(
+                question=f"What concrete impact follows from {d.missing_marker!r} being absent here?",
+                status="unresolved", claim_type="impact", required_for_finding=True,
+                reason="peer comparison establishes deviation, not consequence",
+            ),
+        ],
     )
     h.priority = h.compute_priority()
 
@@ -162,7 +225,9 @@ def deviation_to_hypothesis(d: Deviation, commit: str = "") -> tuple[Hypothesis,
         file_path=ep.file_path,
         line_start=ep.line,
         line_end=ep.line,
-        snippet="",
+        # an empty snippet collapses every deviation in a file onto one SARIF
+        # fingerprint, so they overwrite each other in code scanning
+        snippet=_read_snippet(repo_path, ep.file_path, ep.line) or f"{ep.method or ep.kind} {ep.path}",
         commit=commit,
         analysis_quality=AnalysisQuality(
             method="structural",

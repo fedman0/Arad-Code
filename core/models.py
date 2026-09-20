@@ -5,6 +5,10 @@ import uuid
 from datetime import datetime
 
 
+def _norm_fp(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
 class Symbol(BaseModel):
     name: str
     qualified_name: str
@@ -197,7 +201,8 @@ class Hypothesis(BaseModel):
     uncovered_paths: list[str] = Field(default_factory=list)
     temporal_validity: Literal["checked_at_request", "snapshot", "unknown"] = "unknown"
     actor_capabilities: list[str] = Field(default_factory=list)
-    exposure: Literal["internet", "authenticated", "internal", "admin_only", "unreachable"] = "internet"
+    exposure: Literal["internet", "authenticated", "internal", "admin_only",
+                      "unreachable", "unspecified"] = "unspecified"
     composed_of: list[str] = Field(default_factory=list)
     enables: list[str] = Field(default_factory=list)
 
@@ -213,9 +218,22 @@ class Hypothesis(BaseModel):
             score += 3
         elif self.input_control == "partial":
             score += 1
-        exposure_bonus = {"internet": 3, "authenticated": 2, "internal": 1, "admin_only": 0}
+        # an unset exposure earns no bonus; defaulting it to internet made every
+        # internal job and consumer look externally reachable
+        exposure_bonus = {"internet": 3, "authenticated": 2, "internal": 1}
         score += exposure_bonus.get(self.exposure, 0)
         return score
+
+    def fingerprint(self) -> str:
+        """Identity that survives a rescan, for triage and dedup.
+
+        `id` is a fresh uuid every run, so anything keyed on it is orphaned by
+        the next scan.
+        """
+        import hashlib
+        basis = "|".join(_norm_fp(p) for p in
+                         (self.entry_point, self.violated_invariant, self.cwe or ""))
+        return hashlib.sha256(basis.encode()).hexdigest()[:16]
 
 
 class Evidence(BaseModel):
@@ -352,8 +370,13 @@ FINDINGS_SCHEMA = {
                     "uncovered_paths": {"type": "array", "items": {"type": "string"}},
                     "temporal_validity": {"type": "string", "enum": ["checked_at_request", "snapshot", "unknown"]},
                     "actor_capabilities": {"type": "array", "items": {"type": "string"}},
-                    "exposure": {"type": "string", "enum": ["internet", "authenticated", "internal", "admin_only", "unreachable"],
-                                 "description": "How exposed the entry point is; unreachable findings are not reported"},
+                    "exposure": {"type": "string",
+                                 "enum": ["internet", "authenticated", "internal", "admin_only", "unreachable"],
+                                 "description": "REQUIRED for any real finding. Who can reach this entry point: "
+                                                "internet=no auth needed, authenticated=any logged-in user, "
+                                                "internal=internal network/service only, admin_only=admin role, "
+                                                "unreachable=no actor can reach it. Omitting this forfeits "
+                                                "the exposure priority bonus; unreachable findings are not reported."},
                     "composed_of": {"type": "array", "items": {"type": "string"},
                                     "description": "hypothesis IDs this finding depends on or chains from"},
                     "enables": {"type": "array", "items": {"type": "string"},

@@ -145,6 +145,11 @@ class EvidenceStore:
         );
         CREATE INDEX IF NOT EXISTS idx_triage_repo ON triage_decisions(repo_path);
         """)
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(triage_decisions)")}
+        if "fingerprint" not in cols:
+            self.conn.execute("ALTER TABLE triage_decisions ADD COLUMN fingerprint TEXT")
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_triage_fp ON triage_decisions(fingerprint)")
         self.conn.commit()
 
     def upsert_repo(self, path: str, commit: str, languages: list[str], notes: str = ""):
@@ -331,6 +336,32 @@ class EvidenceStore:
         ).fetchall()
         return [OpenQuestion.model_validate_json(r["data"]) for r in rows]
 
+    def resolve_open_question(self, repo_path: str, question_id: str,
+                              resolution: str, resolved_by: str = "") -> bool:
+        row = self.conn.execute(
+            "SELECT data FROM open_questions WHERE id=? AND repo_path=?",
+            (question_id, repo_path)
+        ).fetchone()
+        if row is None:
+            return False
+        q = OpenQuestion.model_validate_json(row["data"])
+        q.status = "resolved"
+        q.resolved_by = resolved_by
+        q.resolution_hint = resolution
+        self.conn.execute(
+            "UPDATE open_questions SET data=?, status=? WHERE id=?",
+            (q.model_dump_json(), q.status, question_id)
+        )
+        self.conn.commit()
+        return True
+
+    def get_hypothesis(self, repo_path: str, hypothesis_id: str) -> Optional[Hypothesis]:
+        row = self.conn.execute(
+            "SELECT data FROM hypotheses WHERE id=? AND repo_path=?",
+            (hypothesis_id, repo_path)
+        ).fetchone()
+        return Hypothesis.model_validate_json(row["data"]) if row else None
+
     def save_conflict(self, repo_path: str, c: ConflictRecord) -> None:
         self.conn.execute(
             """INSERT OR REPLACE INTO conflicts
@@ -414,16 +445,23 @@ class EvidenceStore:
         self.conn.execute(
             """INSERT OR REPLACE INTO triage_decisions
                (hypothesis_id, repo_path, decision, reason, confidence_at_decision,
-                severity_at_decision, skill_source, decided_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                severity_at_decision, skill_source, decided_at, fingerprint)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (h.id, repo_path, decision, reason, h.confidence, h.severity,
-             h.skill_source, datetime.utcnow().isoformat())
+             h.skill_source, datetime.utcnow().isoformat(), h.fingerprint())
         )
         self.conn.commit()
 
-    def get_triage_decision(self, hypothesis_id: str) -> Optional[dict]:
+    def get_triage_decision(self, hypothesis: "Hypothesis | str") -> Optional[dict]:
+        """Look up by fingerprint so a decision survives the next scan's new uuid."""
+        if isinstance(hypothesis, str):
+            row = self.conn.execute(
+                "SELECT * FROM triage_decisions WHERE hypothesis_id=?", (hypothesis,)
+            ).fetchone()
+            return dict(row) if row else None
         row = self.conn.execute(
-            "SELECT * FROM triage_decisions WHERE hypothesis_id=?", (hypothesis_id,)
+            "SELECT * FROM triage_decisions WHERE fingerprint=? ORDER BY decided_at DESC LIMIT 1",
+            (hypothesis.fingerprint(),)
         ).fetchone()
         return dict(row) if row else None
 

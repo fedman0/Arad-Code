@@ -17,6 +17,8 @@ class Config:
     skills_dir: str = ""
     max_tokens: int = 8192
     temperature: float = 0.0
+    profile_path: str = ""
+    trust_repo_profile: bool = False
 
     def resolved_db(self) -> Path:
         return Path(self.db_path).expanduser()
@@ -59,6 +61,8 @@ def load_config(
         skills_dir=data.get("skills_dir", ""),
         max_tokens=data.get("max_tokens", 8192),
         temperature=data.get("temperature", 0.0),
+        profile_path=data.get("profile_path", ""),
+        trust_repo_profile=bool(data.get("trust_repo_profile", False)),
     )
 
     if not cfg.api_key:
