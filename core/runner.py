@@ -739,12 +739,23 @@ def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
             return
 
 
+_PROMPT_TOOL_NAMES = frozenset({
+    "search_graph", "trace_path", "get_code_snippet", "search_code",
+    "read_file", "grep", "get_architecture", "list_dir",
+    "parse_file_structure", "find_all_usages", "run_semgrep", "shell",
+    "list_hypotheses", "get_hypothesis", "get_open_questions",
+    "get_return_contracts", "get_function_summary",
+})
+
+
 class SkillRunner:
-    def __init__(self, cfg: Config, db: EvidenceStore, mcp: CodebaseMemoryClient):
+    def __init__(self, cfg: Config, db: EvidenceStore, mcp: CodebaseMemoryClient,
+                 mcp_manager=None):
         self._cfg = cfg
         self._llm = LLMClient(cfg)
         self._db = db
         self._mcp = mcp
+        self._mcp_manager = mcp_manager
         self._skills_dir = cfg.resolved_skills()
         self._profile_cache: dict[str, ProjectProfile] = {}
 
@@ -1755,3 +1766,123 @@ When done, call finish() with:
         self._db.save_hypothesis(repo_path, hyp)
 
         return verdict
+
+    async def run_prompt(
+        self,
+        prompt: str,
+        repo_path: str = "",
+        extra_context: str = "",
+        schema: Optional[dict] = None,
+        system_override: Optional[str] = None,
+        max_iterations: int = 20,
+    ) -> Any:
+        commit = self._get_commit(repo_path) if repo_path else ""
+
+        parts = [prompt]
+        if repo_path:
+            parts.append(f"\nRepository: {repo_path}  (commit: {commit})")
+        if extra_context:
+            parts.append(f"\nContext: {extra_context}")
+        if schema:
+            parts.append(
+                f"\nWhen done, call finish() with a JSON result matching this schema:\n"
+                f"{json.dumps(schema, indent=2)}"
+            )
+
+        messages: list[dict] = [{"role": "user", "content": "\n".join(parts)}]
+
+        base_tools = [t for t in TOOLS[:-1] if t["function"]["name"] in _PROMPT_TOOL_NAMES]
+
+        mcp_tools: list[dict] = []
+        if self._mcp_manager:
+            try:
+                mcp_tools = await self._mcp_manager.list_all_tools()
+            except Exception:
+                pass
+
+        finish_tool = {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": "Submit your final result.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["result"],
+                    "properties": {
+                        "result": schema if schema else {"type": "object", "additionalProperties": True},
+                    },
+                },
+            },
+        }
+        run_tools = base_tools + mcp_tools + [finish_tool]
+        system = system_override or SYSTEM_PROMPT
+        result: Any = None
+
+        for _iteration in range(max_iterations):
+            content, tool_calls = await self._llm.complete_with_tools(
+                messages, run_tools, system=system
+            )
+
+            assistant_msg: dict = {"role": "assistant"}
+            if content:
+                assistant_msg["content"] = content
+            if tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ]
+            messages.append(assistant_msg)
+
+            if not tool_calls:
+                if content:
+                    try:
+                        start = content.find("{")
+                        end = content.rfind("}") + 1
+                        if start >= 0 and end > start:
+                            result = json.loads(content[start:end])
+                    except Exception:
+                        result = content
+                break
+
+            finish_args = None
+            tool_results: list[dict] = []
+
+            for tc in tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+
+                if name == "finish":
+                    finish_args = args.get("result", args)
+                    result_text = "Result recorded."
+                elif name.startswith("mcp__") and self._mcp_manager:
+                    name_parts = name.split("__", 2)
+                    if len(name_parts) == 3:
+                        _, mcp_name, tool_name = name_parts
+                        result_text = await self._mcp_manager.call_tool(mcp_name, tool_name, args)
+                    else:
+                        result_text = f"Invalid MCP tool name: {name}"
+                else:
+                    result_text = await self._execute_tool(name, args, repo_path or ".")
+
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_text,
+                })
+
+            messages.extend(tool_results)
+
+            if finish_args is not None:
+                result = finish_args
+                break
+
+        return result
+
+    async def close(self) -> None:
+        await self._mcp.close()
+        if self._mcp_manager:
+            await self._mcp_manager.close()
