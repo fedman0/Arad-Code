@@ -14,7 +14,10 @@ from core.models import (
 )
 from core.peer_analysis import find_deviations, deviation_to_hypothesis
 from core.profile import load_profile
-from core.runner import SkillRunner, _gate_hypothesis_status, _apply_profile
+from core.runner import (
+    SkillRunner, _gate_hypothesis_status, _apply_profile,
+    _cap_method_from_calls, _extract_called_tools,
+)
 from core.sarif import build_sarif, _rule_id, _safe_uri
 
 FAILS = []
@@ -84,6 +87,40 @@ check("unscoped blocker does not freeze the repo",
 scoped = OpenQuestion(question="s", impact="blocks_finding", affects_hypothesis_ids=[h2.id])
 check("scoped blocker still blocks",
       _gate_hypothesis_status(h2, [ev(h2, analysis_quality=_struc_ev)], [], [scoped]) == "initial")
+
+print("\n[method cap from tool calls]")
+_no_tools: frozenset[str] = frozenset()
+_with_trace = frozenset({"trace_path"})
+_with_read = frozenset({"read_file"})
+_with_grep = frozenset({"grep"})
+check("semantic with trace_path → semantic",
+      _cap_method_from_calls("semantic", _with_trace) == "semantic")
+check("semantic without call-chain tool → structural",
+      _cap_method_from_calls("semantic", _with_read) == "structural")
+check("semantic with no tools → textual",
+      _cap_method_from_calls("semantic", _no_tools) == "textual")
+check("structural with read_file → structural",
+      _cap_method_from_calls("structural", _with_read) == "structural")
+check("structural with grep only → textual",
+      _cap_method_from_calls("structural", _with_grep) == "textual")
+check("structural with no tools → textual",
+      _cap_method_from_calls("structural", _no_tools) == "textual")
+check("textual always passes",
+      _cap_method_from_calls("textual", _no_tools) == "textual")
+check("inferred always passes",
+      _cap_method_from_calls("inferred", _no_tools) == "inferred")
+_msgs = [
+    {"role": "user", "content": "go"},
+    {"role": "assistant", "tool_calls": [
+        {"function": {"name": "trace_path"}},
+        {"function": {"name": "mcp__codebase-memory-mcp__get_code_snippet"}},
+    ]},
+    {"role": "assistant", "content": "done"},
+]
+_extracted = _extract_called_tools(_msgs)
+check("extracts bare name from plain tool", "trace_path" in _extracted)
+check("strips mcp prefix from mcp tool", "get_code_snippet" in _extracted)
+check("non-tool message ignored", "go" not in _extracted)
 
 print("\n[schema]")
 req = FINDINGS_SCHEMA["properties"]["hypotheses"]["items"]["required"]

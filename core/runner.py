@@ -681,6 +681,49 @@ claims `verified` without evidence. Do not mark obligations verified to force
 a finding through the gate."""
 
 
+_SEMANTIC_TOOLS = frozenset({
+    "trace_path", "get_code_snippet", "query_graph",
+})
+_STRUCTURAL_TOOLS = frozenset({
+    "parse_file_structure", "find_all_usages", "search_graph",
+    "search_code", "read_file", "run_semgrep",
+})
+_METHOD_ORDER = ("textual", "inferred", "structural", "semantic")
+
+
+def _tool_base(name: str) -> str:
+    """Return the bare tool name, stripping mcp__server__ prefix if present."""
+    return name.rsplit("__", 1)[-1] if "__" in name else name
+
+
+def _cap_method_from_calls(method: str, called: frozenset[str]) -> str:
+    """Cap a claimed analysis method to what the actual tool calls support.
+
+    semantic  → allowed only if a call-chain tool was used
+    structural → allowed only if a code-reading tool was used
+    textual   → always allowed
+    inferred  → always allowed (peer/static inference, no code read required)
+    """
+    if method == "semantic" and not (called & _SEMANTIC_TOOLS):
+        method = "structural"
+    if method == "structural" and not (called & (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS)):
+        method = "textual"
+    return method
+
+
+def _extract_called_tools(messages: list[dict]) -> frozenset[str]:
+    """Return the set of bare tool names called across all assistant turns."""
+    names: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            raw = tc.get("function", {}).get("name", "")
+            if raw:
+                names.add(_tool_base(raw))
+    return frozenset(names)
+
+
 def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]") -> None:
     valid = [e for e in evidence if not e.stale]
     if not valid:
@@ -1506,6 +1549,16 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         evidence_items, ev_conflicts = self._verify_evidence_items(repo_path, evidence_items)
         auto_conflicts.extend(ev_conflicts)
+
+        called_tools = _extract_called_tools(messages)
+        for ev in evidence_items:
+            capped = _cap_method_from_calls(ev.analysis_quality.method, called_tools)
+            if capped != ev.analysis_quality.method:
+                ev.analysis_quality.limitations.append(
+                    f"method downgraded {ev.analysis_quality.method}→{capped}: "
+                    f"no supporting tool call found in this run"
+                )
+                ev.analysis_quality.method = capped
 
         structured_questions: list[OpenQuestion] = []
         for sq_data in findings.get("structured_questions", []):
