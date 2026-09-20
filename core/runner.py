@@ -543,6 +543,18 @@ def _gate_hypothesis_status(
     return status
 
 
+_QUALITY_CONF_CAP = {"textual": 4, "inferred": 3, "structural": 7, "semantic": 10}
+
+
+def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]") -> None:
+    valid = [e for e in evidence if not e.stale]
+    if not valid:
+        return
+    worst_cap = min(_QUALITY_CONF_CAP.get(e.analysis_quality.method, 4) for e in valid)
+    if h.confidence > worst_cap:
+        h.confidence = worst_cap
+
+
 def _inject_minimum_obligations(h: "Hypothesis") -> None:
     existing_required = {
         ob.claim_type for ob in h.proof_obligations if ob.required_for_finding
@@ -1102,6 +1114,42 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     ev.snippet = "\n".join(lines[s:e])
                     ev.analysis_quality.method = "structural"
                     ev.analysis_quality.confidence = "high"
+                    if ev.anchor_text:
+                        def _norm(t: str) -> str:
+                            return " ".join(t.split())
+                        anchor_norm = _norm(ev.anchor_text)
+                        if anchor_norm in _norm(ev.snippet):
+                            pass
+                        else:
+                            lo = max(0, s - 10)
+                            hi = min(total, e + 10)
+                            window = "\n".join(lines[lo:hi])
+                            if anchor_norm in _norm(window):
+                                for li, ln in enumerate(lines[lo:hi], start=lo + 1):
+                                    if anchor_norm in _norm(ln):
+                                        ev.line_start = li
+                                        ev.line_end = li
+                                        ev.snippet = "\n".join(lines[li - 1:min(total, li + 2)])
+                                        break
+                                ev.analysis_quality.confidence = "medium"
+                                ev.analysis_quality.limitations.append(
+                                    "anchor_text found outside claimed range; line numbers corrected"
+                                )
+                            else:
+                                auto_conflicts.append(ConflictRecord(
+                                    kind="stale_reference",
+                                    description=(
+                                        f"Evidence anchor_text not found at or near claimed lines "
+                                        f"in {ev.file_path}:{ev.line_start}"
+                                    ),
+                                    left=f"evidence/{ev.id}",
+                                    right=f"{ev.file_path}:{ev.line_start}",
+                                    severity="blocks_finding",
+                                ))
+                                ev.analysis_quality.limitations.append(
+                                    f"anchor_text {ev.anchor_text!r:.40} not found in ±10 lines"
+                                )
+                                ev.stale = True
             except Exception as ex:
                 ev.analysis_quality.limitations.append(f"read error: {ex}")
             verified_evidence.append(ev)
@@ -1169,8 +1217,10 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     or h.id in c.description
                     or any(f"evidence/{eid}" in (c.left, c.right) for eid in ev_ids))
             ]
+            _apply_quality_caps(h, ev_for_h)
             _inject_minimum_obligations(h)
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
+            h.priority = h.compute_priority()
 
         open_questions = findings.get("open_questions", []) + validation_errors
 

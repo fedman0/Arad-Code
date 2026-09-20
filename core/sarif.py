@@ -99,9 +99,10 @@ def _security_severity(h: Hypothesis) -> str:
     return _SEVERITY_TO_SCORE.get(_int_severity(h.severity), "1.0")
 
 
-def _fingerprint(rule_id: str, file_uri: str, line: int) -> str:
-    composite = f"{rule_id}|{file_uri}|{line}"
-    return hashlib.sha256(composite.encode()).hexdigest()
+def _fingerprint(rule_id: str, file_uri: str, snippet: str) -> str:
+    norm = " ".join(snippet.split())
+    composite = f"{rule_id}|{file_uri}|{norm}"
+    return hashlib.sha256(composite.encode()).hexdigest()[:32]
 
 
 def _safe_uri(raw: str) -> Optional[str]:
@@ -224,9 +225,9 @@ def build_sarif(
 
         if locations and not is_synthetic:
             loc = locations[0]
-            region = loc.get("physicalLocation", {}).get("region", {})
             uri = loc.get("physicalLocation", {}).get("artifactLocation", {}).get("uri", "")
-            fp = _fingerprint(rule_id, uri, region.get("startLine", 0))
+            snippet = ev_list[0].snippet if ev_list else ""
+            fp = _fingerprint(rule_id, uri, snippet)
             result["partialFingerprints"] = {"primaryLocationLineHash": fp}
 
         results.append(result)

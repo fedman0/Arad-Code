@@ -223,8 +223,18 @@ class TextualAdapter:
         )
 
 
+_TREE_SITTER_EXTENSIONS = {
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".cs", ".java", ".go",
+    ".rb", ".cpp", ".c", ".h", ".hpp", ".rs", ".swift", ".kt",
+    ".php", ".lua", ".r", ".ex", ".exs", ".scala", ".m",
+}
+
+
 def get_adapter_for(file_path: str) -> LanguageAdapter:
     """Return the best available adapter for the given file extension."""
+    ext = Path(file_path).suffix.lower()
+    if ext not in _TREE_SITTER_EXTENSIONS:
+        return TextualAdapter()
     try:
         from tree_sitter_languages import get_parser as _  # noqa
         return TreeSitterAdapter()

@@ -197,8 +197,13 @@ class Hypothesis(BaseModel):
     uncovered_paths: list[str] = Field(default_factory=list)
     temporal_validity: Literal["checked_at_request", "snapshot", "unknown"] = "unknown"
     actor_capabilities: list[str] = Field(default_factory=list)
+    exposure: Literal["internet", "authenticated", "internal", "admin_only", "unreachable"] = "internet"
+    composed_of: list[str] = Field(default_factory=list)
+    enables: list[str] = Field(default_factory=list)
 
     def compute_priority(self) -> int:
+        if self.exposure == "unreachable":
+            return 0
         score = self.severity * 2 + self.confidence
         if self.reachability == "proven":
             score += 4
@@ -208,6 +213,8 @@ class Hypothesis(BaseModel):
             score += 3
         elif self.input_control == "partial":
             score += 1
+        exposure_bonus = {"internet": 3, "authenticated": 2, "internal": 1, "admin_only": 0}
+        score += exposure_bonus.get(self.exposure, 0)
         return score
 
 
@@ -224,6 +231,7 @@ class Evidence(BaseModel):
     stale: bool = False
     analysis_quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
     field_path: Optional[str] = None
+    anchor_text: Optional[str] = None
 
 
 class CoverageItem(BaseModel):
@@ -251,6 +259,19 @@ class ThreatModel(BaseModel):
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     amendments: list[dict] = Field(default_factory=list)
     created_by_skill: str = ""
+
+
+class AttackChain(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str
+    description: str
+    hypothesis_ids: list[str]
+    combined_severity: int = Field(ge=0, le=10, default=5)
+    combined_confidence: int = Field(ge=0, le=10, default=3)
+    combined_reachability: Literal["proven", "probable", "unknown"] = "unknown"
+    attack_steps: list[str] = Field(default_factory=list)
+    created_by_skill: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
 class ValidationRun(BaseModel):
@@ -331,6 +352,12 @@ FINDINGS_SCHEMA = {
                     "uncovered_paths": {"type": "array", "items": {"type": "string"}},
                     "temporal_validity": {"type": "string", "enum": ["checked_at_request", "snapshot", "unknown"]},
                     "actor_capabilities": {"type": "array", "items": {"type": "string"}},
+                    "exposure": {"type": "string", "enum": ["internet", "authenticated", "internal", "admin_only", "unreachable"],
+                                 "description": "How exposed the entry point is; unreachable findings are not reported"},
+                    "composed_of": {"type": "array", "items": {"type": "string"},
+                                    "description": "hypothesis IDs this finding depends on or chains from"},
+                    "enables": {"type": "array", "items": {"type": "string"},
+                                "description": "hypothesis IDs that become exploitable if this finding is confirmed"},
                 }
             }
         },
@@ -379,6 +406,8 @@ FINDINGS_SCHEMA = {
                         }
                     },
                     "field_path": {"type": "string"},
+                    "anchor_text": {"type": "string",
+                                    "description": "Exact substring that must appear at these lines to validate the claim; engine verifies this"},
                 }
             }
         },

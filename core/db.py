@@ -360,6 +360,13 @@ class EvidenceStore:
         ).fetchall()
         return [ReturnValueContract.model_validate_json(r["data"]) for r in rows]
 
+    def list_evidence_for_repo(self, repo_path: str) -> list[Evidence]:
+        rows = self.conn.execute(
+            "SELECT data FROM evidence WHERE repo_path=? AND stale=0",
+            (repo_path,)
+        ).fetchall()
+        return [Evidence.model_validate_json(r["data"]) for r in rows]
+
     def get_evidence_for_hypothesis(self, hypothesis_id: str) -> list[Evidence]:
         rows = self.conn.execute(
             "SELECT data FROM evidence WHERE hypothesis_id=? AND stale=0",
