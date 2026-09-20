@@ -212,10 +212,15 @@ class EvidenceStore:
                 (h.id, old_id),
             )
             prior = self.get_hypothesis(repo_path, h.id)
-            if prior and prior.status in ("rejected", "refuted", "human_confirmed"):
-                h.status = prior.status
-                if prior.status == "rejected" and prior.rejection_reason:
+            if prior:
+                if prior.status == "human_confirmed":
+                    h.status = prior.status
+                elif prior.status == "rejected" and prior.rejected_by == "human":
+                    h.status = prior.status
                     h.rejection_reason = prior.rejection_reason
+                    h.rejected_by = "human"
+                elif prior.status == "refuted":
+                    h.status = prior.status
                 h.uncertainty = prior.uncertainty + [u for u in h.uncertainty
                                                      if u not in prior.uncertainty]
         self.conn.execute(
@@ -463,6 +468,18 @@ class EvidenceStore:
         ).fetchall()
         return [ReturnValueContract.model_validate_json(r["data"]) for r in rows]
 
+    def list_all_evidence_for_repo(self, repo_path: str) -> list[Evidence]:
+        rows = self.conn.execute(
+            "SELECT data FROM evidence WHERE repo_path=?", (repo_path,)
+        ).fetchall()
+        return [Evidence.model_validate_json(r["data"]) for r in rows]
+
+    def get_all_evidence_for_hypothesis(self, hypothesis_id: str) -> list[Evidence]:
+        rows = self.conn.execute(
+            "SELECT data FROM evidence WHERE hypothesis_id=?", (hypothesis_id,)
+        ).fetchall()
+        return [Evidence.model_validate_json(r["data"]) for r in rows]
+
     def list_evidence_for_repo(self, repo_path: str) -> list[Evidence]:
         rows = self.conn.execute(
             "SELECT data FROM evidence WHERE repo_path=? AND stale=0",
@@ -648,6 +665,13 @@ class EvidenceStore:
     def mark_negative_evidence_stale(self, repo_path: str, ne_id: str) -> None:
         self.conn.execute(
             "UPDATE negative_evidence SET anchor_stale=1 WHERE id=? AND repo_path=?",
+            (ne_id, repo_path),
+        )
+        self.conn.commit()
+
+    def mark_negative_evidence_fresh(self, repo_path: str, ne_id: str) -> None:
+        self.conn.execute(
+            "UPDATE negative_evidence SET anchor_stale=0 WHERE id=? AND repo_path=?",
             (ne_id, repo_path),
         )
         self.conn.commit()

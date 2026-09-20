@@ -611,7 +611,7 @@ def _gate_hypothesis_status(
     be able to promote as well as demote — otherwise every hypothesis stays
     `initial` forever and nothing is ever exported.
     """
-    if h.status in ("rejected", "refuted", "blocked", "human_confirmed"):
+    if h.status in ("rejected", "refuted", "blocked", "human_confirmed", "needs_recheck"):
         return h.status
 
     valid_ev = [e for e in evidence if not e.stale]
@@ -875,6 +875,7 @@ def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
         suppression = profile.suppression_for(h.cwe or "", rule_text, path)
         if suppression:
             h.status = "rejected"
+            h.rejected_by = "profile"
             h.rejection_reason = (
                 f"suppressed by .llmsast.yaml: {suppression.reason} "
                 f"(expires {suppression.expires.isoformat()})"
@@ -921,6 +922,14 @@ class SkillRunner:
             if p.exists():
                 return p.read_text()
         raise FileNotFoundError(f"Skill '{skill_name}' not found in {self._skills_dir}")
+
+    def _get_skill_phase(self, skill_name: str) -> str:
+        for phase_dir in sorted(self._skills_dir.iterdir()):
+            if not phase_dir.is_dir():
+                continue
+            if (phase_dir / f"{skill_name}.md").exists():
+                return phase_dir.name
+        return ""
 
     def _get_commit(self, repo_path: str) -> str:
         try:
@@ -1068,7 +1077,7 @@ class SkillRunner:
     def _verify_negative_evidence(
         self, repo_path: str, items: list[NegativeEvidence]
     ) -> list[NegativeEvidence]:
-        """Verify NE anchor_text exists at or near anchor_line. Marks stale if missing."""
+        """Verify NE anchor_text exists at or near anchor_line. Bidirectional: sets stale=True/False."""
         def _norm(t: str) -> str:
             return " ".join(t.split())
 
@@ -1085,26 +1094,27 @@ class SkillRunner:
                     ne.anchor_stale = True
                     continue
                 s = max(0, ne.anchor_line - 1)
-                # check in ±10-line window
                 lo, hi = max(0, s - 10), min(total, s + 11)
                 window = _norm("\n".join(lines[lo:hi]))
-                if anchor_norm not in window:
-                    ne.anchor_stale = True
+                ne.anchor_stale = anchor_norm not in window
             except Exception:
                 ne.anchor_stale = True
         return items
 
     def check_negative_evidence_staleness(self, repo_path: str) -> list[NegativeEvidence]:
-        """Re-verify all stored NE anchors without LLM. Returns items that went stale."""
+        """Re-verify all stored NE anchors without LLM. Bidirectional. Returns items that went stale."""
         existing = self._db.list_negative_evidence(repo_path)
         if not existing:
             return []
+        was_stale = {ne.id: ne.anchor_stale for ne in existing}
         self._verify_negative_evidence(repo_path, existing)
         newly_stale: list[NegativeEvidence] = []
         for ne in existing:
-            if ne.anchor_stale:
+            if ne.anchor_stale and not was_stale[ne.id]:
                 self._db.mark_negative_evidence_stale(repo_path, ne.id)
                 newly_stale.append(ne)
+            elif not ne.anchor_stale and was_stale[ne.id]:
+                self._db.mark_negative_evidence_fresh(repo_path, ne.id)
         return newly_stale
 
     def _read_file(self, repo_path: str, file_path: str,
@@ -1481,6 +1491,7 @@ class SkillRunner:
             for h in hypotheses:
                 if h.id == hyp_id:
                     h.status = "rejected"
+                    h.rejected_by = "model"
                     h.rejection_reason = reason
                     h.rejection_condition = condition
                     h.rejection_controlling_evidence_ids = (
@@ -1547,6 +1558,8 @@ class SkillRunner:
         skill_text = self._load_skill(skill_name)
         commit = self._get_commit(repo_path)
         known_context = self._build_initial_context(repo_path)
+        phase = self._get_skill_phase(skill_name)
+        _ne_eligible = negative_evidence and phase in ("p3", "p4", "")
 
         initial_msg = f"""Repository: {repo_path}  (commit: {commit})
 
@@ -1554,7 +1567,7 @@ class SkillRunner:
 {skill_text}
 
 {OUTPUT_CONTRACT}
-{_NE_INSTRUCTION if negative_evidence else ""}
+{_NE_INSTRUCTION if _ne_eligible else ""}
 # Known Context
 {known_context}
 {f"# Additional Context\n{extra_context}" if extra_context else ""}
@@ -1781,14 +1794,16 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         open_questions = findings.get("open_questions", []) + validation_errors
 
-        if negative_evidence:
+        if _ne_eligible:
+            from .peer_analysis import _normalize_path as _norm_ep
+            from .sarif import _normalise_cwe
             ne_raw = findings.get("negative_evidence") or []
             ne_items: list[NegativeEvidence] = []
-            for ne_data in ne_raw:
+            for idx, ne_data in enumerate(ne_raw):
                 try:
                     ne = NegativeEvidence(
-                        entry_point=ne_data["entry_point"],
-                        safe_from=ne_data["safe_from"],
+                        entry_point=_norm_ep(ne_data["entry_point"]),
+                        safe_from=_normalise_cwe(ne_data.get("safe_from", "")) or ne_data.get("safe_from", ""),
                         because=ne_data["because"],
                         anchor_file=ne_data["anchor_file"],
                         anchor_line=int(ne_data["anchor_line"]),
@@ -1796,11 +1811,17 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                         commit=commit,
                     )
                     ne_items.append(ne)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    open_questions.append(f"negative_evidence[{idx}] invalid: {ex}")
             self._verify_negative_evidence(repo_path, ne_items)
             for ne in ne_items:
-                self._db.save_negative_evidence(repo_path, ne)
+                if ne.anchor_stale:
+                    open_questions.append(
+                        f"negative_evidence discarded (born-stale anchor): "
+                        f"{ne.entry_point} anchor_file={ne.anchor_file}:{ne.anchor_line}"
+                    )
+                else:
+                    self._db.save_negative_evidence(repo_path, ne)
 
         result = SkillResult(
             skill_name=skill_name,
@@ -1874,16 +1895,20 @@ Start by calling get_architecture() to orient yourself, then use the other tools
     async def run_phase(self, phase: str, repo_path: str, verbose: bool = False,
                         resume: bool = False, on_progress=None,
                         negative_evidence: bool = False) -> list[SkillResult]:
-        return await self._run_skill_list(
+        results = await self._run_skill_list(
             self._phase_skills(phase), repo_path, verbose, resume, on_progress,
             negative_evidence=negative_evidence)
+        self.reconcile(repo_path)
+        return results
 
     async def run_all(self, repo_path: str, verbose: bool = False,
                       resume: bool = False, on_progress=None,
                       negative_evidence: bool = False) -> list[SkillResult]:
-        return await self._run_skill_list(
+        results = await self._run_skill_list(
             self._all_skills(), repo_path, verbose, resume, on_progress,
             negative_evidence=negative_evidence)
+        self.reconcile(repo_path)
+        return results
 
     async def verify_hypothesis(self, hyp_id: str, repo_path: str,
                                  verbose: bool = False) -> dict:
@@ -2194,6 +2219,182 @@ When done, call finish() with:
         for c in ev_conflicts:
             self._db.save_conflict(repo_path, c)
         return h.id
+
+    def _check_anchor_present(self, repo_path: str, ev: "Evidence") -> bool:
+        def _norm(t: str) -> str:
+            return " ".join(t.split())
+        target = self._resolve_path(repo_path, ev.file_path)
+        if target is None or not target.is_file():
+            return False
+        try:
+            lines = target.read_text(errors="replace").splitlines()
+            total = len(lines)
+            if ev.line_start < 1 or ev.line_start > total:
+                return False
+            anchor_norm = _norm(ev.anchor_text or "")
+            if not anchor_norm or len(anchor_norm) < _MIN_ANCHOR_LEN:
+                return ev.line_start <= total
+            s = ev.line_start - 1
+            e = min(total, max(ev.line_end, ev.line_start))
+            lo, hi = max(0, s - 10), min(total, e + 10)
+            window = _norm("\n".join(lines[lo:hi]))
+            return anchor_norm in window
+        except Exception:
+            return False
+
+    def reconcile(self, repo_path: str) -> dict:
+        """Reconcile DB state without LLM.
+
+        1. Re-verify all evidence bidirectionally (stale ↔ fresh)
+        2. Re-verify all NE anchors bidirectionally
+        3. Recompute hypothesis status from gate:
+           - rejected_by=human → terminal
+           - human_confirmed + all evidence stale → needs_recheck
+        4. Detect NE/finding contradictions → ConflictRecord
+        5. Rebuild coverage from facts
+        6. Terminal status → priority 0
+        """
+        from .peer_analysis import _normalize_path as _norm_ep
+        from .sarif import _normalise_cwe
+
+        summary = {
+            "evidence_refreshed": 0, "evidence_staled": 0,
+            "ne_refreshed": 0, "ne_staled": 0,
+            "hypotheses_updated": 0, "coverage_updated": 0,
+            "contradictions_found": 0,
+        }
+
+        all_ev = self._db.list_all_evidence_for_repo(repo_path)
+        for ev in all_ev:
+            was_stale = ev.stale
+            now_present = self._check_anchor_present(repo_path, ev)
+            if was_stale and now_present:
+                ev.stale = False
+                self._db.save_evidence(repo_path, ev)
+                summary["evidence_refreshed"] += 1
+            elif not was_stale and not now_present:
+                ev.stale = True
+                self._db.save_evidence(repo_path, ev)
+                summary["evidence_staled"] += 1
+
+        ne_items = self._db.list_negative_evidence(repo_path)
+        was_stale_map = {ne.id: ne.anchor_stale for ne in ne_items}
+        self._verify_negative_evidence(repo_path, ne_items)
+        for ne in ne_items:
+            if ne.anchor_stale and not was_stale_map[ne.id]:
+                self._db.mark_negative_evidence_stale(repo_path, ne.id)
+                summary["ne_staled"] += 1
+            elif not ne.anchor_stale and was_stale_map[ne.id]:
+                self._db.mark_negative_evidence_fresh(repo_path, ne.id)
+                summary["ne_refreshed"] += 1
+
+        hypotheses = self._db.list_hypotheses(repo_path)
+        all_open_questions = self._db.list_open_questions(repo_path, "open")
+        profile = self._profile(repo_path)
+
+        for h in hypotheses:
+            if h.rejected_by == "human":
+                old_p = h.priority
+                h.priority = 0
+                if h.priority != old_p:
+                    self._db.save_hypothesis(repo_path, h)
+                continue
+
+            all_h_ev = self._db.get_all_evidence_for_hypothesis(h.id)
+            valid_ev = [e for e in all_h_ev if not e.stale]
+
+            if h.status == "human_confirmed" and all_h_ev and all(e.stale for e in all_h_ev):
+                h.status = "needs_recheck"
+                h.priority = 0
+                summary["hypotheses_updated"] += 1
+                self._db.save_hypothesis(repo_path, h)
+                continue
+
+            old_status = h.status
+            if h.status in ("rejected", "refuted") and h.rejected_by in ("model", "profile", None):
+                h.status = "initial"
+            conflicts = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
+            _apply_quality_caps(h, valid_ev)
+            _inject_minimum_obligations(h)
+            _apply_profile(h, valid_ev, profile)
+            h.status = _gate_hypothesis_status(h, valid_ev, conflicts, all_open_questions)
+            h.priority = h.compute_priority()
+            if h.status in ("rejected", "refuted", "blocked", "needs_recheck"):
+                h.priority = 0
+            if h.status != old_status:
+                summary["hypotheses_updated"] += 1
+            self._db.save_hypothesis(repo_path, h)
+
+        hypotheses = self._db.list_hypotheses(repo_path)
+        ne_fresh = [ne for ne in self._db.list_negative_evidence(repo_path) if not ne.anchor_stale]
+
+        existing_contradiction_lefts: set[str] = set()
+        for c in self._db.list_conflicts(repo_path, "open"):
+            if c.kind == "contradicting_claims" and c.left.startswith("ne/"):
+                existing_contradiction_lefts.add(c.left)
+
+        for ne in ne_fresh:
+            ne_ep = _norm_ep(ne.entry_point)
+            ne_cwe = _normalise_cwe(ne.safe_from)
+            ne_left = f"ne/{ne.id}"
+            if ne_left in existing_contradiction_lefts:
+                continue
+            for h in hypotheses:
+                if h.status in ("rejected", "refuted", "blocked", "needs_recheck"):
+                    continue
+                h_ep = _norm_ep(h.entry_point.split("->")[0].strip().split(" (")[0].strip())
+                h_cwe = _normalise_cwe(h.cwe)
+                if h_ep != ne_ep:
+                    continue
+                if ne_cwe and h_cwe and ne_cwe != h_cwe:
+                    continue
+                cf = ConflictRecord(
+                    kind="contradicting_claims",
+                    description=(
+                        f"NE says {ne.entry_point!r} is safe from {ne.safe_from}"
+                        f" ({ne.because}) — contradicts finding {h.id}"
+                    ),
+                    left=ne_left,
+                    right=h.id,
+                    severity="blocks_finding",
+                )
+                self._db.save_conflict(repo_path, cf)
+                existing_contradiction_lefts.add(ne_left)
+                summary["contradictions_found"] += 1
+
+        coverage_items = self._db.coverage_detail(repo_path)
+        hypotheses = self._db.list_hypotheses(repo_path)
+        ne_fresh = [ne for ne in self._db.list_negative_evidence(repo_path) if not ne.anchor_stale]
+
+        h_by_ep: dict[str, list] = {}
+        for h in hypotheses:
+            k = _norm_ep(h.entry_point.split("->")[0].strip().split(" (")[0].strip())
+            h_by_ep.setdefault(k, []).append(h)
+
+        ne_by_ep: dict[str, list] = {}
+        for ne in ne_fresh:
+            ne_by_ep.setdefault(_norm_ep(ne.entry_point), []).append(ne)
+
+        for item in coverage_items:
+            item_ep = _norm_ep(item["name"])
+            active = [h for h in h_by_ep.get(item_ep, [])
+                      if h.status in ("evidence_supported", "reproduced", "human_confirmed", "initial")]
+            fresh_ne = ne_by_ep.get(item_ep, [])
+            new_status = item["status"]
+            if active:
+                new_status = "reported"
+            elif fresh_ne:
+                new_status = "provably_safe"
+            if new_status != item["status"]:
+                from .models import CoverageItem as _CI
+                cov = _CI(
+                    kind=item["kind"], name=item["name"], status=new_status,
+                    blocker=item["blocker"], exclusion_reason=item["exclusion_reason"],
+                )
+                self._db.upsert_coverage(repo_path, cov)
+                summary["coverage_updated"] += 1
+
+        return summary
 
     async def close(self) -> None:
         await self._mcp.close()

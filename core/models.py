@@ -182,7 +182,7 @@ class Hypothesis(BaseModel):
     runtime_assumptions: Literal["verified", "env_dependent"] = "env_dependent"
     impact_basis: Literal["observed", "inferred"] = "inferred"
     validation: Literal["run", "not_run", "blocked"] = "not_run"
-    status: Literal["initial", "evidence_supported", "reproduced", "human_confirmed", "refuted", "rejected", "blocked"] = "initial"
+    status: Literal["initial", "evidence_supported", "reproduced", "human_confirmed", "refuted", "rejected", "blocked", "needs_recheck"] = "initial"
 
     severity: int = Field(ge=0, le=10, default=5)
     confidence: int = Field(ge=0, le=10, default=3)
@@ -192,6 +192,7 @@ class Hypothesis(BaseModel):
     rejection_reason: Optional[str] = None
     rejection_controlling_evidence_ids: list[str] = Field(default_factory=list)
     rejection_condition: str = ""
+    rejected_by: Optional[Literal["human", "model", "profile"]] = None
     commit: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
     cwe: Optional[str] = None
@@ -207,6 +208,8 @@ class Hypothesis(BaseModel):
     enables: list[str] = Field(default_factory=list)
 
     def compute_priority(self) -> int:
+        if self.status in ("rejected", "refuted", "blocked", "needs_recheck"):
+            return 0
         if self.exposure == "unreachable":
             return 0
         score = self.severity * 2 + self.confidence
@@ -287,6 +290,7 @@ class CoverageItem(BaseModel):
         "reported",
         "blocked",
         "excluded",
+        "provably_safe",
     ]
     blocker: Optional[str] = None
     exclusion_reason: Optional[str] = None

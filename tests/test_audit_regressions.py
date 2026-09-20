@@ -18,6 +18,7 @@ from core.runner import (
     SkillRunner, _gate_hypothesis_status, _apply_profile,
     _cap_method_from_calls, _extract_called_tools,
     _cap_method_per_evidence, _build_tool_call_index,
+    _apply_quality_caps,
 )
 from core.sarif import build_sarif, _rule_id, _safe_uri
 
@@ -342,6 +343,83 @@ _stale_rec = next((n for n in _ne_store.list_negative_evidence(_ne_repo)
                    if n.entry_point == "DELETE /orders/{id}"), None)
 check("stale is persisted in DB",
       _stale_rec is not None and _stale_rec.anchor_stale is True)
+
+print("\n[reconcile]")
+_struc_ev2 = AnalysisQuality(method="structural")
+
+
+def _fresh_reconcile_env():
+    d = Path(tempfile.mkdtemp())
+    (d / "handler.py").write_text(
+        "def handle():\n    if user.id != owner_id:\n        raise PermissionError\n    return data\n"
+    )
+    st = EvidenceStore(Path(tempfile.mkdtemp()) / "rec.db")
+    r = str(d)
+    st.upsert_repo(r, "c1", [])
+    rn = SkillRunner(Config(api_key="d", db_path=str(Path(tempfile.mkdtemp()) / "t.db")), st, None)
+    return d, st, r, rn
+
+
+_d1, _st1, _r1, _rn1 = _fresh_reconcile_env()
+_ne_stale_test = NegativeEvidence(
+    entry_point="POST /orders/{id}/cancel",
+    safe_from="CWE-639",
+    because="ownership check",
+    anchor_file="handler.py",
+    anchor_line=2,
+    anchor_text="if user.id != owner_id:",
+)
+_st1.save_negative_evidence(_r1, _ne_stale_test)
+_st1.mark_negative_evidence_stale(_r1, _ne_stale_test.id)
+s1 = _rn1.reconcile(_r1)
+check("stale not sticky: anchor restored → refreshed by reconcile",
+      s1["ne_refreshed"] == 1 and s1["ne_staled"] == 0)
+_after_refresh = next((n for n in _st1.list_negative_evidence(_r1)
+                       if n.id == _ne_stale_test.id), None)
+check("refreshed NE not stale in DB", _after_refresh is not None and not _after_refresh.anchor_stale)
+
+_d2, _st2, _r2, _rn2 = _fresh_reconcile_env()
+_h_llm_reject = mk(reachability="proven",
+                   proof_obligations=[ProofObligation(question="q", status="verified")])
+_h_llm_reject.rejected_by = "model"
+_h_llm_reject.status = "rejected"
+_st2.save_hypothesis(_r2, _h_llm_reject)
+_strong_ev = Evidence(hypothesis_id=_h_llm_reject.id, kind="code", description="d",
+                      file_path="handler.py", line_start=2, line_end=3,
+                      snippet="x", analysis_quality=_struc_ev2)
+_st2.save_evidence(_r2, _strong_ev)
+_rn2.reconcile(_r2)
+_h_after = _st2.get_hypothesis(_r2, _h_llm_reject.id)
+check("LLM reject not terminal: reconcile re-gates with strong evidence",
+      _h_after is not None and _h_after.status in ("evidence_supported", "initial"))
+
+_d3, _st3, _r3, _rn3 = _fresh_reconcile_env()
+_h_human = mk(entry_point="/unique-ep-hc", observable_impact="unique-hc-impact")
+_h_human.status = "human_confirmed"
+_st3.save_hypothesis(_r3, _h_human)
+_stale_ev = Evidence(hypothesis_id=_h_human.id, kind="code", description="stale",
+                     file_path="handler.py", line_start=99, line_end=99,
+                     snippet="x", stale=True, analysis_quality=_struc_ev2)
+_st3.save_evidence(_r3, _stale_ev)
+_rn3.reconcile(_r3)
+_h_recheck = _st3.get_hypothesis(_r3, _h_human.id)
+check("human_confirmed + all stale evidence → needs_recheck",
+      _h_recheck is not None and _h_recheck.status == "needs_recheck")
+check("needs_recheck → priority 0", _h_recheck is not None and _h_recheck.priority == 0)
+
+_d4, _st4, _r4, _rn4 = _fresh_reconcile_env()
+_h_human_rej = mk(entry_point="/unique-ep-hr", observable_impact="unique-hr-impact")
+_h_human_rej.rejected_by = "human"
+_h_human_rej.status = "rejected"
+_st4.save_hypothesis(_r4, _h_human_rej)
+_strong_ev2 = Evidence(hypothesis_id=_h_human_rej.id, kind="code", description="fresh",
+                       file_path="handler.py", line_start=2, line_end=3,
+                       snippet="x", stale=False, analysis_quality=_struc_ev2)
+_st4.save_evidence(_r4, _strong_ev2)
+_rn4.reconcile(_r4)
+_h_human_rej_after = _st4.get_hypothesis(_r4, _h_human_rej.id)
+check("human rejected stays rejected even with fresh evidence",
+      _h_human_rej_after is not None and _h_human_rej_after.status == "rejected")
 
 print("\n[resume]")
 rp = "/tmp/regress-resume"
