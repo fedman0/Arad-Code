@@ -317,11 +317,16 @@ FINDINGS_SCHEMA = {
                             "properties": {
                                 "question": {"type": "string"},
                                 "status": {"type": "string", "enum": ["verified", "unresolved", "refuted"]},
+                                "claim_type": {"type": "string", "enum": ["reachability", "input_control", "guard", "impact", "other"]},
+                                "required_for_finding": {"type": "boolean"},
                                 "evidence_ref": {"type": "string"},
                                 "reason": {"type": "string"},
                             }
                         }
                     },
+                    "guard_analysis": {"type": "string", "enum": ["complete", "incomplete"]},
+                    "runtime_assumptions": {"type": "string", "enum": ["verified", "env_dependent"]},
+                    "impact_basis": {"type": "string", "enum": ["observed", "inferred"]},
                     "guard_coverage": {"type": "string", "enum": ["all_paths", "some_paths", "no_paths", "unknown"]},
                     "uncovered_paths": {"type": "array", "items": {"type": "string"}},
                     "temporal_validity": {"type": "string", "enum": ["checked_at_request", "snapshot", "unknown"]},

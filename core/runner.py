@@ -518,6 +518,7 @@ def _gate_hypothesis_status(
     h: "Hypothesis",
     evidence: "list[Evidence]",
     conflicts: "list[ConflictRecord]",
+    open_questions: "list[OpenQuestion] | None" = None,
 ) -> str:
     if h.status in ("rejected", "closed"):
         return h.status
@@ -534,7 +535,43 @@ def _gate_hypothesis_status(
         return "initial"
     if any(ob.required_for_finding and ob.status == "refuted" for ob in h.proof_obligations):
         return "initial"
+    if open_questions:
+        for q in open_questions:
+            if q.impact == "blocks_finding" and q.status == "open":
+                if not q.affects_hypothesis_ids or h.id in q.affects_hypothesis_ids:
+                    return "initial"
     return status
+
+
+def _inject_minimum_obligations(h: "Hypothesis") -> None:
+    existing_required = {
+        ob.claim_type for ob in h.proof_obligations if ob.required_for_finding
+    }
+    from .models import ProofObligation
+    if "reachability" not in existing_required and h.reachability != "proven":
+        h.proof_obligations.append(ProofObligation(
+            question="Is the entry point reachable by the described actor?",
+            status="unresolved",
+            claim_type="reachability",
+            required_for_finding=True,
+            reason=f"engine-injected (reachability={h.reachability})",
+        ))
+    if "input_control" not in existing_required and h.input_control not in ("full", "partial"):
+        h.proof_obligations.append(ProofObligation(
+            question="Does the attacker control the security-relevant input?",
+            status="unresolved",
+            claim_type="input_control",
+            required_for_finding=True,
+            reason=f"engine-injected (input_control={h.input_control})",
+        ))
+    if "guard" not in existing_required and h.guard_coverage in ("unknown", "some_paths"):
+        h.proof_obligations.append(ProofObligation(
+            question="Are all attack paths free of effective guards?",
+            status="unresolved",
+            claim_type="guard",
+            required_for_finding=True,
+            reason=f"engine-injected (guard_coverage={h.guard_coverage})",
+        ))
 
 
 class SkillRunner:
@@ -728,7 +765,9 @@ class SkillRunner:
             return f"Function summary saved for {qn}."
         if name == "get_function_summary":
             qn = args.get("qualified_name", "")
-            fs = self._db.get_function_summary(repo_path, qn)
+            if not qn:
+                return "qualified_name is required."
+            fs = self._db.get_function_summary(repo_path, qn, current_commit=self._get_commit(repo_path))
             if fs is None:
                 return f"No summary found for {qn}."
             return fs.model_dump_json(indent=2)
@@ -1103,8 +1142,6 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             except Exception as ex:
                 validation_errors.append(f"conflict[{i}] invalid: {ex}")
 
-        all_conflicts = auto_conflicts + llm_conflicts
-
         for h in hypotheses:
             if h.guard_coverage == "all_paths" and h.uncovered_paths:
                 auto_conflicts.append(ConflictRecord(
@@ -1118,6 +1155,11 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     severity="degrades_confidence",
                 ))
 
+        all_conflicts = auto_conflicts + llm_conflicts
+
+        db_open_questions = self._db.list_open_questions(repo_path, status="open")
+        all_open_questions = db_open_questions + structured_questions
+
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
             ev_ids = {e.id for e in ev_for_h}
@@ -1127,7 +1169,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                     or h.id in c.description
                     or any(f"evidence/{eid}" in (c.left, c.right) for eid in ev_ids))
             ]
-            h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h)
+            _inject_minimum_obligations(h)
+            h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
 
         open_questions = findings.get("open_questions", []) + validation_errors
 
@@ -1298,7 +1341,8 @@ When done, call finish() with:
 
         all_db_conflicts = self._db.get_conflicts_for_hypothesis(hyp.id)
         all_db_evidence = self._db.get_evidence_for_hypothesis(hyp.id)
-        hyp.status = _gate_hypothesis_status(hyp, all_db_evidence, all_db_conflicts)
+        db_open_questions = self._db.list_open_questions(repo_path, status="open")
+        hyp.status = _gate_hypothesis_status(hyp, all_db_evidence, all_db_conflicts, db_open_questions)
         self._db.save_hypothesis(repo_path, hyp)
 
         return verdict

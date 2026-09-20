@@ -281,14 +281,20 @@ class EvidenceStore:
         )
         self.conn.commit()
 
-    def get_function_summary(self, repo_path: str, qualified_name: str) -> Optional[FunctionSummary]:
+    def get_function_summary(self, repo_path: str, qualified_name: str, current_commit: str = "") -> Optional[FunctionSummary]:
         row = self.conn.execute(
             "SELECT data FROM function_summaries WHERE repo_path=? AND qualified_name=? ORDER BY created_at DESC LIMIT 1",
             (repo_path, qualified_name)
         ).fetchone()
         if row is None:
             return None
-        return FunctionSummary.model_validate_json(row["data"])
+        fs = FunctionSummary.model_validate_json(row["data"])
+        if current_commit and fs.commit and fs.commit != current_commit:
+            fs.quality.limitations.append(
+                f"summary from commit {fs.commit!r}; current is {current_commit!r} — re-analyze if guards changed"
+            )
+            fs.quality.confidence = "low"
+        return fs
 
     def list_function_summaries(self, repo_path: str, limit: int = 50) -> list[FunctionSummary]:
         rows = self.conn.execute(
@@ -363,8 +369,8 @@ class EvidenceStore:
 
     def get_conflicts_for_hypothesis(self, hypothesis_id: str) -> list[ConflictRecord]:
         rows = self.conn.execute(
-            "SELECT data FROM conflicts WHERE (data LIKE ? OR data LIKE ?) AND status='open'",
-            (f'%"{hypothesis_id}"%', f'%"{hypothesis_id}"%')
+            "SELECT data FROM conflicts WHERE data LIKE ? AND status='open'",
+            (f'%{hypothesis_id}%',)
         ).fetchall()
         return [ConflictRecord.model_validate_json(r["data"]) for r in rows]
 
@@ -373,6 +379,14 @@ class EvidenceStore:
             "UPDATE evidence SET stale=1 WHERE repo_path=? AND commit_sha=? AND commit_sha != ''",
             (repo_path, old_commit)
         )
+        rows = self.conn.execute(
+            "SELECT id, data FROM evidence WHERE repo_path=? AND commit_sha=? AND commit_sha != '' AND stale=1",
+            (repo_path, old_commit)
+        ).fetchall()
+        for row in rows:
+            d = json.loads(row["data"])
+            d["stale"] = True
+            self.conn.execute("UPDATE evidence SET data=? WHERE id=?", (json.dumps(d), row["id"]))
         self.conn.commit()
 
     def save_skill_result(self, repo_path: str, result: SkillResult):
