@@ -15,6 +15,7 @@ from .models import (
 from .code_analysis import (
     parse_file_structure, find_all_usages, run_semgrep, list_dir, run_shell
 )
+from .profile import ProjectProfile, load_profile
 
 SYSTEM_PROMPT = """You are an expert security researcher performing authorized penetration testing on a codebase.
 
@@ -586,6 +587,29 @@ def _inject_minimum_obligations(h: "Hypothesis") -> None:
         ))
 
 
+def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
+                   profile: "ProjectProfile") -> None:
+    if profile.is_empty():
+        return
+
+    override = profile.exposure_for(h.entry_point)
+    if override:
+        h.exposure = override
+
+    rule_text = " ".join(filter(None, [h.cwe, h.violated_invariant, h.skill_source]))
+    paths = [e.file_path for e in evidence if e.file_path]
+    for path in paths or [""]:
+        suppression = profile.suppression_for(rule_text, path)
+        if suppression:
+            h.status = "rejected"
+            h.rejection_reason = (
+                f"suppressed by .llmsast.yaml: {suppression.reason} "
+                f"(expires {suppression.expires.isoformat()})"
+            )
+            h.rejection_condition = f"{suppression.rule} in {suppression.path}"
+            return
+
+
 class SkillRunner:
     def __init__(self, cfg: Config, db: EvidenceStore, mcp: CodebaseMemoryClient):
         self._cfg = cfg
@@ -898,6 +922,9 @@ class SkillRunner:
 
     def _build_initial_context(self, repo_path: str) -> str:
         parts: list[str] = []
+        profile_text = load_profile(repo_path).to_prompt()
+        if profile_text:
+            parts.append(profile_text)
         threat_model = self._db.get_threat_model(repo_path)
         if threat_model:
             parts.append("# Threat Model (built by prior skill — use this as your starting context)\n" + threat_model)
@@ -1207,6 +1234,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
 
         db_open_questions = self._db.list_open_questions(repo_path, status="open")
         all_open_questions = db_open_questions + structured_questions
+        profile = load_profile(repo_path)
 
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
@@ -1220,6 +1248,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             _apply_quality_caps(h, ev_for_h)
             _inject_minimum_obligations(h)
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
+            _apply_profile(h, ev_for_h, profile)
             h.priority = h.compute_priority()
 
         open_questions = findings.get("open_questions", []) + validation_errors

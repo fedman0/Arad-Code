@@ -132,6 +132,18 @@ class EvidenceStore:
             security_relevance TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_rvc_repo_fn ON return_value_contracts(repo_path, function_qualified_name);
+
+        CREATE TABLE IF NOT EXISTS triage_decisions (
+            hypothesis_id TEXT PRIMARY KEY,
+            repo_path TEXT,
+            decision TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            confidence_at_decision INTEGER,
+            severity_at_decision INTEGER,
+            skill_source TEXT,
+            decided_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_triage_repo ON triage_decisions(repo_path);
         """)
         self.conn.commit()
 
@@ -395,6 +407,66 @@ class EvidenceStore:
             d["stale"] = True
             self.conn.execute("UPDATE evidence SET data=? WHERE id=?", (json.dumps(d), row["id"]))
         self.conn.commit()
+
+    def save_triage_decision(self, repo_path: str, h: Hypothesis,
+                             decision: str, reason: str = "") -> None:
+        from datetime import datetime
+        self.conn.execute(
+            """INSERT OR REPLACE INTO triage_decisions
+               (hypothesis_id, repo_path, decision, reason, confidence_at_decision,
+                severity_at_decision, skill_source, decided_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (h.id, repo_path, decision, reason, h.confidence, h.severity,
+             h.skill_source, datetime.utcnow().isoformat())
+        )
+        self.conn.commit()
+
+    def get_triage_decision(self, hypothesis_id: str) -> Optional[dict]:
+        row = self.conn.execute(
+            "SELECT * FROM triage_decisions WHERE hypothesis_id=?", (hypothesis_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_triage_decisions(self, repo_path: Optional[str] = None) -> list[dict]:
+        if repo_path:
+            rows = self.conn.execute(
+                "SELECT * FROM triage_decisions WHERE repo_path=? ORDER BY decided_at DESC",
+                (repo_path,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM triage_decisions ORDER BY decided_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def calibration_buckets(self, repo_path: Optional[str] = None) -> dict[int, dict]:
+        """Empirical accuracy per raw confidence score, from triage decisions.
+
+        A confidence number means nothing until it is measured against outcomes;
+        this is the table that makes "anything above 7" a claim rather than a guess.
+        """
+        decisions = [d for d in self.list_triage_decisions(repo_path)
+                     if d["decision"] in ("accept", "reject")]
+        buckets: dict[int, dict] = {}
+        for d in decisions:
+            conf = d["confidence_at_decision"]
+            if conf is None:
+                continue
+            b = buckets.setdefault(conf, {"accepted": 0, "rejected": 0})
+            b["accepted" if d["decision"] == "accept" else "rejected"] += 1
+        for conf, b in buckets.items():
+            total = b["accepted"] + b["rejected"]
+            b["total"] = total
+            b["empirical"] = b["accepted"] / total if total else 0.0
+        return dict(sorted(buckets.items()))
+
+    def coverage_detail(self, repo_path: str) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT kind, name, status, blocker, exclusion_reason FROM coverage
+               WHERE repo_path=? ORDER BY kind, status, name""",
+            (repo_path,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def save_skill_result(self, repo_path: str, result: SkillResult):
         for h in result.hypotheses:
