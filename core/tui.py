@@ -343,14 +343,15 @@ class AradCodeApp(App):
             elif status == "skipped":
                 self._log(f"  [dim]→ {name}: skipped[/dim]")
 
-        if phase:
-            await runner.run_phase(phase, repo, verbose=False, resume=resume,
-                                   on_progress=_on_progress)
-        else:
-            await runner.run_all(repo, verbose=False, resume=resume,
-                                 on_progress=_on_progress)
-
-        await runner.close()
+        try:
+            if phase:
+                await runner.run_phase(phase, repo, verbose=False, resume=resume,
+                                       on_progress=_on_progress)
+            else:
+                await runner.run_all(repo, verbose=False, resume=resume,
+                                     on_progress=_on_progress)
+        finally:
+            await runner.close()
 
     async def _cmd_skill(self, args: list[str]):
         if len(args) < 2:
@@ -368,23 +369,24 @@ class AradCodeApp(App):
         repo = str(Path(repo_path).resolve())
         self._log(f"[bold]Running skill[/bold] {skill_name} on {repo}")
 
-        result = await runner.run_skill(skill_name, repo, extra)
+        try:
+            result = await runner.run_skill(skill_name, repo, extra)
 
-        h_count = len(result.hypotheses)
-        conf_count = sum(1 for h in result.hypotheses
-                         if h.status in ("evidence_supported", "reproduced"))
-        self._log(f"\n[green]Done.[/green] {h_count} hypothesis/hypotheses ({conf_count} confirmed)")
+            h_count = len(result.hypotheses)
+            conf_count = sum(1 for h in result.hypotheses
+                             if h.status in ("evidence_supported", "reproduced"))
+            self._log(f"\n[green]Done.[/green] {h_count} hypothesis/hypotheses ({conf_count} confirmed)")
 
-        _sev_color = {"critical": "bright_red", "high": "red",
-                      "medium": "yellow", "low": "green"}
-        for h in result.hypotheses[:15]:
-            color = _sev_color.get(h.severity, "white")
-            self._log(f"  [{color}]■[/{color}] [{h.status}] {h.violated_invariant[:80]}")
+            _sev_color = {"critical": "bright_red", "high": "red",
+                          "medium": "yellow", "low": "green"}
+            for h in result.hypotheses[:15]:
+                color = _sev_color.get(h.severity, "white")
+                self._log(f"  [{color}]■[/{color}] [{h.status}] {h.violated_invariant[:80]}")
 
-        if result.open_questions:
-            self._log(f"\n[dim]{len(result.open_questions)} open question(s)[/dim]")
-
-        await runner.close()
+            if result.open_questions:
+                self._log(f"\n[dim]{len(result.open_questions)} open question(s)[/dim]")
+        finally:
+            await runner.close()
 
     async def _cmd_workflow(self, args: list[str]):
         if not args:
@@ -413,24 +415,25 @@ class AradCodeApp(App):
 
         self._log(f"[bold]Running workflow[/bold] {script_path}")
 
-        from .workflow import run_workflow_script
-        result = await run_workflow_script(
-            script_path,
-            runner=runner,
-            repo_path=repo_path,
-            on_event=self._progress,
-        )
-
-        if isinstance(result, dict):
-            confirmed = [f for f in result.get("findings", []) if f.get("confirmed")]
-            self._log(
-                f"\n[green]Workflow complete.[/green] "
-                f"{len(confirmed)} confirmed / {len(result.get('findings', []))} total findings"
+        try:
+            from .workflow import run_workflow_script
+            result = await run_workflow_script(
+                script_path,
+                runner=runner,
+                repo_path=repo_path,
+                on_event=self._progress,
             )
-        else:
-            self._log(f"\n[green]Workflow complete.[/green] Result: {result}")
 
-        await runner.close()
+            if isinstance(result, dict):
+                confirmed = [f for f in result.get("findings", []) if f.get("confirmed")]
+                self._log(
+                    f"\n[green]Workflow complete.[/green] "
+                    f"{len(confirmed)} confirmed / {len(result.get('findings', []))} total findings"
+                )
+            else:
+                self._log(f"\n[green]Workflow complete.[/green] Result: {result}")
+        finally:
+            await runner.close()
 
     async def _cmd_deep_research(self, args: list[str]):
         if not args:
@@ -458,11 +461,12 @@ class AradCodeApp(App):
 
         self._log(f"[bold]Deep Research:[/bold] {_rtl(question)}")
 
-        from .deep_research import deep_research, format_research_output
-        result = await deep_research(question, runner=runner, repo_path=repo_path)
-        self._log(format_research_output(result))
-
-        await runner.close()
+        try:
+            from .deep_research import deep_research, format_research_output
+            result = await deep_research(question, runner=runner, repo_path=repo_path)
+            self._log(format_research_output(result))
+        finally:
+            await runner.close()
 
     async def _cmd_cli(self, parts: list[str]):
         import subprocess
