@@ -16,7 +16,7 @@ from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from .rtl import render as _rtl
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 _BANNER = f"""[bold cyan]Arad Code[/bold cyan] [dim]v{VERSION}[/dim]
 [dim]Type a command or message. ↑↓ history. Ctrl+C stop. Ctrl+L clear.[/dim]"""

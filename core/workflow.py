@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import importlib.util
+import inspect
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -138,23 +139,28 @@ class WorkflowContext:
     async def parallel(self, tasks: list) -> list:
         coros = []
         for t in tasks:
-            if asyncio.iscoroutine(t):
+            if inspect.isawaitable(t):
                 coros.append(t)
             elif callable(t):
                 r = t()
-                coros.append(r if asyncio.iscoroutine(r) else asyncio.coroutine(lambda v=r: v)())
+                coros.append(r if inspect.isawaitable(r) else asyncio.sleep(0, result=r))
             else:
                 coros.append(asyncio.sleep(0, result=t))
-        return list(await asyncio.gather(*coros, return_exceptions=False))
+        raw = await asyncio.gather(*coros, return_exceptions=True)
+        return [{"error": str(r)} if isinstance(r, BaseException) else r for r in raw]
 
     async def pipeline(self, items: list, *fns) -> list:
         results = list(items)
         for fn in fns:
-            next_results = []
+            coros = []
             for item in results:
                 r = fn(item)
-                if asyncio.iscoroutine(r):
-                    r = await r
+                coros.append(r if inspect.isawaitable(r) else asyncio.sleep(0, result=r))
+            raw = await asyncio.gather(*coros, return_exceptions=True)
+            next_results = []
+            for r in raw:
+                if isinstance(r, BaseException):
+                    continue
                 if isinstance(r, list):
                     next_results.extend(r)
                 elif r is not None:
@@ -173,8 +179,8 @@ class WorkflowContext:
         _runner = runner or self._runner
         _repo = repo_path or self._repo_path
 
-        if _round >= _VOTE_RETRIES:
-            return {**finding, "confirmed": False, "verification_note": f"inconclusive after {_VOTE_RETRIES+1} rounds"}
+        if _round > _VOTE_RETRIES:
+            return {**finding, "confirmed": False, "verification_note": f"inconclusive after {_VOTE_RETRIES + 1} rounds"}
 
         perspective_notes = [
             "Try to REFUTE this finding. Look for missing checks, wrong assumptions, unreachable paths.",
@@ -202,8 +208,8 @@ class WorkflowContext:
             for i, p in enumerate(vote_prompts)
         ])
 
-        true_votes = [v for v in votes if v.get("is_real")]
-        false_votes = [v for v in votes if not v.get("is_real")]
+        true_votes = [v for v in votes if v.get("is_real") is True]
+        false_votes = [v for v in votes if v.get("is_real") is False]
 
         self._emit("votes_counted", {
             "finding": finding.get("id", "?"),
