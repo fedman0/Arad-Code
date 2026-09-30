@@ -1643,11 +1643,16 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 f"skill {skill_name} did not produce structured output after {max_iterations} iterations"
             ]}
 
+        validation_errors: list[str] = []
         hypotheses = []
         for h_data in findings.get("hypotheses", []):
             h_data["skill_source"] = skill_name
             h_data["commit"] = commit
-            h = Hypothesis.model_validate(h_data)
+            try:
+                h = Hypothesis.model_validate(h_data)
+            except Exception:
+                validation_errors.append(f"hypothesis validation error: {h_data.get('violated_invariant', '')[:80]}")
+                continue
             if h.status == "reproduced":
                 h.status = "evidence_supported"
             unresolved_obs = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
@@ -1656,9 +1661,12 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             h.priority = h.compute_priority()
             hypotheses.append(h)
 
-        coverage = [CoverageItem.model_validate(c) for c in findings.get("coverage", [])]
-
-        validation_errors: list[str] = []
+        coverage = []
+        for c in findings.get("coverage", []):
+            try:
+                coverage.append(CoverageItem.model_validate(c))
+            except Exception:
+                pass
 
         entry_points: list[EntryPoint] = []
         for i, ep_data in enumerate(findings.get("entry_points_found", [])):

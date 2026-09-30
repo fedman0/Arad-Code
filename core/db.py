@@ -183,6 +183,41 @@ class EvidenceStore:
             self.conn.execute("ALTER TABLE hypotheses ADD COLUMN fingerprint TEXT")
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_hyp_fp ON hypotheses(repo_path, fingerprint)")
+        if "rejected_at_commit" not in hyp_cols:
+            self.conn.execute("ALTER TABLE hypotheses ADD COLUMN rejected_at_commit TEXT DEFAULT ''")
+
+        ep_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(entry_points)")}
+        if "handler_qn" not in ep_cols:
+            self.conn.execute("DROP TABLE entry_points")
+            self.conn.execute("""
+                CREATE TABLE entry_points (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_path TEXT,
+                    data TEXT NOT NULL,
+                    commit_sha TEXT,
+                    handler_qn TEXT,
+                    path TEXT,
+                    UNIQUE(repo_path, handler_qn, path)
+                )""")
+
+        g_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(guards)")}
+        if "location_qn" not in g_cols:
+            self.conn.execute("DROP TABLE guards")
+            self.conn.execute("""
+                CREATE TABLE guards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo_path TEXT,
+                    data TEXT NOT NULL,
+                    commit_sha TEXT,
+                    location_qn TEXT,
+                    line INTEGER,
+                    UNIQUE(repo_path, location_qn, line)
+                )""")
+
+        ne_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(negative_evidence)")}
+        if "disputed" not in ne_cols:
+            self.conn.execute("ALTER TABLE negative_evidence ADD COLUMN disputed INTEGER DEFAULT 0")
+
         self.conn.commit()
 
     def upsert_repo(self, path: str, commit: str, languages: list[str], notes: str = ""):

@@ -350,6 +350,8 @@ def list_dir(repo_path: str, rel_path: str = "", max_entries: int = 80) -> str:
         return "Access denied"
     if not target.exists():
         return f"Path not found: {rel_path}"
+    if target.is_file():
+        return f"Not a directory: {rel_path}"
     skip = {"node_modules", ".git", "obj", "bin", "__pycache__", "dist", "build",
             ".vs", "vendor", "target", "generated"}
     lines = []

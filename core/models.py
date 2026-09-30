@@ -281,7 +281,7 @@ class NegativeEvidence(BaseModel):
 
 class CoverageItem(BaseModel):
     kind: Literal["entry_point", "actor", "resource", "state_transition", "trust_boundary",
-                  "sensitive_op", "error_path", "async_path", "environment"]
+                  "sensitive_op", "error_path", "async_path", "environment", "service"]
     name: str
     status: Literal[
         "unseen",
