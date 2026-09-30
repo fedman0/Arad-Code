@@ -633,8 +633,30 @@ def _gate_hypothesis_status(
             return "initial"
 
     strong_methods = {"structural", "semantic"}
+    # config files (Dockerfile, YAML, .conf, .env, .ini, .toml) can never be
+    # parsed structurally — allow textual when all required obligations verified
+    _CONFIG_EXTS = {".yml", ".yaml", ".conf", ".env", ".ini", ".toml", ".cfg",
+                    ".properties", ".json", ".xml"}
+    _CONFIG_NAMES = {"dockerfile", "supervisord.conf", ".env", ".env.example",
+                     ".env_example", "docker-compose.yml", "docker-compose.yaml"}
+
+    def _is_config_file(path: str) -> bool:
+        import os
+        name = os.path.basename(path).lower()
+        if name in _CONFIG_NAMES:
+            return True
+        _, ext = os.path.splitext(name)
+        return ext in _CONFIG_EXTS
+
+    all_required_verified = all(
+        ob.status == "verified"
+        for ob in h.proof_obligations
+        if ob.required_for_finding
+    )
+    has_config_evidence = any(_is_config_file(e.file_path) for e in valid_ev)
     if not any(e.analysis_quality.method in strong_methods for e in valid_ev):
-        return "initial"
+        if not (has_config_evidence and all_required_verified):
+            return "initial"
 
     return "reproduced" if h.status == "reproduced" else "evidence_supported"
 
@@ -1637,6 +1659,20 @@ Start by calling get_architecture() to orient yourself, then use the other tools
             if finish_args is not None:
                 findings = finish_args
                 break
+
+            # nudge the model to call finish() before the hard limit
+            nudge_at = max_iterations - 6
+            if iteration >= nudge_at:
+                remaining = max_iterations - iteration - 1
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"IMPORTANT: You have {remaining} iteration(s) left. "
+                        "You MUST call the finish() tool RIGHT NOW with your findings. "
+                        "Include whatever hypotheses and coverage you have gathered so far. "
+                        "Do not call any other tool — call finish() as your only tool call."
+                    ),
+                })
 
         if findings is None:
             findings = {"hypotheses": [], "coverage": [], "open_questions": [
