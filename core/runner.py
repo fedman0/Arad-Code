@@ -1682,7 +1682,14 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
                     args = {}
 
                 if name == "finish":
-                    finish_args = args.get("findings", args)
+                    raw_findings = args.get("findings", args)
+                    if isinstance(raw_findings, str):
+                        try:
+                            raw_findings = json.loads(raw_findings)
+                        except (json.JSONDecodeError, TypeError):
+                            raw_findings = {"hypotheses": [], "coverage": [],
+                                            "open_questions": [f"finish() called with non-JSON string"]}
+                    finish_args = raw_findings if isinstance(raw_findings, dict) else {"hypotheses": [], "coverage": [], "open_questions": []}
                     result_text = "Findings recorded."
                 else:
                     if verbose:
@@ -1705,7 +1712,7 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
 
             # tool_choice="finish" is forced once iteration >= nudge_at (set above)
 
-        if findings is None:
+        if findings is None or not isinstance(findings, dict):
             findings = {"hypotheses": [], "coverage": [], "open_questions": [
                 f"skill {skill_name} did not produce structured output after {max_iterations} iterations"
             ]}
