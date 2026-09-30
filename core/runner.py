@@ -1912,6 +1912,8 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 if on_progress:
                     on_progress(name, "skipped", None)
                 continue
+            if on_progress:
+                on_progress(name, "started", None)
             try:
                 result = await self.run_skill(name, repo_path, verbose=verbose,
                                              negative_evidence=negative_evidence)
