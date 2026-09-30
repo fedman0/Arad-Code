@@ -17,6 +17,7 @@ class Config:
     skills_dir: str = ""
     max_tokens: int = 8192
     temperature: float = 0.0
+    reasoning_effort: str = ""
     profile_path: str = ""
     trust_repo_profile: bool = False
     mcp_allow: dict = field(default_factory=dict)
@@ -62,6 +63,7 @@ def load_config(
         skills_dir=data.get("skills_dir", ""),
         max_tokens=data.get("max_tokens", 8192),
         temperature=data.get("temperature", 0.0),
+        reasoning_effort=os.environ.get("PENTEST_REASONING_EFFORT") or data.get("reasoning_effort", ""),
         profile_path=data.get("profile_path", ""),
         trust_repo_profile=bool(data.get("trust_repo_profile", False)),
         mcp_allow=data.get("mcp_allow", {}),

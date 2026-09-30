@@ -14,6 +14,7 @@ class LLMClient:
         self._model = cfg.model
         self._max_tokens = cfg.max_tokens
         self._temperature = cfg.temperature
+        self._reasoning_effort = cfg.reasoning_effort or ""
 
     async def complete(
         self,
@@ -43,6 +44,9 @@ class LLMClient:
         if system:
             all_messages.append({"role": "system", "content": system})
         all_messages.extend(messages)
+        extra: dict = {}
+        if self._reasoning_effort:
+            extra["extra_body"] = {"reasoning": {"effort": self._reasoning_effort}}
         resp = await self._client.chat.completions.create(
             model=self._model,
             messages=all_messages,
@@ -50,6 +54,7 @@ class LLMClient:
             tool_choice=tool_choice or "auto",
             max_tokens=self._max_tokens,
             temperature=self._temperature,
+            **extra,
         )
         msg = resp.choices[0].message
         return msg.content, msg.tool_calls
