@@ -45,7 +45,10 @@ class CodebaseMemoryClient:
         await self._proc.stdin.drain()
         if "id" in payload:
             resp_line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=30)
-            return json.loads(resp_line.decode())
+            try:
+                return json.loads(resp_line.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None
         return None
 
     async def _call(self, tool: str, args: dict) -> Any:

@@ -1199,6 +1199,12 @@ class SkillRunner:
             return f"Error: {ex}"
 
     async def _execute_tool(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
+        try:
+            return await self._execute_tool_inner(name, args, repo_path, skill_name)
+        except Exception as ex:
+            return f"Tool error ({name}): {ex}"
+
+    async def _execute_tool_inner(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
         project = self._project_cache.get(repo_path)
         if name == "search_graph":
             filtered = {k: v for k, v in args.items()
@@ -1658,7 +1664,8 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
                      "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                     for tc in tool_calls
                 ]
-            messages.append(assistant_msg)
+            if "content" in assistant_msg or "tool_calls" in assistant_msg:
+                messages.append(assistant_msg)
 
             if not tool_calls:
                 if content:
@@ -1719,13 +1726,18 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
 
         validation_errors: list[str] = []
         hypotheses = []
-        for h_data in findings.get("hypotheses", []):
+        raw_hypotheses = findings.get("hypotheses", [])
+        if not isinstance(raw_hypotheses, list):
+            raw_hypotheses = []
+        for h_data in raw_hypotheses:
+            if not isinstance(h_data, dict):
+                continue
             h_data["skill_source"] = skill_name
             h_data["commit"] = commit
             try:
                 h = Hypothesis.model_validate(h_data)
             except Exception:
-                validation_errors.append(f"hypothesis validation error: {h_data.get('violated_invariant', '')[:80]}")
+                validation_errors.append(f"hypothesis validation error: {str(h_data.get('violated_invariant', ''))[:80]}")
                 continue
             if h.status == "reproduced":
                 h.status = "evidence_supported"
@@ -1876,7 +1888,8 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
             h.priority = h.compute_priority()
 
-        open_questions = findings.get("open_questions", []) + validation_errors
+        _raw_oq = findings.get("open_questions", [])
+        open_questions = (list(_raw_oq) if isinstance(_raw_oq, list) else [str(_raw_oq)]) + validation_errors
 
         if _ne_eligible:
             from .peer_analysis import _normalize_path as _norm_ep
