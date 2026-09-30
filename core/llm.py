@@ -37,6 +37,7 @@ class LLMClient:
         messages: list[dict],
         tools: list[dict],
         system: Optional[str] = None,
+        tool_choice=None,
     ) -> tuple[Optional[str], Optional[list]]:
         all_messages = []
         if system:
@@ -46,7 +47,7 @@ class LLMClient:
             model=self._model,
             messages=all_messages,
             tools=tools,
-            tool_choice="auto",
+            tool_choice=tool_choice or "auto",
             max_tokens=self._max_tokens,
             temperature=self._temperature,
         )

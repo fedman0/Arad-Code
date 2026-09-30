@@ -57,6 +57,10 @@ Invalid: "this pattern suggests SQL injection". Valid: "UserController.Search at
 
 Never claim a guard is absent without reading the relevant code.
 
+## File coverage rule — CRITICAL
+
+When you call list_dir on any directory, you MUST read EVERY Python/source file in it before moving on. Do NOT skip files because their name looks unimportant or they are small. Security-critical helpers (auth checks, admin gates, permission guards) are almost always in small utility files. A 7-line file can contain a critical privilege escalation. Read all files you list.
+
 ## Reusable summaries
 - Call **get_open_questions** at the start to see what prior skills couldn't resolve.
 - Call **get_function_summary** before re-analyzing a shared utility (repository, service, validator).
@@ -1601,9 +1605,23 @@ Start by calling get_architecture() to orient yourself, then use the other tools
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
         findings: Optional[dict] = None
 
+        finish_tool = next(t for t in TOOLS if t["function"]["name"] == "finish")
+        nudge_at = max_iterations - 6
         for iteration in range(max_iterations):
+            forced = iteration >= nudge_at
+            if forced and iteration == nudge_at:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have used enough iterations. Call finish() RIGHT NOW with all findings "
+                        "you have gathered so far. Include every hypothesis with its evidence. "
+                        "Do not call any other tool — only finish()."
+                    ),
+                })
+            tools_to_use = [finish_tool] if forced else TOOLS
             content, tool_calls = await self._llm.complete_with_tools(
-                messages, TOOLS, system=SYSTEM_PROMPT
+                messages, tools_to_use, system=SYSTEM_PROMPT,
+                tool_choice={"type": "function", "function": {"name": "finish"}} if forced else None,
             )
 
             assistant_msg: dict = {"role": "assistant"}
@@ -1660,19 +1678,7 @@ Start by calling get_architecture() to orient yourself, then use the other tools
                 findings = finish_args
                 break
 
-            # nudge the model to call finish() before the hard limit
-            nudge_at = max_iterations - 6
-            if iteration >= nudge_at:
-                remaining = max_iterations - iteration - 1
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"IMPORTANT: You have {remaining} iteration(s) left. "
-                        "You MUST call the finish() tool RIGHT NOW with your findings. "
-                        "Include whatever hypotheses and coverage you have gathered so far. "
-                        "Do not call any other tool — call finish() as your only tool call."
-                    ),
-                })
+            # tool_choice="finish" is forced once iteration >= nudge_at (set above)
 
         if findings is None:
             findings = {"hypotheses": [], "coverage": [], "open_questions": [
