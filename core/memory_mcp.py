@@ -73,8 +73,33 @@ class CodebaseMemoryClient:
             except (asyncio.TimeoutError, Exception):
                 return None
 
+    async def list_projects(self) -> list[dict]:
+        result = await self._call("list_projects", {})
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result.get("projects", [])
+        return []
+
+    async def find_project_for_repo(self, repo_path: str) -> Optional[str]:
+        from pathlib import Path
+        repo = str(Path(repo_path).resolve())
+        projects = await self.list_projects()
+        for p in projects:
+            if str(Path(p.get("root_path", "")).resolve()) == repo:
+                return p.get("name")
+        return None
+
     async def index_repository(self, repo_path: str) -> Optional[dict]:
         return await self._call("index_repository", {"repo_path": repo_path})
+
+    async def _call_raw_text(self, tool: str, args: dict) -> str:
+        result = await self._call(tool, args)
+        if result is None:
+            return ""
+        if isinstance(result, str):
+            return result
+        return json.dumps(result, indent=2)
 
     async def search_graph(
         self,
@@ -82,7 +107,8 @@ class CodebaseMemoryClient:
         label: Optional[str] = None,
         qn_pattern: Optional[str] = None,
         limit: int = 20,
-    ) -> list[dict]:
+        project: Optional[str] = None,
+    ) -> str:
         args: dict = {"limit": limit}
         if name_pattern:
             args["name_pattern"] = name_pattern
@@ -90,39 +116,41 @@ class CodebaseMemoryClient:
             args["label"] = label
         if qn_pattern:
             args["qn_pattern"] = qn_pattern
-        result = await self._call("search_graph", args)
-        if isinstance(result, list):
-            return result
-        return []
+        if project:
+            args["project"] = project
+        return await self._call_raw_text("search_graph", args)
 
     async def trace_path(
         self,
         function_name: str,
         mode: str = "calls",
         depth: int = 5,
-    ) -> Optional[dict]:
-        return await self._call("trace_path", {"function_name": function_name,
-                                               "mode": mode, "depth": depth})
+        project: Optional[str] = None,
+    ) -> str:
+        args: dict = {"function_name": function_name, "mode": mode, "depth": depth}
+        if project:
+            args["project"] = project
+        return await self._call_raw_text("trace_path", args)
 
-    async def get_code_snippet(self, qualified_name: str) -> Optional[str]:
-        result = await self._call("get_code_snippet", {"qualified_name": qualified_name})
-        if isinstance(result, str):
-            return result
-        if isinstance(result, dict):
-            return result.get("snippet") or result.get("code")
-        return None
+    async def get_code_snippet(self, qualified_name: str, project: Optional[str] = None) -> str:
+        args: dict = {"qualified_name": qualified_name}
+        if project:
+            args["project"] = project
+        return await self._call_raw_text("get_code_snippet", args)
 
-    async def search_code(self, pattern: str, limit: int = 50) -> list[dict]:
-        result = await self._call("search_code", {"pattern": pattern, "limit": limit})
-        if isinstance(result, list):
-            return result
-        return []
+    async def search_code(self, pattern: str, limit: int = 50, project: Optional[str] = None) -> str:
+        args: dict = {"pattern": pattern, "limit": limit}
+        if project:
+            args["project"] = project
+        return await self._call_raw_text("search_code", args)
 
-    async def get_architecture(self, aspects: Optional[list[str]] = None) -> Optional[dict]:
+    async def get_architecture(self, aspects: Optional[list[str]] = None, project: Optional[str] = None) -> str:
         args: dict = {}
         if aspects:
             args["aspects"] = aspects
-        return await self._call("get_architecture", args)
+        if project:
+            args["project"] = project
+        return await self._call_raw_text("get_architecture", args)
 
     async def query_graph(self, query: str) -> Any:
         return await self._call("query_graph", {"query": query})

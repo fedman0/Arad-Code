@@ -934,6 +934,7 @@ class SkillRunner:
         self._mcp_manager = mcp_manager
         self._skills_dir = cfg.resolved_skills()
         self._profile_cache: dict[str, ProjectProfile] = {}
+        self._project_cache: dict[str, Optional[str]] = {}
 
     def _profile(self, repo_path: str) -> ProjectProfile:
         if repo_path not in self._profile_cache:
@@ -1198,21 +1199,30 @@ class SkillRunner:
             return f"Error: {ex}"
 
     async def _execute_tool(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
+        project = self._project_cache.get(repo_path)
         if name == "search_graph":
-            r = await self._mcp.search_graph(**{k: v for k, v in args.items()})
-            return json.dumps(r, indent=2) if r else "No results (codebase-memory-mcp may not be indexed)"
+            filtered = {k: v for k, v in args.items()
+                        if k in ("name_pattern", "label", "qn_pattern", "limit")}
+            if project:
+                filtered["project"] = project
+            r = await self._mcp.search_graph(**filtered)
+            return r or "No results (codebase-memory-mcp may not be indexed)"
         if name == "trace_path":
-            r = await self._mcp.trace_path(**args)
-            return json.dumps(r, indent=2) if r else "No results"
+            filtered = {k: v for k, v in args.items()
+                        if k in ("function_name", "mode", "depth")}
+            if project:
+                filtered["project"] = project
+            r = await self._mcp.trace_path(**filtered)
+            return r or "No results"
         if name == "get_code_snippet":
-            r = await self._mcp.get_code_snippet(args["qualified_name"])
+            r = await self._mcp.get_code_snippet(args["qualified_name"], project=project)
             return r or "Symbol not found in graph index — try read_file instead"
         if name == "search_code":
-            r = await self._mcp.search_code(args["pattern"], args.get("limit", 50))
-            return json.dumps(r, indent=2) if r else "No results"
+            r = await self._mcp.search_code(args["pattern"], args.get("limit", 50), project=project)
+            return r or "No results"
         if name == "get_architecture":
-            r = await self._mcp.get_architecture(args.get("aspects"))
-            return json.dumps(r, indent=2) if r else "No architecture data available"
+            r = await self._mcp.get_architecture(args.get("aspects"), project=project)
+            return r or "No architecture data available"
         if name == "read_file":
             return self._read_file(repo_path, args["file_path"],
                                    args.get("start_line"), args.get("end_line"))
@@ -1593,6 +1603,16 @@ class SkillRunner:
         phase = self._get_skill_phase(skill_name)
         _ne_eligible = negative_evidence and phase in ("p3", "p4", "")
 
+        if repo_path not in self._project_cache:
+            self._project_cache[repo_path] = await self._mcp.find_project_for_repo(repo_path)
+        project_name = self._project_cache.get(repo_path)
+        mcp_hint = (
+            f"\n# Codebase Graph Index\nProject name: `{project_name}`\n"
+            "Pass this as the `project` argument to get_architecture(), search_graph(), "
+            "trace_path(), get_code_snippet(), and search_code()."
+            if project_name else ""
+        )
+
         initial_msg = f"""Repository: {repo_path}  (commit: {commit})
 
 # Skill Contract
@@ -1602,9 +1622,10 @@ class SkillRunner:
 {_NE_INSTRUCTION if _ne_eligible else ""}
 # Known Context
 {known_context}
+{mcp_hint}
 {f"# Additional Context\n{extra_context}" if extra_context else ""}
 
-Start by calling get_architecture() to orient yourself, then use the other tools to read real code and build evidence. Call finish() when done."""
+Start by calling get_architecture(project="{project_name or '<project>'}") to orient yourself, then use the other tools to read real code and build evidence. Call finish() when done."""
 
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
         findings: Optional[dict] = None
