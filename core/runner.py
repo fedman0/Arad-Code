@@ -57,9 +57,13 @@ Invalid: "this pattern suggests SQL injection". Valid: "UserController.Search at
 
 Never claim a guard is absent without reading the relevant code.
 
-## File coverage rule — CRITICAL
+## Cross-file analysis — CRITICAL
 
-When you call list_dir on any directory, you MUST read EVERY Python/source file in it before moving on. Do NOT skip files because their name looks unimportant or they are small. Security-critical helpers (auth checks, admin gates, permission guards) are almost always in small utility files. A 7-line file can contain a critical privilege escalation. Read all files you list.
+Vulnerabilities span multiple files. A function defined in one file may be the entry point, but the bug is in what it calls. Always:
+- Use **trace_path** to follow call chains across files before reading individual files.
+- Use **find_all_usages** to discover every caller of a security-critical function.
+- Use **search_graph** to find all implementations of an interface or all uses of a decorator.
+Never assess security from a single file in isolation. Follow the data flow.
 
 ## Reusable summaries
 - Call **get_open_questions** at the start to see what prior skills couldn't resolve.
