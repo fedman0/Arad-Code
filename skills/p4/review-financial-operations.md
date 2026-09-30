@@ -11,7 +11,8 @@
 - repo_path
 
 ## Procedure
-1. Find all monetary operations: charge, refund, transfer, credit, debit, withdraw, deposit.
+1. Use `search_graph` to find all monetary operations: charge, refund, transfer, credit, debit, withdraw, deposit, payment, wallet. Then use `trace_path` from each to understand the full call chain — auth checks may be bypassed several hops deep.
+2. For each payment endpoint: use `find_all_usages` on any permission/auth check it calls. Verify the check actually runs and cannot be bypassed by a request parameter or header.
 2. For each operation: is the amount taken from user input? What type (decimal, float, integer cents)?
 3. Check float arithmetic: is floating-point used for money calculations? (should be decimal or integer cents)
 4. Check rounding: is rounding applied? In which direction? Can rounding errors accumulate?
