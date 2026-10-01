@@ -356,6 +356,7 @@ class AradCodeApp(App):
         self._task: Optional[asyncio.Task] = None
         self._history: list[str] = []
         self._history_idx: int = -1
+        self._waiting_to_exit: bool = False
         self._op_start: float = 0.0
         self._clock_task: Optional[asyncio.Task] = None
         self._queued_input: Optional[str] = None
@@ -481,9 +482,13 @@ class AradCodeApp(App):
         text = event.value.strip()
         event.input.clear()
         self._history_idx = -1
+        if self._waiting_to_exit and not text:
+            self.exit(0)
+            return
         if not text:
             return
         self._history.append(text)
+        self._waiting_to_exit = False
         if text.startswith(">"):
             asyncio.create_task(self._handle_inline_query(text[1:].strip()))
         elif self._task and not self._task.done():
@@ -804,7 +809,8 @@ class AradCodeApp(App):
                 self._log(f"\n[dim]Resuming queued: {queued[:60]}[/dim]")
                 self._dispatch(queued)
             elif self._initial_cmd:
-                self.exit(0)
+                self._waiting_to_exit = True
+                self._log("\n[bold green]✓ Run complete.[/bold green]  [dim]Press Enter (or type a command) to close.[/dim]")
 
         self._task.add_done_callback(_done_cb)
 
