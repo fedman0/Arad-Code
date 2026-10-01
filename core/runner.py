@@ -92,6 +92,33 @@ Never assess security from a single file in isolation. Follow the data flow.
 ## Rejected hypotheses
 - When you rule out a hypothesis because a guard is effective, call **reject_hypothesis** with the reason instead of just setting it to refuted. Pass `rejection_condition` (the condition that must hold for this rejection to remain valid, e.g. "Guard X at file:line remains in place") and `rejection_controlling_evidence_ids` (the evidence IDs that prove the guard — if those become stale, the rejection should be re-evaluated)."""
 
+HUNT_SYSTEM_PROMPT = """You are an expert security researcher performing authorized penetration testing.
+
+## Mode: BREADTH SCAN
+
+This is a pattern-detection sweep. Your goal is to find as many vulnerability patterns as possible across the codebase, not to exhaustively prove any single one. Speed and coverage matter more than depth.
+
+## Tool priority:
+1. **search_graph** — find classes and functions by domain keyword (auth, middleware, token, jwt, route, config, payment)
+2. **get_code_snippet** — read a specific function by qualified name
+3. **read_file** — read a config or route file directly
+4. **grep** — search for a literal string pattern when search_graph isn't enough
+
+## For each check in the skill:
+1. Use 1–2 tool calls to find the relevant code.
+2. Read the code. Look for the exact pattern the skill describes.
+3. If the pattern is present → add the finding to your list immediately and move to the next check.
+4. If the pattern is absent → move to the next check.
+5. Never spend more than 3 tool calls on a single check.
+
+## Submitting findings:
+- Cite: file path + line number + the exact code you observed.
+- Set confidence 7–9 (you are confirming patterns, not writing exploits).
+- You do NOT need to trace full call chains, read ORM models, or read DB schemas for this skill.
+- Submit as soon as you confirm a pattern. Do not wait until you have "enough" evidence.
+
+## Call finish() when you have worked through all checks or used 20+ iterations."""
+
 TOOLS = [
     {
         "type": "function",
@@ -1724,19 +1751,31 @@ class SkillRunner:
             if project_name else ""
         )
 
-        initial_msg = f"""Repository: {repo_path}  (commit: {commit})
-
-# Skill Contract
-{skill_text}
-
-{OUTPUT_CONTRACT}
-{_NE_INSTRUCTION if _ne_eligible else ""}
-# Known Context
-{known_context}
-{mcp_hint}
-{f"# Additional Context\n{extra_context}" if extra_context else ""}
-
-Start by calling get_architecture(project="{project_name or '<project>'}") to orient yourself, then use the other tools to read real code and build evidence. Call finish() when done."""
+        is_hunt = skill_name.startswith("hunt-")
+        active_system_prompt = HUNT_SYSTEM_PROMPT if is_hunt else SYSTEM_PROMPT
+        start_instruction = (
+            f"Repository: {repo_path}  (commit: {commit})\n\n"
+            f"Project name for all graph tools: `{project_name or '<project>'}`\n\n"
+            "# Skill Contract\n"
+            f"{skill_text}\n\n"
+            f"{OUTPUT_CONTRACT}\n"
+            f"{_NE_INSTRUCTION if _ne_eligible else ''}"
+            f"# Known Context\n{known_context}\n"
+            f"{mcp_hint}\n"
+            f"{f'# Additional Context{chr(10)}{extra_context}' if extra_context else ''}\n\n"
+            "Follow the Skill Contract steps in order. Call finish() when done."
+        ) if is_hunt else (
+            f"Repository: {repo_path}  (commit: {commit})\n\n"
+            "# Skill Contract\n"
+            f"{skill_text}\n\n"
+            f"{OUTPUT_CONTRACT}\n"
+            f"{_NE_INSTRUCTION if _ne_eligible else ''}"
+            f"# Known Context\n{known_context}\n"
+            f"{mcp_hint}\n"
+            f"{f'# Additional Context{chr(10)}{extra_context}' if extra_context else ''}\n\n"
+            f"Start by calling get_architecture(project=\"{project_name or '<project>'}\") to orient yourself, then use the other tools to read real code and build evidence. Call finish() when done."
+        )
+        initial_msg = start_instruction
 
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
         findings: Optional[dict] = None
@@ -1756,7 +1795,7 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
                 })
             tools_to_use = [finish_tool] if forced else TOOLS
             content, tool_calls = await self._llm.complete_with_tools(
-                messages, tools_to_use, system=SYSTEM_PROMPT,
+                messages, tools_to_use, system=active_system_prompt,
                 tool_choice={"type": "function", "function": {"name": "finish"}} if forced else None,
             )
 
