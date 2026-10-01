@@ -1,78 +1,91 @@
 # SKILL: hunt-debug-production-exposure
 
-## ⚡ BREADTH SCAN — grep-first, pattern-confirmed
+## ⚡ BREADTH SCAN — grep-first, multi-language, pattern-confirmed
 
-Each step gives an exact grep pattern. Run it. If it matches, read the surrounding context with `get_code_snippet` or `read_file`, confirm the pattern, and submit immediately. 2 tool calls per step maximum.
+Patterns cover Python/Django, JavaScript/Express, Go, Java/Spring, PHP, Ruby/Rails. Run grep, read context, submit immediately. 2 tool calls per step maximum.
 
 ---
 
-## Step 1 — Unconditional diagnostic route registration
+## Step 1 — Debug/diagnostic route registered without environment guard
 
 ```
-grep(pattern="urlpatterns\\s*\\+=|router\\.add.*debug|app\\.use.*debug|app\\.get.*debug|path.*debug|path.*benchmark|path.*load.test", max_matches=20)
+grep(pattern="debug|benchmark|load.test|memory.test|stress.test|diagnostic", max_matches=40)
 ```
 
-For each match: look at the 5 lines before it. Is there an `if` guard checking `DEBUG`, `ENV`, `ENVIRONMENT`, `settings.DEBUG`, `IS_PROD`, `NODE_ENV` etc.? If the `+=` or route registration is NOT inside such an `if` block, the debug route is unconditional.
+For each match in a route registration file (`urls.py`, `routes.js`, `router.go`, `web.php`, `routes.rb`, `*Controller*`): is the route inside an `if` block checking `DEBUG`, `NODE_ENV`, `ENVIRONMENT`, `IS_PROD`, `APP_ENV`, or similar? If the route is registered unconditionally:
 
 **A — Unconditional diagnostic route**:
-→ Submit: violated_invariant="diagnostic/debug route is registered without environment guard; reachable from any deployment including production", severity=7, confidence=7, exposure="internet"
+→ Submit: violated_invariant="debug/diagnostic route registered without environment guard; reachable from any deployment including production", severity=7, confidence=7, exposure="internet"
 
 ---
 
-## Step 2 — OTP or verification code leaked in response header
+## Step 2 — Verification code or OTP placed in HTTP response header
 
 ```
-grep(pattern="X-Test-Code|X-Otp|X-Debug|response\\[.*otp\\]|response\\[.*code\\]|headers\\[.*code\\]", max_matches=10)
+grep(pattern="setHeader.*[Cc]ode|set.*header.*otp|res\\.set\\(.*[Cc]ode|response\\[.*[Cc]ode\\]|response\\.headers\\[.*code\\]|addHeader.*[Cc]ode|header.*otp.*=|otp.*header|verification.*header", max_matches=20)
 ```
 
-Also try:
+Also:
 ```
-grep(pattern="response\\[\"X-|response\\.headers\\[\"X-|res\\.set.*X-Test|res\\.header.*otp", max_matches=10)
+grep(pattern="X-.*[Cc]ode.*=|X-.*[Oo]tp.*=|X-.*[Vv]erif|response.*header.*token.*=", max_matches=20)
 ```
 
-If found: check the condition — is it `if ENV != 'production'`, `if not IS_PROD`, `if DEBUG`, or similar? The header is still sent on staging/dev environments, leaking the OTP to any observer.
+For each match: is it inside a condition checking `ENV`, `NODE_ENV`, `DEBUG`, `IS_PROD`, or similar? Even a staging-only condition leaks the OTP to anyone who can observe HTTP responses.
 
-**B — OTP in response header on non-production**:
-→ Submit: violated_invariant="verification code placed in HTTP response header when not in production; any observer on staging/dev reads the code and authenticates as any user", severity=8, confidence=7, exposure="internet"
+**B — OTP/verification code in response header**:
+→ Submit: violated_invariant="verification code placed in HTTP response header when not in production; any observer reads the code and authenticates as any user without OTP delivery", severity=8, confidence=7, exposure="internet"
 
 ---
 
-## Step 3 — API documentation served on non-production environments
+## Step 3 — API documentation served on staging or dev environments
 
 ```
-grep(pattern="swagger|redoc|openapi|api.docs|api-docs", max_matches=20)
+grep(pattern="swagger|redoc|openapi|api.docs|api-docs|springfox|springdoc|swaggerUi|swagger_urls", max_matches=30)
 ```
 
-For each route registration match: read the surrounding `if` condition. Is it gated by `ENV == 'stage'`, `ENV == 'dev'`, `DEBUG or ENV`, `NODE_ENV === 'development'`? If it includes staging in the condition, full API docs are publicly served on staging.
+For each route registration match: read the condition. Is it gated by `ENV == 'stage'`, `NODE_ENV === 'development'`, `DEBUG or ENV == 'dev'`, `APP_ENV != 'production'`? If staging is included in the condition, full API schema is publicly available in staging.
 
-**C — API docs served on staging**:
-→ Submit: violated_invariant="API documentation endpoint is served when ENV is 'stage'/'dev' without access control; full API surface is publicly enumerable on staging", severity=5, confidence=7, exposure="internet"
+**C — API docs served in non-production environments**:
+→ Submit: violated_invariant="API documentation served when environment is staging/dev without access control; full API surface publicly enumerable", severity=5, confidence=7, exposure="internet"
 
 ---
 
-## Step 4 — Prometheus/metrics endpoint without authentication
+## Step 4 — Unbounded computation parameter accepted from caller
 
 ```
-grep(pattern="prometheus|django_prometheus|prom_client|promClient|metrics.*route|include.*metrics", max_matches=10)
+grep(pattern="benchmark|load.test|memory.test|stress|iterations|repeat", max_matches=20)
 ```
 
-For each match in a route registration file: is there an authentication middleware, `permission_classes`, or environment guard applied? If it's a bare unconditional include with no auth wrapper:
+For each match in a request handler: is a numeric parameter (`count`, `iterations`, `size`, `n`, `limit`) read from the request without an upper-bound cap before being used in a loop or repeated computation?
+
+**D — Unbounded computation parameter**:
+→ Submit: violated_invariant="handler accepts caller-supplied numeric parameter controlling computation with no cap; large values exhaust server CPU or memory (denial of service)", severity=4, confidence=7, exposure="internet"
+
+---
+
+## Step 5 — Metrics/monitoring endpoint without authentication
+
+```
+grep(pattern="prometheus|prom_client|promClient|django_prometheus|metrics.*router|metrics.*route|metrics.*path|/metrics|actuator/prometheus|micrometer", max_matches=20)
+```
+
+For each route registration match: is there an authentication middleware, `permission_classes`, `@Secured`, `passport.authenticate`, or equivalent applied? If it's an unconditional include with no auth wrapper:
 
 **E — Unauthenticated monitoring endpoint**:
-→ Submit: violated_invariant="metrics endpoint registered without authentication or environment guard; internal request rates, error rates, and queue depths are publicly readable", severity=6, confidence=7, exposure="internet"
+→ Submit: violated_invariant="metrics endpoint registered without authentication or environment guard; internal request rates, error counts, and latency are publicly readable", severity=6, confidence=7, exposure="internet"
 
 ---
 
-## Step 5 — Development server command in production container
+## Step 6 — Development server used as production startup command
 
 ```
-grep(pattern="manage\\.py runserver|flask run|php -S|npm run dev|go run main|yarn dev|node.*server\\.js.*dev", max_matches=10)
+grep(pattern="manage\\.py runserver|flask run|php -S|npm run dev|go run main|nodemon|node.*server\\.js.*dev|yarn dev|rails server|rackup|puma.*development|mvn spring-boot:run", max_matches=20)
 ```
 
-If found in a deployment file (docker-compose.yml, Dockerfile, kubernetes manifest, supervisord.conf, Procfile, or shell entrypoint):
+If found in a deployment file (docker-compose.yml, Dockerfile, Kubernetes manifest, Procfile, supervisord.conf, shell entrypoint):
 
-**F — Dev server in production**:
-→ Submit: violated_invariant="application container starts with a development server command; dev servers are single-threaded, expose debug pages, and are not production-safe", severity=6, confidence=7, exposure="internet"
+**F — Dev server in production container**:
+→ Submit: violated_invariant="application container starts with a development server; dev servers are single-threaded, expose debug info, and are not production-safe", severity=6, confidence=7, exposure="internet"
 
 ---
 

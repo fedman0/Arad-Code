@@ -1,87 +1,95 @@
 # SKILL: hunt-missing-authz-on-sensitive-endpoints
 
-## ⚡ BREADTH SCAN — grep-first, pattern-confirmed
+## ⚡ BREADTH SCAN — grep-first, multi-language, pattern-confirmed
 
-Each step gives an exact grep pattern. Run it, read the match context, submit if confirmed. 2 tool calls per step maximum.
-
----
-
-## Step 1 — Financial handler with no authentication requirement
-
-```
-grep(pattern="class.*[Pp]ayment.*[Vv]iew|class.*[Cc]allback.*[Vv]iew|class.*[Ww]allet.*[Vv]iew|class.*[Cc]heckout.*[Vv]iew|class.*[Bb]illing.*[Vv]iew", max_matches=10)
-```
-
-For each match: call `get_code_snippet` on that class. Look for the presence of `permission_classes`, `@login_required`, `@require_auth`, `IsAuthenticated`, `auth.required`, or equivalent authentication decorator/annotation. If NONE of these are present in the class body:
-
-**A — Payment handler without authentication**:
-→ Submit: violated_invariant="financial handler processes payment state changes but has no authentication requirement; any unauthenticated caller can trigger payment confirmation", severity=9, confidence=7, exposure="internet"
+Patterns cover Python/Django/DRF, JavaScript/Express, Go, Java/Spring, PHP, Ruby/Rails. Run grep, read context, submit immediately. 2 tool calls per step maximum.
 
 ---
 
-## Step 2 — Sandbox/test mode bypasses payment verification
+## Step 1 — Financial handler with no authentication enforcement
 
 ```
-grep(pattern="sandbox|is_sandbox|test.*mode|mode.*test|provider.*test", max_matches=20)
+grep(pattern="payment|callback|wallet|checkout|billing|subscribe|transaction|purchase|charge|refund", max_matches=40)
 ```
 
-For each match in a payment-related file: call `get_code_snippet` on the surrounding function. Look for a branch where `provider == "sandbox"` or `mode == "test"` causes the payment gateway verification step to be SKIPPED, and directly triggers account credit or subscription activation.
+For each match in a route handler file: call `get_code_snippet` on the class or function. Look for the absence of:
+- Python/DRF: `permission_classes`, `@login_required`, `@permission_required`, `IsAuthenticated`
+- Express: `passport.authenticate`, `auth.required`, `ensureLoggedIn`, `requireAuth`, `verifyToken` middleware before the handler
+- Go: `AuthMiddleware`, `RequireAuth`, `JWTMiddleware` in the route chain
+- Java/Spring: `@Secured`, `@PreAuthorize`, `SecurityConfig` rule for this path
+- PHP/Laravel: `auth` middleware group, `$this->middleware('auth')`
+- Rails: `before_action :authenticate_user!`, `before_action :require_login`
 
-Dangerous pattern:
+If NONE of these are present:
+
+**A — Financial handler without authentication**:
+→ Submit: violated_invariant="financial handler processes payment state or account changes but has no authentication requirement; any unauthenticated caller can trigger it", severity=9, confidence=7, exposure="internet"
+
+---
+
+## Step 2 — Sandbox/test mode bypasses payment gateway verification
+
 ```
+grep(pattern="sandbox|is_sandbox|isSandbox|test.*mode|mode.*test|provider.*test|testMode|fake.*payment|mock.*payment", max_matches=20)
+```
+
+For each match in a payment handler: call `get_code_snippet`. Look for a branch where the sandbox/test condition causes the gateway signature or payment verification step to be **skipped**, with execution going directly to account credit or subscription activation.
+
+Dangerous pattern (any language):
+```python
 if provider == "sandbox":
-    is_sandbox = True
-    # ... verify_payment() is NOT called
-if verify_result or is_sandbox:    ← sandbox value short-circuits
-    activate_subscription(...)
+    is_sandbox = True          # no verify_payment() call
+if verify_result or is_sandbox:
+    activate_subscription()    # sandbox short-circuits verification
+```
+```js
+if (req.body.testMode) {
+  // skip gateway.verify()
+  return activateSubscription(userId);
+}
 ```
 
 **B — Sandbox mode bypasses payment verification**:
-→ Submit: violated_invariant="sandbox/test path skips gateway signature verification and directly activates subscriptions; caller sends provider=sandbox to get a paid subscription for free", severity=9, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="sandbox/test path skips gateway signature verification and directly activates subscriptions or credits; caller sends sandbox=true to obtain paid service for free", severity=9, confidence=7, exposure="authenticated"
 
 ---
 
-## Step 3 — Actor identity for financial operation read from request body
+## Step 3 — Actor identity for financial operation read from request input
 
 ```
-grep(pattern="validated_data\\[.*id\\]|data\\[.*account.*id\\]|request\\.data\\.get.*employee|request\\.data\\.get.*user_id|body\\[.*account\\]", max_matches=10)
+grep(pattern="req\\.body\\.[a-z_]*[Ii]d|request\\.data\\.get.*_id|request\\.json.*_id|body\\.[a-z_]*[Ii]d|params\\.[a-z_]*[Ii]d|request\\.form\\.get.*_id", max_matches=20)
 ```
 
-For each match in a payment/wallet handler: is the value used to determine WHICH ACCOUNT to charge? If the actor identity (who to debit) comes from caller-controlled request fields rather than from the verified token/session:
+For each match inside a financial/payment/transfer handler: is the value used to determine WHICH ACCOUNT to charge, credit, or transfer from/to? The attacker supplies their victim's ID in the request body.
 
-**C — Actor identity from request input**:
-→ Submit: violated_invariant="financial handler reads the account to debit from a caller-controlled request field; any authenticated user can charge any account by specifying its ID", severity=9, confidence=7, exposure="authenticated"
+**C — Financial actor identity from caller-controlled input**:
+→ Submit: violated_invariant="financial handler reads the account to debit/credit from caller-supplied request field; any authenticated user can charge or credit any account by specifying its ID", severity=9, confidence=7, exposure="authenticated"
 
 ---
 
-## Step 4 — File access without ownership verification
+## Step 4 — File or object access without ownership verification
 
 ```
-grep(pattern="signed_url|get_signed_url|presigned_url|generate_url.*key|get_object.*key", max_matches=10)
+grep(pattern="signed_url|presigned_url|getSignedUrl|createPresignedPost|get_object|getObject|signedUrl|downloadUrl|fileUrl", max_matches=20)
 ```
 
-For each match: call `get_code_snippet` on the surrounding function. Trace from where the file key/identifier is extracted from the request (`request.query_params.get`, `data["key"]`, etc.) to where the signed URL is returned. Is there a database query that filters by BOTH the file key AND the requesting user's identity? If only the file key is checked:
+For each match in a handler: trace from where the file key/identifier is extracted from the request to where the URL or content is returned. Is there a query that filters by BOTH the file key AND the requesting user's identity? If only the file key is used:
 
-**D — No ownership check before file access**:
-→ Submit: violated_invariant="handler returns signed file access URL for any caller-supplied file identifier without verifying the requesting user owns that file", severity=7, confidence=7, exposure="authenticated"
+**D — File access without ownership check**:
+→ Submit: violated_invariant="handler returns file access URL for any caller-supplied identifier without verifying the requesting user owns that resource; any authenticated user can access any file", severity=7, confidence=7, exposure="authenticated"
 
 ---
 
-## Step 5 — Privilege decision from request header
+## Step 5 — Monitoring or admin endpoint without authentication
 
 ```
-grep(pattern="request\\.headers\\.get.*return.*True|if.*in.*request\\.headers.*return|META\\.get.*return True|getHeader.*==.*return true|r\\.Header\\.Get.*return nil", max_matches=10)
+grep(pattern="/metrics|/health|/admin|/status|/stats|/monitor|/actuator|/debug", max_matches=30)
 ```
 
-Also:
-```
-grep(pattern="permission.*header|auth.*header.*value|header.*grant|header.*privilege|header.*admin", max_matches=10)
-```
+For each route: check if an authentication middleware is applied specifically to that path. Routes that match broad `*` or are registered before auth middleware run without authentication.
 
-If found: a function that reads an HTTP header and returns a boolean authorization decision without checking a database record or cryptographic token.
-
-**F — Header-based privilege grant**:
-→ Submit: violated_invariant="authorization decision made from caller-controlled request header value rather than a verified server-side record; any caller adds the header to gain elevated access", severity=10, confidence=7, exposure="internet"
+**E — Sensitive endpoint without authentication**:
+→ Submit: violated_invariant="[endpoint] registered without authentication; internal state or administrative functionality publicly accessible", severity=6, confidence=7, exposure="internet"
 
 ---
 
