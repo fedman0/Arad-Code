@@ -360,7 +360,7 @@ class AradCodeApp(App):
         self._clock_task: Optional[asyncio.Task] = None
         self._queued_input: Optional[str] = None
         self._wf_visible: bool = False
-        self._wf_last_node_id: Optional[int] = None
+        self._wf_open_node_id: Optional[int] = None
         self._finding_count: int = 0
         self._last_repo: str = ""
         self._last_db = None
@@ -640,9 +640,11 @@ class AradCodeApp(App):
     @on(Tree.NodeSelected, "#wf-tree")
     def _on_wf_node_selected(self, event: Tree.NodeSelected) -> None:
         node_id = id(event.node)
-        if node_id == self._wf_last_node_id:
+        if node_id == self._wf_open_node_id:
+            self._wf_open_node_id = None
+            self._log_chat("[dim]──[/dim]")
             return
-        self._wf_last_node_id = node_id
+        self._wf_open_node_id = node_id
         data = event.node.data
         if not data:
             return
@@ -661,31 +663,30 @@ class AradCodeApp(App):
                 elif a.done:
                     lines.append(f"    [green]✓[/green] {a.label}  [dim]{a.elapsed:.1f}s[/dim]")
                 else:
-                    lines.append(f"    [yellow]→[/yellow] {a.label}  [dim](running {time.monotonic() - a.started_at:.0f}s)[/dim]")
+                    lines.append(f"    [yellow]→[/yellow] {a.label}")
             self._log_chat("\n".join(lines))
 
         elif data.get("type") == "agent":
             agent = self._wf_model._agent_idx.get(data["label"])
             if not agent:
                 return
-            lines = [f"\n[bold]Agent: {agent.label}[/bold]"]
+            lines = [f"\n[bold]Skill: {agent.label}[/bold]"]
             if agent.error:
-                lines.append(f"  status:  [red]error[/red]")
-                lines.append(f"  error:   [red]{agent.error}[/red]")
+                lines.append(f"  status:  [red]error — {agent.error}[/red]")
             elif agent.done:
-                lines.append(f"  status:  [green]done[/green]")
-                lines.append(f"  elapsed: {agent.elapsed:.1f}s")
+                lines.append(f"  status:  [green]done[/green]  {agent.elapsed:.1f}s")
             else:
-                running = time.monotonic() - agent.started_at
-                lines.append(f"  status:  [yellow]running[/yellow]  {running:.0f}s")
+                lines.append(f"  status:  [yellow]running…[/yellow]")
             if agent.findings:
-                lines.append(f"  findings: {len(agent.findings)}")
+                lines.append(f"  findings so far: {len(agent.findings)}")
                 for i, h in enumerate(agent.findings, 1):
                     sl = _sev_label(getattr(h, "severity", 0))
                     c = _SEV_COLOR.get(sl, "white")
                     inv = getattr(h, "violated_invariant", str(h))[:70]
                     st = getattr(h, "status", "?")
                     lines.append(f"    {i}. [{c}]{sl.upper()}[/{c}]  ({st})  {inv}")
+            else:
+                lines.append(f"  [dim]no findings yet[/dim]")
             self._log_chat("\n".join(lines))
 
         elif data.get("type") == "finding":
