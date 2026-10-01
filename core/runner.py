@@ -1023,6 +1023,23 @@ class SkillRunner:
         self._skills_dir = cfg.resolved_skills()
         self._profile_cache: dict[str, ProjectProfile] = {}
         self._project_cache: dict[str, Optional[str]] = {}
+        self._on_tool_event: Optional[Any] = None
+
+    def set_event_handler(self, handler) -> None:
+        """Set a callback for tool call events.
+
+        handler(event, data) is called with:
+          event="tool_call"  data={"name": str, "args": dict, "iteration": int}
+          event="tool_result" data={"name": str, "result": str, "iteration": int}
+        """
+        self._on_tool_event = handler
+
+    def _emit_tool(self, event: str, data: dict) -> None:
+        if self._on_tool_event:
+            try:
+                self._on_tool_event(event, data)
+            except Exception:
+                pass
 
     def _profile(self, repo_path: str) -> ProjectProfile:
         if repo_path not in self._profile_cache:
@@ -1789,9 +1806,11 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
                 else:
                     if verbose:
                         print(f"  [{iteration}] tool={name} args={json.dumps(args)[:120]}")
+                    self._emit_tool("tool_call", {"name": name, "args": args, "iteration": iteration})
                     result_text = await self._execute_tool(name, args, repo_path, skill_name)
                     if verbose:
                         print(f"  → {result_text[:200]}")
+                    self._emit_tool("tool_result", {"name": name, "result": result_text[:200], "iteration": iteration})
 
                 tool_results.append({
                     "role": "tool",
