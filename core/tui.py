@@ -1,30 +1,43 @@
 from __future__ import annotations
 import asyncio
-import json
 import shlex
 import time
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional
 
+from rich.markup import escape as _escape
 from rich.text import Text
-from textual import on, work
+from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Container, Horizontal
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.scroll_view import ScrollView
-from textual.widgets import Footer, Header, Input, RichLog, Static, TextArea, Tree
-from textual.widgets.tree import TreeNode
+from textual.widgets import Footer, Header, Input, RichLog, Static, Tree
 
-from .rtl import render as _rtl, rtl_markup as _rtlm
+from .rtl import rtl_markup as _rtlm
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
-_BANNER = f"""[bold cyan]Arad Code[/bold cyan] [dim]v{VERSION}[/dim]
-[dim]Type a command or [bold cyan]>[/bold cyan] to query mid-run. Shift+Enter for newline. Ctrl+W workflow panel. Ctrl+L clear.[/dim]"""
+_SEV_ICON = {
+    "critical": "[bright_red]■[/bright_red]",
+    "high": "[red]■[/red]",
+    "medium": "[yellow]■[/yellow]",
+    "low": "[green]■[/green]",
+}
+_SEV_COLOR = {"critical": "bright_red", "high": "red", "medium": "yellow", "low": "green"}
 
-_SHORTCUTS = "[dim]run <repo>[/dim] · [dim]workflow <script.py>[/dim] · [dim]deep-research <q>[/dim] · [dim]skill <name> <repo>[/dim] · [dim][bold]>[/bold] question[/dim] · [dim]help[/dim]"
+_BANNER = (
+    f"[bold cyan]Arad Code[/bold cyan] [dim]v{VERSION}[/dim]\n"
+    "[dim]command or [bold cyan]>[/bold cyan] query  ·  Ctrl+W workflow  ·  "
+    "Ctrl+L clear chat  ·  Ctrl+Q quit[/dim]"
+)
+
+_SHORTCUTS = (
+    "[dim]run <repo>[/dim] · [dim]workflow <script.py>[/dim] · "
+    "[dim]deep-research <q>[/dim] · [dim]skill <name> <repo>[/dim] · "
+    "[dim][bold]>[/bold] question[/dim] · [dim]headless[/dim] · [dim]help[/dim]"
+)
 
 _HELP = """
 [bold]Commands[/bold]
@@ -33,28 +46,31 @@ _HELP = """
   workflow <script.py> [--repo <path>]
   deep-research <question> [--repo <path>]
   report <repo>  ·  peers  ·  triage  ·  coverage  ·  sarif
+  headless       exit TUI and relaunch in headless CLI mode
   help  ·  clear  ·  exit
 
-[bold]Inline query (works any time, even mid-run)[/bold]
+[bold]Inline query (any time, even mid-run)[/bold]
   > <anything>        Ask about the current or last run
   > status            Summary: findings so far, phases done
   > findings          List all hypotheses with severity
 
-[bold]Workflow panel  (Ctrl+W to toggle, Tab to focus)[/bold]
-  ↑↓               Navigate phases and agents
-  Enter            Expand / collapse phase
+[bold]Workflow panel  (Ctrl+W toggle · Tab focus)[/bold]
+  ↑↓   Navigate phases / agents
+  Enter  Expand / collapse
 
-[bold]Input[/bold]
-  Shift+Enter      New line (multi-line queries)
-  ↑↓               History (single-line mode)
-  Ctrl+C           Stop running task
-  Escape           Return focus to input
+[bold]Keys[/bold]
+  ↑↓       Command history
+  Ctrl+C   Stop running task
+  Ctrl+L   Clear LLM query responses (scan output preserved)
+  Ctrl+W   Toggle workflow panel
+  Ctrl+Q   Quit
+  Escape   Focus input
 
 [dim]Env: PENTEST_API_KEY · PENTEST_MODEL · PENTEST_API_BASE[/dim]
 """
 
 
-# ── Workflow tree data model ─────────────────────────────────────────────────
+# ── Workflow data model ───────────────────────────────────────────────────────
 
 class _PhaseNode:
     def __init__(self, name: str, title: str):
@@ -73,6 +89,7 @@ class _AgentNode:
         self.elapsed = 0.0
         self.error: Optional[str] = None
         self.started_at = time.monotonic()
+        self.findings: list = []
 
 
 class WorkflowModel:
@@ -89,6 +106,8 @@ class WorkflowModel:
         self.current_tool = ""
 
     def add_phase(self, name: str, title: str) -> _PhaseNode:
+        if name in self._phase_idx:
+            return self._phase_idx[name]
         node = _PhaseNode(name=name, title=title)
         self.phases.append(node)
         self._phase_idx[name] = node
@@ -101,6 +120,8 @@ class WorkflowModel:
             node.elapsed = time.monotonic() - node.started_at
 
     def add_agent(self, label: str, phase_name: Optional[str]) -> _AgentNode:
+        if label in self._agent_idx:
+            return self._agent_idx[label]
         node = _AgentNode(label=label)
         self._agent_idx[label] = node
         phase = self._phase_idx.get(phase_name or "") if phase_name else None
@@ -116,6 +137,11 @@ class WorkflowModel:
             node.done = True
             node.elapsed = time.monotonic() - node.started_at
             node.error = error
+
+    def add_findings(self, agent_label: str, hypotheses: list) -> None:
+        node = self._agent_idx.get(agent_label)
+        if node:
+            node.findings.extend(hypotheses)
 
 
 # ── WorkflowPanel ─────────────────────────────────────────────────────────────
@@ -144,7 +170,6 @@ class WorkflowPanel(Static):
             "[dim]Workflow[/dim]"
             + (f"  [yellow]⟳ {self._model.current_tool}[/yellow]" if self._model.current_tool else "")
         )
-
         for phase in self._model.phases:
             elapsed_text = f"  [dim]{phase.elapsed:.1f}s[/dim]" if phase.done else ""
             running = sum(1 for a in phase.agents if not a.done)
@@ -154,27 +179,34 @@ class WorkflowPanel(Static):
                 icon = "[yellow]●[/yellow]"
             else:
                 icon = "[dim]○[/dim]"
-            p_label = Text.from_markup(f"{icon} {phase.title}{elapsed_text}")
-            p_node = root.add(p_label, data={"type": "phase", "name": phase.name})
-
+            p_node = root.add(
+                Text.from_markup(f"{icon} {phase.title}{elapsed_text}"),
+                data={"type": "phase", "name": phase.name},
+            )
             for agent in phase.agents:
                 if agent.error:
-                    a_icon = "[red]✗[/red]"
-                    a_text = f"{a_icon} {agent.label}  [red dim]{agent.error[:45]}[/red dim]"
+                    a_text = f"[red]✗[/red] {agent.label}  [red dim]{agent.error[:45]}[/red dim]"
                 elif agent.done:
-                    a_icon = "[green]✓[/green]"
-                    a_text = f"{a_icon} {agent.label}  [dim]{agent.elapsed:.1f}s[/dim]"
+                    f_count = f"  [cyan]{len(agent.findings)}f[/cyan]" if agent.findings else ""
+                    a_text = f"[green]✓[/green] {agent.label}  [dim]{agent.elapsed:.1f}s[/dim]{f_count}"
                 else:
-                    a_icon = "[yellow]→[/yellow]"
-                    a_text = f"{a_icon} {agent.label}"
-                p_node.add_leaf(
-                    Text.from_markup(a_text),
-                    data={"type": "agent", "label": agent.label},
-                )
+                    a_text = f"[yellow]→[/yellow] {agent.label}"
+                if agent.findings:
+                    a_node = p_node.add(Text.from_markup(a_text), data={"type": "agent", "label": agent.label})
+                    for hyp in agent.findings:
+                        icon = _SEV_ICON.get(getattr(hyp, "severity", ""), "[white]■[/white]")
+                        title = getattr(hyp, "violated_invariant", str(hyp))[:50]
+                        a_node.add_leaf(
+                            Text.from_markup(f"{icon} {title}"),
+                            data={"type": "finding", "hyp": hyp},
+                        )
+                    a_node.expand()
+                else:
+                    p_node.add_leaf(Text.from_markup(a_text), data={"type": "agent", "label": agent.label})
             p_node.expand()
 
 
-# ── StatusBar ────────────────────────────────────────────────────────────────
+# ── StatusBar / ScrollIndicator ───────────────────────────────────────────────
 
 class StatusBar(Static):
     op: reactive[str] = reactive("")
@@ -195,16 +227,12 @@ class StatusBar(Static):
         return "  ".join(parts)
 
 
-# ── ScrollIndicator ──────────────────────────────────────────────────────────
-
 class ScrollIndicator(Static):
-    """Shows '↓ new output' when the log is scrolled up."""
-
     locked: reactive[bool] = reactive(False)
 
     def render(self) -> str:
         if self.locked:
-            return "[dim yellow]↓ new output — press End to follow[/dim yellow]"
+            return "[dim yellow]↓ new output — End to follow[/dim yellow]"
         return ""
 
 
@@ -214,7 +242,6 @@ class AradCodeApp(App):
     CSS = """
     Screen {
         background: #0d1117;
-        layers: base overlay;
     }
     Header {
         background: #161b22;
@@ -226,12 +253,11 @@ class AradCodeApp(App):
     }
     #output-container {
         height: 1fr;
-        overflow-y: auto;
         padding: 0 1;
     }
     #output {
-        height: auto;
-        min-height: 100%;
+        height: 1fr;
+        min-height: 5;
     }
     #wf-panel {
         width: 40;
@@ -270,8 +296,7 @@ class AradCodeApp(App):
         background: #161b22;
         border-top: solid #30363d;
         padding: 0 1;
-        min-height: 3;
-        max-height: 8;
+        height: 3;
     }
     #input-hint {
         height: 1;
@@ -286,8 +311,7 @@ class AradCodeApp(App):
         border: none;
         color: #e6edf3;
         padding: 0;
-        min-height: 1;
-        height: auto;
+        height: 1;
     }
     #input:focus {
         border: none;
@@ -301,10 +325,12 @@ class AradCodeApp(App):
 
     BINDINGS = [
         Binding("ctrl+c", "stop_task", "Stop", show=True),
-        Binding("ctrl+l", "clear_output", "Clear", show=True),
+        Binding("ctrl+l", "clear_chat", "Clear Chat", show=True),
         Binding("ctrl+w", "toggle_workflow", "Workflow", show=True),
+        Binding("ctrl+q", "quit_app", "Quit", show=True),
+        Binding("ctrl+h", "switch_headless", "Headless", show=False),
         Binding("escape", "focus_input", "Input", show=False),
-        Binding("tab", "focus_workflow", "Focus Workflow", show=False),
+        Binding("tab", "focus_workflow", "Workflow Focus", show=False),
         Binding("end", "scroll_to_bottom", "↓ Follow", show=False),
     ]
 
@@ -326,6 +352,7 @@ class AradCodeApp(App):
         self._last_repo: str = ""
         self._last_db = None
         self._scroll_locked: bool = False
+        self._scan_lines: list[str] = []
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -339,16 +366,15 @@ class AradCodeApp(App):
         yield ScrollIndicator(id="scroll-indicator")
         with Container(id="input-area"):
             yield Static("", id="input-hint")
-            yield TextArea("", id="input", language=None, soft_wrap=True, tab_behavior="focus")
+            yield Input(placeholder="command  or  > query…", id="input")
         yield Footer()
 
     def on_mount(self) -> None:
-        log = self.query_one("#output", RichLog)
-        log.write(_BANNER)
-        log.write(_SHORTCUTS)
-        log.write("")
+        self._write_scan(_BANNER)
+        self._write_scan(_SHORTCUTS)
+        self._write_scan("")
         self._start_clock()
-        self.query_one("#input", TextArea).focus()
+        self.query_one("#input", Input).focus()
         if self._initial_cmd:
             self.call_after_refresh(self._dispatch, self._initial_cmd)
 
@@ -367,10 +393,13 @@ class AradCodeApp(App):
         self._clock_task = asyncio.create_task(_tick())
 
     def _set_op(self, name: str):
-        bar = self.query_one("#status", StatusBar)
-        bar.op = name
-        bar.elapsed = 0.0
-        self._op_start = time.monotonic()
+        try:
+            bar = self.query_one("#status", StatusBar)
+            bar.op = name
+            bar.elapsed = 0.0
+            self._op_start = time.monotonic()
+        except NoMatches:
+            pass
 
     def _clear_op(self):
         try:
@@ -386,18 +415,34 @@ class AradCodeApp(App):
             bar = self.query_one("#status", StatusBar)
             bar.tool = name
             self._wf_model.current_tool = name
-            panel = self.query_one("#wf-panel", WorkflowPanel)
-            panel.rebuild()
+            self.query_one("#wf-panel", WorkflowPanel).rebuild()
         except NoMatches:
             pass
 
     # ── Log helpers ──────────────────────────────────────────────────────────
 
+    def _write_scan(self, text: str):
+        rendered = _rtlm(text)
+        self._scan_lines.append(rendered)
+        try:
+            log = self.query_one("#output", RichLog)
+            log.write(rendered)
+            if not self._scroll_locked:
+                log.scroll_end(animate=False)
+        except NoMatches:
+            pass
+
     def _log(self, text: str):
-        log = self.query_one("#output", RichLog)
-        log.write(_rtlm(text))
-        if not self._scroll_locked:
-            log.scroll_end(animate=False)
+        self._write_scan(text)
+
+    def _log_chat(self, text: str):
+        try:
+            log = self.query_one("#output", RichLog)
+            log.write(_rtlm(text))
+            if not self._scroll_locked:
+                log.scroll_end(animate=False)
+        except NoMatches:
+            pass
 
     def _add_finding(self, count: int = 1):
         self._finding_count += count
@@ -406,111 +451,110 @@ class AradCodeApp(App):
         except NoMatches:
             pass
 
-    # ── Scroll lock ───────────────────────────────────────────────────────────
-
-    def on_scroll_view_scroll(self) -> None:
-        pass
-
-    def on_key(self, event) -> None:
-        ta = self.query_one("#input", TextArea)
-
-        if event.key == "end":
-            self._unlock_scroll()
-            return
-
-        if not ta.has_focus:
-            return
-
-        if event.key == "enter":
-            text = ta.text
-            ta.clear()
-            self._history_idx = -1
-            if not text.strip():
-                return
-            self._history.append(text)
-            if text.startswith(">"):
-                question = text[1:].strip()
-                asyncio.create_task(self._handle_inline_query(question))
-            elif self._task and not self._task.done():
-                self._queued_input = text
-                self._log(f"[dim]Queued: {_rtl(text[:60])}[/dim]")
-            else:
-                self._dispatch(text.strip())
-            event.stop()
-            return
-
-        if event.key == "up" and "\n" not in ta.text:
-            if self._history:
-                if self._history_idx < 0:
-                    self._history_idx = len(self._history) - 1
-                else:
-                    self._history_idx = max(0, self._history_idx - 1)
-                ta.load_text(self._history[self._history_idx])
-            event.stop()
-            return
-
-        if event.key == "down" and "\n" not in ta.text:
-            if self._history_idx >= 0:
-                self._history_idx += 1
-                if self._history_idx >= len(self._history):
-                    self._history_idx = -1
-                    ta.load_text("")
-                else:
-                    ta.load_text(self._history[self._history_idx])
-            event.stop()
-            return
-
-    @on(TextArea.Changed, "#input")
-    def on_input_changed(self, event: TextArea.Changed) -> None:
-        val = event.text_area.text
-        hint = self.query_one("#input-hint", Static)
-        if val.startswith(">"):
-            hint.add_class("active")
-            hint.update("[dim green]query mode — streaming response[/dim green]")
-        else:
-            hint.remove_class("active")
+    # ── Scroll ────────────────────────────────────────────────────────────────
 
     def _unlock_scroll(self):
         self._scroll_locked = False
         try:
             self.query_one("#scroll-indicator", ScrollIndicator).locked = False
-            log = self.query_one("#output", RichLog)
-            log.scroll_end(animate=True)
+            self.query_one("#output", RichLog).scroll_end(animate=True)
         except NoMatches:
             pass
 
-    # ── Inline streaming query ────────────────────────────────────────────────
+    # ── Input events ─────────────────────────────────────────────────────────
+
+    @on(Input.Submitted, "#input")
+    def _on_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        event.input.clear()
+        self._history_idx = -1
+        if not text:
+            return
+        self._history.append(text)
+        if text.startswith(">"):
+            asyncio.create_task(self._handle_inline_query(text[1:].strip()))
+        elif self._task and not self._task.done():
+            self._queued_input = text
+            self._log(f"[dim]Queued: {text[:60]}[/dim]")
+        else:
+            self._dispatch(text)
+
+    @on(Input.Changed, "#input")
+    def _on_input_changed(self, event: Input.Changed) -> None:
+        hint = self.query_one("#input-hint", Static)
+        if event.value.startswith(">"):
+            hint.add_class("active")
+            hint.update("[dim green]query mode — streams LLM response[/dim green]")
+        else:
+            hint.remove_class("active")
+
+    def on_key(self, event) -> None:
+        try:
+            inp = self.query_one("#input", Input)
+        except NoMatches:
+            return
+
+        if event.key == "end":
+            self._unlock_scroll()
+            event.prevent_default()
+            return
+
+        if not inp.has_focus:
+            return
+
+        if event.key == "up":
+            if self._history:
+                if self._history_idx < 0:
+                    self._history_idx = len(self._history) - 1
+                else:
+                    self._history_idx = max(0, self._history_idx - 1)
+                inp.value = self._history[self._history_idx]
+                inp.cursor_position = len(inp.value)
+            event.prevent_default()
+
+        elif event.key == "down":
+            if self._history_idx >= 0:
+                self._history_idx += 1
+                if self._history_idx >= len(self._history):
+                    self._history_idx = -1
+                    inp.value = ""
+                else:
+                    inp.value = self._history[self._history_idx]
+                    inp.cursor_position = len(inp.value)
+            event.prevent_default()
+
+    # ── Inline query ─────────────────────────────────────────────────────────
 
     async def _handle_inline_query(self, question: str):
         if not question:
-            self._log("[dim]> (empty query)[/dim]")
+            self._log_chat("[dim]> (empty)[/dim]")
             return
 
-        self._log(f"\n[bold green]>[/bold green] {_rtl(question)}")
+        self._log_chat(f"\n[bold green]>[/bold green] {question}")
 
         if question.lower() in ("status", "summary"):
-            self._log(self._build_status_text())
+            self._log_chat(self._build_status_text())
             return
         if question.lower() == "findings":
-            self._log(self._build_findings_text())
+            self._log_chat(self._build_findings_text())
             return
 
         try:
             cfg, db, mcp, runner = self._make_deps()
         except ValueError as exc:
-            self._log(f"[red]Config error:[/red] {exc}")
+            self._log_chat(f"[red]Config error:[/red] {exc}")
             return
 
         context = self._build_run_context()
         prompt = (
-            f"You are helping a security researcher who just ran a pentest scan.\n"
-            f"Current run context:\n{context}\n\n"
+            f"Security researcher ran a pentest scan.\n"
+            f"Context:\n{context}\n\n"
             f"Question: {question}\n\n"
-            f"Answer concisely in 2-5 sentences. Be specific and actionable."
+            f"Answer in 2-5 sentences, specific and actionable."
         )
 
         self._set_op("query")
-        self._log("[dim cyan]⟳ thinking…[/dim cyan]")
+        self._log_chat("[dim cyan]⟳ thinking…[/dim cyan]")
 
         try:
             buf: list[str] = []
@@ -519,16 +563,11 @@ class AradCodeApp(App):
                 system="You are a concise security research assistant.",
             ):
                 buf.append(token)
-
             response = "".join(buf)
-            # remove the "thinking" line by overwriting — just log the response
-            log = self.query_one("#output", RichLog)
-            # RTL-render the full response before display
-            rendered = _rtl(response)
-            log.write(f"[cyan]{rendered.replace('[', chr(92) + '[')}[/cyan]")
-            log.write("")
+            self._log_chat(f"[cyan]{_escape(response)}[/cyan]")
+            self._log_chat("")
         except Exception as exc:
-            self._log(f"[red]Query error:[/red] {exc}")
+            self._log_chat(f"[red]Query error:[/red] {exc}")
         finally:
             self._clear_op()
             await runner.close()
@@ -584,63 +623,137 @@ class AradCodeApp(App):
             lines.append(f"  [red]{exc}[/red]")
         return "\n".join(lines)
 
-    # ── Progress events ───────────────────────────────────────────────────────
+    # ── Workflow tree — node detail on Enter ──────────────────────────────────
+
+    @on(Tree.NodeSelected, "#wf-tree")
+    def _on_wf_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if not data:
+            return
+        if data.get("type") == "phase":
+            phase = self._wf_model._phase_idx.get(data["name"])
+            if not phase:
+                return
+            status = "[green]done[/green]" if phase.done else "[yellow]running[/yellow]"
+            lines = [f"\n[bold magenta]Phase: {phase.title}[/bold magenta]  {status}"]
+            if phase.done:
+                lines.append(f"  elapsed: {phase.elapsed:.1f}s")
+            lines.append(f"  agents: {len(phase.agents)}")
+            for a in phase.agents:
+                if a.error:
+                    lines.append(f"    [red]✗[/red] {a.label}  [red dim]{a.error}[/red dim]")
+                elif a.done:
+                    lines.append(f"    [green]✓[/green] {a.label}  [dim]{a.elapsed:.1f}s[/dim]")
+                else:
+                    lines.append(f"    [yellow]→[/yellow] {a.label}  [dim](running {time.monotonic() - a.started_at:.0f}s)[/dim]")
+            self._log_chat("\n".join(lines))
+
+        elif data.get("type") == "agent":
+            agent = self._wf_model._agent_idx.get(data["label"])
+            if not agent:
+                return
+            lines = [f"\n[bold]Agent: {agent.label}[/bold]"]
+            if agent.error:
+                lines.append(f"  status:  [red]error[/red]")
+                lines.append(f"  error:   [red]{agent.error}[/red]")
+            elif agent.done:
+                lines.append(f"  status:  [green]done[/green]")
+                lines.append(f"  elapsed: {agent.elapsed:.1f}s")
+            else:
+                running = time.monotonic() - agent.started_at
+                lines.append(f"  status:  [yellow]running[/yellow]  {running:.0f}s")
+            if agent.findings:
+                lines.append(f"  findings: {len(agent.findings)}")
+                for i, h in enumerate(agent.findings, 1):
+                    sev = getattr(h, "severity", "?")
+                    c = _SEV_COLOR.get(sev, "white")
+                    inv = getattr(h, "violated_invariant", str(h))[:70]
+                    st = getattr(h, "status", "?")
+                    lines.append(f"    {i}. [{c}]{sev.upper()}[/{c}]  ({st})  {inv}")
+            self._log_chat("\n".join(lines))
+
+        elif data.get("type") == "finding":
+            hyp = data.get("hyp")
+            if not hyp:
+                return
+            sev = getattr(hyp, "severity", "unknown")
+            c = _SEV_COLOR.get(sev, "white")
+            st = getattr(hyp, "status", "?")
+            lines = [
+                f"\n[bold][{c}]{sev.upper()}[/{c}][/bold]  ({st})",
+                f"[bold]Issue:[/bold]",
+                f"  {getattr(hyp, 'violated_invariant', '?')}",
+            ]
+            evidence = getattr(hyp, "evidence", None)
+            if evidence:
+                lines.append(f"\n[bold]Evidence:[/bold]")
+                lines.append(f"  {str(evidence)[:400]}")
+            recommendation = getattr(hyp, "recommendation", None)
+            if recommendation:
+                lines.append(f"\n[bold]Recommendation:[/bold]")
+                lines.append(f"  {str(recommendation)[:300]}")
+            for attr in ("file_path", "location", "cwe", "cvss"):
+                val = getattr(hyp, attr, None)
+                if val:
+                    lines.append(f"  [dim]{attr}:[/dim] {val}")
+            self._log_chat("\n".join(lines))
+
+    # ── Progress events (workflow scripts) ────────────────────────────────────
 
     def _progress(self, event: str, data):
         from .workflow import PhaseInfo, AgentRecord
-        panel = self.query_one("#wf-panel", WorkflowPanel)
+        try:
+            panel = self.query_one("#wf-panel", WorkflowPanel)
+        except NoMatches:
+            panel = None
 
         if event == "phase_start":
             p: PhaseInfo = data
             self._log(f"\n[bold magenta][Phase: {p.title}][/bold magenta]")
             self._set_op(p.title)
             self._wf_model.add_phase(p.name, p.title)
-
         elif event == "phase_end":
             p: PhaseInfo = data
             self._log(f"[dim]Phase {p.title} done in {p.elapsed():.1f}s[/dim]")
             self._wf_model.finish_phase(p.name)
-
         elif event == "agent_start":
             rec: AgentRecord = data
             self._log(f"  [yellow]→[/yellow] {rec.label}")
             self._wf_model.add_agent(rec.label, rec.phase)
-
         elif event == "agent_end":
             rec: AgentRecord = data["record"]
             elapsed = (rec.ended_at or time.monotonic()) - rec.started_at
             self._log(f"  [green]✓[/green] {rec.label} [dim]{elapsed:.1f}s[/dim]")
             self._wf_model.finish_agent(rec.label)
-
         elif event == "agent_error":
             rec: AgentRecord = data["record"]
             self._log(f"  [red]✗[/red] {rec.label}: {data['error'][:80]}")
             self._wf_model.finish_agent(rec.label, error=data["error"][:60])
-
         elif event == "votes_counted":
             self._log(
                 f"  [cyan]votes[/cyan] {data['finding']}: "
                 f"[green]{data['true']} real[/green] / [red]{data['false']} refuted[/red] "
                 f"(round {data['round'] + 1})"
             )
-
         elif event == "inconclusive_vote":
             self._log(f"  [yellow]⟳[/yellow] inconclusive — re-examining")
 
-        panel.rebuild()
+        if panel:
+            panel.rebuild()
 
     def _on_tool_event(self, event: str, data: dict):
         if event == "tool_call":
             name = data.get("name", "")
             short = name.replace("mcp__codebase-memory-mcp__", "").replace("mcp__sqz__", "sqz.")
             self._set_tool(short)
-        elif event == "tool_result":
-            pass
 
     # ── Command dispatch ──────────────────────────────────────────────────────
 
     def _dispatch(self, cmd: str):
-        parts = shlex.split(cmd)
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            parts = cmd.split()
         if not parts:
             return
         verb = parts[0].lower()
@@ -649,22 +762,29 @@ class AradCodeApp(App):
             self.exit(0)
             return
         if verb in ("clear", "cls"):
-            self.action_clear_output()
+            self.action_clear_chat()
             return
         if verb == "help":
             self._log(_HELP)
             return
+        if verb == "headless":
+            self.action_switch_headless()
+            return
 
-        self._log(f"\n[bold cyan]>[/bold cyan] {_rtl(cmd[:80])}")
+        self._log(f"\n[bold cyan]>[/bold cyan] {cmd[:80]}")
         self._task = asyncio.create_task(self._run_command(cmd, parts))
 
         def _done_cb(task):
             self._clear_op()
             self._wf_model.current_tool = ""
+            try:
+                self.query_one("#wf-panel", WorkflowPanel).rebuild()
+            except NoMatches:
+                pass
             if self._queued_input:
                 queued = self._queued_input
                 self._queued_input = None
-                self._log(f"\n[dim]Resuming queued: {_rtl(queued[:60])}[/dim]")
+                self._log(f"\n[dim]Resuming queued: {queued[:60]}[/dim]")
                 self._dispatch(queued)
 
         self._task.add_done_callback(_done_cb)
@@ -691,7 +811,7 @@ class AradCodeApp(App):
         except Exception as exc:
             self._log(f"\n[red]Error:[/red] {exc}")
 
-    # ── Dep factory ──────────────────────────────────────────────────────────
+    # ── Deps ──────────────────────────────────────────────────────────────────
 
     def _make_deps(self, api_key: str = "", model: str = "", api_base: str = "", config: str = ""):
         import os
@@ -740,7 +860,10 @@ class AradCodeApp(App):
         self._last_repo = repo
         self._last_db = db
         self._finding_count = 0
-        self.query_one("#status", StatusBar).findings = 0
+        try:
+            self.query_one("#status", StatusBar).findings = 0
+        except NoMatches:
+            pass
 
         self._log(f"[bold]Running scan on[/bold] {repo}")
         if phase:
@@ -759,19 +882,39 @@ class AradCodeApp(App):
                 self._log(f"[dim]Resuming — {len(done)} skill(s) already done[/dim]")
 
         self._wf_model.reset()
+        self._wf_model.add_phase("run", "Skill Scan")
         if not self._wf_visible:
             self.action_toggle_workflow()
 
+        try:
+            panel = self.query_one("#wf-panel", WorkflowPanel)
+            panel.rebuild()
+        except NoMatches:
+            panel = None
+
         def _on_progress(name, status, result):
-            if status == "done":
-                h_count = len(result.hypotheses) if result else 0
-                self._log(f"  [green]✓[/green] {name} — {h_count} hypothesis/hypotheses")
+            if status == "started":
+                self._wf_model.add_agent(name, "run")
+                if panel:
+                    panel.rebuild()
+            elif status == "done":
+                hyps = getattr(result, "hypotheses", []) if result else []
+                h_count = len(hyps)
+                self._wf_model.finish_agent(name)
+                if hyps:
+                    self._wf_model.add_findings(name, hyps)
+                if panel:
+                    panel.rebuild()
+                suffix = f"  [cyan]{h_count} finding(s)[/cyan]" if h_count else "  [dim]0[/dim]"
+                self._log(f"  [green]✓[/green] {name}{suffix}")
                 if h_count:
                     self._add_finding(h_count)
             elif status == "skipped":
-                self._log(f"  [dim]→ {name}: skipped[/dim]")
-            elif status == "started":
-                self._log(f"  [yellow]→[/yellow] {name}")
+                self._wf_model.add_agent(name, "run")
+                self._wf_model.finish_agent(name)
+                if panel:
+                    panel.rebuild()
+                self._log(f"  [dim]✓ {name}: cached[/dim]")
 
         try:
             if phase:
@@ -780,6 +923,9 @@ class AradCodeApp(App):
             else:
                 await runner.run_all(repo, verbose=False, resume=resume,
                                      on_progress=_on_progress)
+            self._wf_model.finish_phase("run")
+            if panel:
+                panel.rebuild()
         finally:
             await runner.close()
             self._set_tool("")
@@ -804,14 +950,26 @@ class AradCodeApp(App):
         self._last_db = db
         self._log(f"[bold]Running skill[/bold] {skill_name} on {repo}")
         self._wf_model.reset()
+        self._wf_model.add_phase("skill", skill_name)
+        self._wf_model.add_agent(skill_name, "skill")
+        if not self._wf_visible:
+            self.action_toggle_workflow()
+        try:
+            panel = self.query_one("#wf-panel", WorkflowPanel)
+            panel.rebuild()
+        except NoMatches:
+            panel = None
 
         try:
             result = await runner.run_skill(skill_name, repo, extra)
             h_count = len(result.hypotheses)
             conf = sum(1 for h in result.hypotheses if h.status in ("evidence_supported", "reproduced"))
+            self._wf_model.finish_agent(skill_name)
+            self._wf_model.finish_phase("skill")
+            if panel:
+                panel.rebuild()
             self._log(f"\n[green]Done.[/green] {h_count} hypothesis/hypotheses ({conf} confirmed)")
             self._add_finding(h_count)
-
             sev_color = {"critical": "bright_red", "high": "red", "medium": "yellow", "low": "green"}
             for h in result.hypotheses[:15]:
                 c = sev_color.get(h.severity, "white")
@@ -871,7 +1029,7 @@ class AradCodeApp(App):
                     f"{len(confirmed)} confirmed / {len(result.get('findings', []))} total findings"
                 )
             else:
-                self._log(f"\n[green]Workflow complete.[/green]")
+                self._log("\n[green]Workflow complete.[/green]")
         finally:
             await runner.close()
             self._set_tool("")
@@ -901,7 +1059,7 @@ class AradCodeApp(App):
             self._log(f"[red]Config error:[/red] {exc}")
             return
 
-        self._log(f"[bold]Deep Research:[/bold] {_rtl(question)}")
+        self._log(f"[bold]Deep Research:[/bold] {question}")
 
         try:
             from .deep_research import deep_research, format_research_output
@@ -925,7 +1083,7 @@ class AradCodeApp(App):
         async for line in proc.stdout:
             text = line.decode("utf-8", errors="replace").rstrip()
             if text:
-                self._log(_rtl(text))
+                self._log(text)
         await proc.wait()
         if proc.returncode != 0:
             self._log(f"[red]Exited {proc.returncode}[/red]")
@@ -935,36 +1093,56 @@ class AradCodeApp(App):
     def action_stop_task(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
-            self._log("\n[yellow]Stopped.[/yellow] (resume with --resume)")
+            self._log("\n[yellow]Stopped.[/yellow]")
+        else:
+            self._log("[dim]No task running.[/dim]")
         self._clear_op()
 
-    def action_clear_output(self) -> None:
-        log = self.query_one("#output", RichLog)
-        log.clear()
-        log.write(_BANNER)
+    def action_clear_chat(self) -> None:
+        try:
+            log = self.query_one("#output", RichLog)
+            log.clear()
+            for line in self._scan_lines:
+                log.write(line)
+            log.write("[dim yellow]── chat cleared ──[/dim yellow]")
+            if not self._scroll_locked:
+                log.scroll_end(animate=False)
+        except NoMatches:
+            pass
 
     def action_focus_input(self) -> None:
-        self.query_one("#input", TextArea).focus()
+        try:
+            self.query_one("#input", Input).focus()
+        except NoMatches:
+            pass
 
     def action_toggle_workflow(self) -> None:
-        panel = self.query_one("#wf-panel", WorkflowPanel)
-        self._wf_visible = not self._wf_visible
-        if self._wf_visible:
-            panel.add_class("visible")
-        else:
-            panel.remove_class("visible")
+        try:
+            panel = self.query_one("#wf-panel", WorkflowPanel)
+            self._wf_visible = not self._wf_visible
+            if self._wf_visible:
+                panel.add_class("visible")
+            else:
+                panel.remove_class("visible")
+        except NoMatches:
+            pass
 
     def action_focus_workflow(self) -> None:
         if not self._wf_visible:
             self.action_toggle_workflow()
         try:
-            tree = self.query_one("#wf-tree", Tree)
-            tree.focus()
+            self.query_one("#wf-tree", Tree).focus()
         except NoMatches:
             pass
 
     def action_scroll_to_bottom(self) -> None:
         self._unlock_scroll()
+
+    def action_quit_app(self) -> None:
+        self.exit(0)
+
+    def action_switch_headless(self) -> None:
+        self.exit(result=("headless", self._initial_cmd))
 
     async def on_unmount(self) -> None:
         if self._clock_task:
@@ -973,6 +1151,7 @@ class AradCodeApp(App):
             self._task.cancel()
 
 
-def launch_tui(initial_cmd: str = ""):
+def launch_tui(initial_cmd: str = "") -> Optional[tuple]:
     app = AradCodeApp(initial_cmd=initial_cmd)
-    app.run()
+    result = app.run()
+    return result
