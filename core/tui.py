@@ -27,6 +27,18 @@ _SEV_ICON = {
 }
 _SEV_COLOR = {"critical": "bright_red", "high": "red", "medium": "yellow", "low": "green"}
 
+
+def _sev_label(sev) -> str:
+    if isinstance(sev, int):
+        if sev >= 9:
+            return "critical"
+        if sev >= 7:
+            return "high"
+        if sev >= 4:
+            return "medium"
+        return "low"
+    return str(sev).lower() if sev else "low"
+
 _BANNER = (
     f"[bold cyan]Arad Code[/bold cyan] [dim]v{VERSION}[/dim]\n"
     "[dim]command or [bold cyan]>[/bold cyan] query  ·  Ctrl+W workflow  ·  "
@@ -194,7 +206,7 @@ class WorkflowPanel(Static):
                 if agent.findings:
                     a_node = p_node.add(Text.from_markup(a_text), data={"type": "agent", "label": agent.label})
                     for hyp in agent.findings:
-                        icon = _SEV_ICON.get(getattr(hyp, "severity", ""), "[white]■[/white]")
+                        icon = _SEV_ICON.get(_sev_label(getattr(hyp, "severity", "")), "[white]■[/white]")
                         title = getattr(hyp, "violated_invariant", str(hyp))[:50]
                         a_node.add_leaf(
                             Text.from_markup(f"{icon} {title}"),
@@ -584,7 +596,7 @@ class AradCodeApp(App):
                 if hyps:
                     parts.append(f"Hypotheses ({len(hyps)}):")
                     for h in hyps[:8]:
-                        parts.append(f"  [{h.severity}] {h.violated_invariant[:70]}")
+                        parts.append(f"  [{_sev_label(h.severity)}] {h.violated_invariant[:70]}")
             except Exception:
                 pass
         return "\n".join(parts) if parts else "No run data yet."
@@ -597,9 +609,8 @@ class AradCodeApp(App):
         if self._last_db:
             try:
                 hyps = self._last_db.get_hypotheses()
-                sev_color = {"critical": "bright_red", "high": "red", "medium": "yellow", "low": "green"}
                 for h in hyps[:15]:
-                    c = sev_color.get(h.severity, "white")
+                    c = _SEV_COLOR.get(_sev_label(h.severity), "white")
                     lines.append(f"  [{c}]■[/{c}] [{h.status}] {h.violated_invariant[:68]}")
             except Exception:
                 pass
@@ -613,11 +624,11 @@ class AradCodeApp(App):
             hyps = self._last_db.get_hypotheses()
             if not hyps:
                 lines.append("  [dim](none)[/dim]")
-            sev_color = {"critical": "bright_red", "high": "red", "medium": "yellow", "low": "green"}
             for i, h in enumerate(hyps, 1):
-                c = sev_color.get(h.severity, "white")
+                sl = _sev_label(h.severity)
+                c = _SEV_COLOR.get(sl, "white")
                 lines.append(
-                    f"  {i}. [{c}]{h.severity.upper()}[/{c}]  "
+                    f"  {i}. [{c}]{sl.upper()}[/{c}]  "
                     f"[{h.status}]  {h.violated_invariant[:60]}"
                 )
         except Exception as exc:
@@ -670,22 +681,22 @@ class AradCodeApp(App):
             if agent.findings:
                 lines.append(f"  findings: {len(agent.findings)}")
                 for i, h in enumerate(agent.findings, 1):
-                    sev = getattr(h, "severity", "?")
-                    c = _SEV_COLOR.get(sev, "white")
+                    sl = _sev_label(getattr(h, "severity", 0))
+                    c = _SEV_COLOR.get(sl, "white")
                     inv = getattr(h, "violated_invariant", str(h))[:70]
                     st = getattr(h, "status", "?")
-                    lines.append(f"    {i}. [{c}]{sev.upper()}[/{c}]  ({st})  {inv}")
+                    lines.append(f"    {i}. [{c}]{sl.upper()}[/{c}]  ({st})  {inv}")
             self._log_chat("\n".join(lines))
 
         elif data.get("type") == "finding":
             hyp = data.get("hyp")
             if not hyp:
                 return
-            sev = getattr(hyp, "severity", "unknown")
-            c = _SEV_COLOR.get(sev, "white")
+            sl = _sev_label(getattr(hyp, "severity", 0))
+            c = _SEV_COLOR.get(sl, "white")
             st = getattr(hyp, "status", "?")
             lines = [
-                f"\n[bold][{c}]{sev.upper()}[/{c}][/bold]  ({st})",
+                f"\n[bold][{c}]{sl.upper()}[/{c}][/bold]  ({st})",
                 f"[bold]Issue:[/bold]",
                 f"  {getattr(hyp, 'violated_invariant', '?')}",
             ]
@@ -977,9 +988,8 @@ class AradCodeApp(App):
                 panel.rebuild()
             self._log(f"\n[green]Done.[/green] {h_count} hypothesis/hypotheses ({conf} confirmed)")
             self._add_finding(h_count)
-            sev_color = {"critical": "bright_red", "high": "red", "medium": "yellow", "low": "green"}
             for h in result.hypotheses[:15]:
-                c = sev_color.get(h.severity, "white")
+                c = _SEV_COLOR.get(_sev_label(h.severity), "white")
                 self._log(f"  [{c}]■[/{c}] [{h.status}] {h.violated_invariant[:78]}")
             if result.open_questions:
                 self._log(f"\n[dim]{len(result.open_questions)} open question(s)[/dim]")
