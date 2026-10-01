@@ -2,52 +2,53 @@
 
 ## Goal
 
-Find authentication bypass bugs. For each step: use search_graph or search_code to locate the code, read it, decide immediately, and submit a hypothesis if the pattern is present. Do not investigate exhaustively — submit and move on.
+Understand how this application authenticates requests and enforces access control, then reason about whether those controls can be bypassed. Do not search for known names or patterns — explore the codebase to discover what actually exists.
 
 ---
 
-## Step 1 — HTTP header used in authorization decision
+## Step 1 — Orient: find the request entry point and middleware chain
 
-Search for the authorization/admin check function (search_graph for `is_admin`, `checkAdmin`, `isAdmin`, `hasAdminRole`, `isStaff`, or whatever name the project uses for elevated privilege checks).
-Read the complete function body.
-**Finding condition**: the function grants elevated access (returns True, grants admin role, skips further checks) based on the value of any HTTP request header (e.g., `request.headers.get(...)`, `req.header(...)`, `getHeader(...)`, `ctx.GetHeader(...)`) before checking a database-backed identity property (like `is_superuser`, `admin=true` in a DB record, or a cryptographically verified claim).
-→ **submit hypothesis immediately**: violated_invariant="admin/elevated privilege check short-circuits on attacker-controlled HTTP header before verifying identity in the trusted store", severity=10, confidence=8.
+Use `get_architecture` to see the project layout.
+Find the main entry point for HTTP requests: the router, the server startup file, or the base application class.
+Read it. Follow the chain: what runs for every request before it reaches a handler? Find the middleware or filter stack and read the relevant parts.
 
-## Step 2 — JWT audience not verified
+Your goal: understand what auth-related work happens before a handler runs, and how a handler signals what access it requires.
 
-Search for JWT decode calls (search_code for `verify_aud`, `audience=`, `decode(token`, `jwt.decode`, `jwtlib.decode`, `verifyToken`, `parseJWT`, or the project's JWT library).
-Read the decode options/parameters.
-**Finding condition**: audience verification is explicitly disabled (`verify_aud: false`, `options={"verify_aud": False}`, audience parameter omitted when the library defaults to no-verify) OR the audience is validated with a loose match (substring, prefix) rather than exact equality.
-→ **submit hypothesis immediately**: violated_invariant="JWT tokens issued to a different audience are accepted; cross-service token replay possible", severity=9, confidence=8.
+## Step 2 — Trace how identity is established
 
-## Step 3 — Signing key hardcoded fallback
+From Step 1, find the specific code that turns an incoming request into a known identity (user, service, etc.).
+Read that code completely. Understand:
+- What does it read from the request? (Which header, cookie, or field?)
+- What does it verify? (Signature, expiry, revocation status?)
+- What can go wrong? Is there any branch that produces a valid identity without full verification, or defaults to a privileged identity on error?
 
-Search for JWT or session signing key configuration (search_code for `SIGNING_KEY`, `JWT_SECRET`, `SECRET_KEY`, `jwt_secret`, `signing_key`).
-Find where the key value is assigned at startup. Read the assignment.
-**Finding condition**: the key source uses a "get with default" pattern (`os.environ.get('X', 'hardcoded-string')`, `process.env.X || 'fallback'`, `ENV['X'] || 'fallback'`, `config.GetString("x", "default")`) where the fallback is a non-empty string literal.
-→ **submit hypothesis immediately**: violated_invariant="JWT signing key falls back to hardcoded string when env var absent; anyone with source code access can forge tokens", severity=10, confidence=9.
+If the token is a JWT or structured credential: find where it is decoded and where each claim is validated. Are there claims the caller can influence that affect the identity or role?
 
-## Step 4 — TLS verification disabled for external key fetch
+## Step 3 — Trace how access decisions are made
 
-Search for HTTP client calls that fetch OAuth2/OIDC discovery or JWKS documents (search_code for `jwks_uri`, `openid-configuration`, `well-known`, `discovery`, `JWKS`).
-Read the HTTP call including the `verify`, `ssl`, `tls`, or equivalent parameter.
-**Finding condition**: TLS verification is disabled (`verify=False`, `ssl=false`, `InsecureSkipVerify: true`) OR disabled conditionally based on a debug flag (`verify = not DEBUG`, `if (isDev) { rejectUnauthorized: false }`).
-→ **submit hypothesis immediately**: violated_invariant="OIDC/JWKS key material fetched with TLS verification disabled; MITM can inject forged signing keys", severity=7, confidence=8.
+Find the code that decides whether the established identity may perform the requested action.
+Read it completely. Understand:
+- Does the decision rely solely on the resolved identity from Step 2, or does it also read anything directly from the request?
+- Is there any short-circuit path (fallback, exception handler, debug mode) that grants access without a complete check?
+- If the system has privilege levels (admin, staff, operator, owner, etc.) — how are they represented, and is the representation stored in a tamper-proof place (signed token claim, DB column) or somewhere a caller can influence?
 
-## Step 5 — Revocation check after signature validation
+## Step 4 — Check credential security
 
-Search for token revocation/blacklist logic (search_code for `blacklist`, `revoke`, `BlacklistedToken`, `invalidated_token`, `token_blacklist`).
-Find where the revocation check executes relative to signature verification. Trace the call order.
-**Finding condition**: the revocation/blacklist query executes AFTER the signature verification call (e.g., `super().get_validated_token()` followed later by a DB query to a blacklist table).
-→ **submit hypothesis immediately**: violated_invariant="token blacklist checked after signature validation; a token forged with a leaked key is never in the blacklist and bypasses revocation", severity=7, confidence=8.
+Find where signing secrets, session keys, and API credentials used by the auth system are configured.
+Read those values.
+**Finding condition**: any secret has a hardcoded non-empty fallback value that activates when the environment variable is absent.
+→ **submit hypothesis immediately**: violated_invariant="auth secret has hardcoded fallback; source code access lets an attacker forge tokens or sessions", severity=10, confidence=9.
 
-## Step 6 — Test/debug authentication injection
+## Step 5 — Reason about bypass paths
 
-Search for middleware that injects authentication for unauthenticated requests (search_code for `LOCAL_TESTING`, `TEST_USER`, `inject.*token`, `inject.*auth`, `bypass.*auth`, `TestUser`).
-Read the activation condition.
-**Finding condition**: the middleware activates based on an environment variable (not `DEBUG` itself) that could be accidentally set on a staging/production server.
-→ **submit hypothesis immediately**: violated_invariant="development auth injection middleware can activate on staging via misset env var; unauthenticated requests become authenticated", severity=8, confidence=7.
+Based on what you read in Steps 2 and 3, answer: can an attacker reach a handler that requires elevated access without legitimately having that access? Consider:
+- Controlling an input that is trusted in the identity or permission decision
+- Triggering an exception or fallback that grants access
+- Replaying a token from a different context (different service, different audience)
+- Finding any code path that skips the standard auth chain
+
+For each bypass path you find: submit a hypothesis.
 
 ## Finish
 
-Call finish() with all hypotheses found. Call it now even if the list is empty.
+Call finish() with all hypotheses. Call it now even if the list is empty.

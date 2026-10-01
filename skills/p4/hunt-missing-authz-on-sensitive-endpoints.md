@@ -2,35 +2,57 @@
 
 ## Goal
 
-Find endpoints that handle sensitive operations (payments, file access, privileged actions) but lack authentication, ownership verification, or gateway signature validation. Search, read, decide, submit immediately.
+Find endpoints that handle sensitive operations but lack proper authentication, ownership verification, or request integrity validation. Explore the route surface first — do not search for specific names.
 
 ---
 
-## Step 1 — Payment or webhook callback without gateway signature
+## Step 1 — Enumerate all routes/endpoints
 
-Search for payment callback, webhook receiver, or IPN handler (search_code for `callback`, `webhook`, `notify`, `ipn`, `payment.*return`, `gateway.*confirm`; or search_graph for classes/functions handling payment provider redirects).
-Read the handler. Check:
-1. Is `permission_classes`, `authentication_required`, or equivalent set? If absent or `AllowAny` → unauthenticated.
-2. Is the request body/headers verified against a gateway-provided HMAC or signature? Look for HMAC computation, signature header extraction, or calls to the gateway SDK's verification method.
-3. Does the endpoint accept a `provider`, `type`, or `mode` parameter that selects different code paths — including a sandbox/test path?
-**Finding condition**: callback endpoint (a) has no authentication AND no gateway signature verification, OR (b) accepts a `sandbox`/`test` provider value that bypasses real verification.
-→ **submit hypothesis immediately**: violated_invariant="payment callback accepts unauthenticated requests without gateway signature verification; attacker can forge payment confirmation for arbitrary transactions", severity=9, confidence=8.
+Use `get_architecture` to understand the project structure.
+Find the routing definition files (url config, router, route table, controller map — whatever this project uses).
+Read them. Build a list of all endpoints grouped by what they do:
+- Payment / financial operations
+- File or media access
+- User data access (other users' records)
+- Privileged or administrative operations
+- External webhook receivers or callbacks
 
-## Step 2 — File/object storage access without ownership check
+## Step 2 — For each sensitive endpoint: check authentication
 
-Search for views or handlers that issue presigned/signed URLs for object storage (search_code for `get_signed_url`, `presigned_url`, `generate_presigned`, `getObject`, `createSignedUrl`, `blob_url`; or search_graph for MinIO/S3/GCS client usage).
-Read the handler that accepts a file identifier from the request and returns the URL.
-**Finding condition**: between accepting the file key/name/id from the request and calling the storage client, there is NO database lookup that verifies the requesting user owns or has permission to access that specific file.
-→ **submit hypothesis immediately**: violated_invariant="signed storage URL issued for user-supplied file key without ownership verification; any authenticated user can access any file by key", severity=6, confidence=8.
+For every endpoint in the sensitive categories from Step 1: read the handler.
+Check whether the standard authentication chain from this project (as you understand it from the code) is applied. Look at:
+- Is the endpoint excluded from auth middleware or marked as public/anonymous?
+- Does it explicitly declare no authentication required?
+- Is there a comment or annotation that suggests auth was intentionally skipped?
 
-## Step 3 — Admin operation with permission check bypassable by header
+**Finding condition**: a sensitive endpoint is reachable without authentication.
+→ **submit hypothesis immediately**: violated_invariant="[endpoint path] handles [sensitive operation] but is accessible without authentication", severity=8, confidence=9.
 
-Search for admin permission check function (search_graph for `is_admin`, `isAdmin`, `checkAdmin`, `hasAdminRole`).
-Read it. If it grants admin based on a user-controlled HTTP header (see also hunt-auth-bypass-patterns Step 1), search for all call sites (search_code for `is_admin(` or `isAdmin(`).
-For each endpoint that calls this function: note that the permission check is bypassable.
-**Finding condition**: at least one endpoint grants access to sensitive data (all users' records, financial data, support tickets) based solely on the bypassable admin check with no secondary defense.
-→ **submit hypothesis per endpoint category**: violated_invariant="admin endpoint relies solely on bypassable admin check; any user who can send arbitrary headers accesses [admin resource]", severity=9, confidence=8.
+## Step 3 — For webhook/callback endpoints: check request integrity
+
+For any endpoint that receives calls from an external system (payment gateway, notification provider, third-party service):
+Read the handler. Check whether the incoming request is verified against a shared secret or signature from the external provider (HMAC over the request body, signature header, challenge-response).
+
+**Finding condition**: an external callback endpoint accepts and processes requests without verifying they came from the legitimate provider.
+→ **submit hypothesis immediately**: violated_invariant="external callback endpoint processes requests without integrity verification; attacker can forge provider notifications", severity=9, confidence=8.
+
+## Step 4 — For resource access endpoints: check ownership
+
+For endpoints that return or operate on a specific resource (file, record, object) identified by a user-supplied key or ID:
+Read the handler. Trace from where the key/ID is read from the request to where the resource is fetched or operated on.
+
+**Finding condition**: the handler fetches or operates on the resource using the user-supplied identifier without first confirming that the requesting user owns or is authorized to access that specific resource.
+→ **submit hypothesis immediately**: violated_invariant="resource access endpoint uses caller-supplied ID without ownership check; any authenticated user can access any resource by ID", severity=7, confidence=8.
+
+## Step 5 — For privileged endpoints: check if the privilege check is sound
+
+For endpoints that require elevated access (administrative actions, bulk operations, other users' data):
+Read the handler and any permission check it uses.
+Understand: where does the privilege determination come from? Is it read from a tamper-proof source (DB record, verified token claim) or from somewhere the caller could influence?
+
+**Finding condition**: the privilege check is absent, trivially bypassed, or reads from caller-controlled input rather than a trusted source.
+→ **submit hypothesis immediately**: violated_invariant="privileged endpoint relies on a bypassable or absent access check", severity=9, confidence=8.
 
 ## Finish
 
-Call finish() with all hypotheses found. Call it now even if the list is empty. Set confidence lower rather than raising blocking open questions.
+Call finish() with all hypotheses. Call it now even if the list is empty. Set confidence lower rather than raising blocking open questions.
