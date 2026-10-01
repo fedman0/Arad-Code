@@ -17,7 +17,7 @@ from textual.scroll_view import ScrollView
 from textual.widgets import Footer, Header, Input, RichLog, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
-from .rtl import render as _rtl
+from .rtl import render as _rtl, rtl_markup as _rtlm
 
 VERSION = "2.1.0"
 
@@ -393,13 +393,9 @@ class AradCodeApp(App):
 
     def _log(self, text: str):
         log = self.query_one("#output", RichLog)
-        log.write(text)
+        log.write(_rtlm(text))
         if not self._scroll_locked:
             log.scroll_end(animate=False)
-
-    def _log_inline(self, text: str):
-        log = self.query_one("#output", RichLog)
-        log.write(text)
 
     def _add_finding(self, count: int = 1):
         self._finding_count += count
@@ -512,19 +508,23 @@ class AradCodeApp(App):
         )
 
         self._set_op("query")
-        self._log("[cyan]", )
+        self._log("[dim cyan]⟳ thinking…[/dim cyan]")
 
         try:
-            buf = []
+            buf: list[str] = []
             async for token in runner._llm.complete_stream(
                 messages=[{"role": "user", "content": prompt}],
                 system="You are a concise security research assistant.",
             ):
                 buf.append(token)
-                self._log(token.replace("[", "\\["))
 
-            self._log("[/cyan]")
-            self._log("")
+            response = "".join(buf)
+            # remove the "thinking" line by overwriting — just log the response
+            log = self.query_one("#output", RichLog)
+            # RTL-render the full response before display
+            rendered = _rtl(response)
+            log.write(f"[cyan]{rendered.replace('[', chr(92) + '[')}[/cyan]")
+            log.write("")
         except Exception as exc:
             self._log(f"[red]Query error:[/red] {exc}")
         finally:
