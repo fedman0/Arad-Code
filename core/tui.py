@@ -348,6 +348,7 @@ class AradCodeApp(App):
         self._clock_task: Optional[asyncio.Task] = None
         self._queued_input: Optional[str] = None
         self._wf_visible: bool = False
+        self._wf_last_node_id: Optional[int] = None
         self._finding_count: int = 0
         self._last_repo: str = ""
         self._last_db = None
@@ -627,6 +628,10 @@ class AradCodeApp(App):
 
     @on(Tree.NodeSelected, "#wf-tree")
     def _on_wf_node_selected(self, event: Tree.NodeSelected) -> None:
+        node_id = id(event.node)
+        if node_id == self._wf_last_node_id:
+            return
+        self._wf_last_node_id = node_id
         data = event.node.data
         if not data:
             return
