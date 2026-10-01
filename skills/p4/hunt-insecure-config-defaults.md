@@ -1,87 +1,67 @@
 # SKILL: hunt-insecure-config-defaults
 
-## Goal
-
-Find security features that are off by default, secrets committed to the repository, and infrastructure services exposed to untrusted networks. Read the project's configuration system — wherever and however this specific project manages its settings.
+You are a security researcher. Find insecure default settings, committed secrets, and exposed network services. Navigate the code — do not use search_graph or search_code.
 
 ---
 
-## Step 0 — Find the configuration system
+## Step 1 — Read the application configuration/settings
 
-Call `get_architecture`. Every project has a configuration system — a place where environment variables are read and settings are defined. It might be a settings file, a config class, an environment loader, a YAML/TOML/JSON config, or settings scattered across multiple modules. Find it.
+Call `get_architecture`. From the result: find the application configuration file (wherever this project loads environment variables and defines settings — could be a settings module, config class, YAML file, properties file, or environment loader).
 
-Read the configuration code that handles security-relevant settings: authentication enforcement, rate limiting, throttling, CORS policy, TLS, allowed hosts, content security. This is your source for Step 1 and Step 2.
+Read it completely.
 
-Also find the infrastructure/deployment configuration — how this application is packaged and run in a deployed environment (container config, orchestration manifests, environment files, startup scripts). This is your source for Steps 3, 4, and 5.
+For every security-relevant feature (rate limiting, throttling, authentication enforcement, CORS policy, TLS verification, allowed hosts, content security): what is the default value when the environment variable is not set?
 
----
+**A — Security feature off by default**
+If the feature is disabled by default (the operator must explicitly enable it rather than explicitly disable it):
 
-## Step 1 — Security features with insecure defaults
+→ Submit per feature: violated_invariant="[feature name] is disabled by default (default value: [value]); any deployment without explicit configuration has no [rate limiting / throttling / TLS enforcement / etc.]", severity=7, confidence=9.
 
-In the configuration code: for each security feature (rate limiting, throttling, request authentication enforcement, TLS verification, CORS restriction) — what is the value when the environment variable or config key is NOT set?
+**B — Host/origin allowlist is a wildcard**
+If the allowed-hosts or allowed-origins configuration is set to a wildcard (`*`, `["*"]`, allow-all) under any condition that could be true in a deployed environment:
 
-The dangerous pattern looks like this in any language:
-```
-read_env('FEATURE_ENABLED', default=false)   // Python, JS, Go, etc.
-env.getOrDefault('FEATURE', 'false')
-config.getBoolean('feature.enabled', false)
-```
-
-Reason about the default: is the security feature ON or OFF when no one explicitly configures it? A feature that is OFF by default means every deployment that doesn't explicitly set the variable has no protection. An operator has to know to opt in.
-
-→ **Submit per feature with insecure default**: violated_invariant="[feature name] is disabled by default (default value: [value]); any deployment without explicit configuration has no [rate limiting / throttling / etc.]. Operators must opt in, not opt out.", severity=7, confidence=9.
+→ Submit: violated_invariant="host/origin allowlist is wildcard under [condition]; Host header injection enables cache poisoning and password-reset link hijacking", severity=5, confidence=9.
 
 ---
 
-## Step 2 — Host or origin allowlist with wildcard
+## Step 2 — Read the deployment/infrastructure configuration
 
-In the configuration code: find the setting that controls which HTTP Host headers or cross-origin requests the application accepts. Read the value and the condition under which each value is used.
+From `get_architecture`: find the infrastructure configuration — how the application is packaged and deployed (container definitions, orchestration manifests, environment files, startup scripts). Read it.
 
-If the value is a wildcard (`*`, `["*"]`, `allow_all`, a catch-all regex) under ANY condition that could be true in a deployed environment (not only purely local dev): this enables Host header injection, which allows cache poisoning and password-reset link hijacking.
+**C — Signing key or credential as literal string**
+Find environment variable blocks that define signing keys, session secrets, database passwords, or API credentials. Is the value a literal string, rather than a reference to an external secrets manager (`${VAR}`, `secretKeyRef`, `vault:path`)?
 
-→ **Submit if found**: violated_invariant="host/origin allowlist is wildcard under condition [condition]; Host header injection is possible, enabling cache poisoning, password-reset link hijacking", severity=5, confidence=9.
+→ Submit per credential: violated_invariant="[credential type] is written as a literal string in [file]; repository access gives any developer the production secret", severity=9, confidence=9.
 
----
+**D — Credential file not in version control ignore list**
+Is the configuration file that contains literal secrets listed in the version control ignore file? Read the ignore file. If the credential file is not listed, it is committed to the repository.
 
-## Step 3 — Signing secrets and credentials in version-controlled files
-
-Read the infrastructure/deployment configuration files.
-
-Look for environment variable definitions that set signing keys (JWT, session, HMAC), database passwords, third-party API credentials, or service account keys. For each:
-
-- Is the value a literal string (hardcoded), or is it a reference to an external secret store (`${VAR}`, `secretKeyRef`, `vault:path`, etc.)?
-- Is the configuration file itself committed to version control? Check whether it appears in the version control ignore file (`.gitignore`, `.hgignore`, similar). If a file containing literal secrets is not in the ignore list, it is committed.
-
-→ **Submit per literal secret in deployment config**: violated_invariant="[key type: signing key / DB password / API credential] is a literal string in [file]; any person with repository access has this secret", severity=9, confidence=9.
-
-→ **Submit if credential file is not ignored**: violated_invariant="[file] containing plaintext secrets is not in the version control ignore file; the credentials are committed to repository history", severity=8, confidence=9.
+→ Submit: violated_invariant="[file] with plaintext secrets is not in the version control ignore file; credentials are in repository history", severity=8, confidence=9.
 
 ---
 
-## Step 4 — Network services exposed on all interfaces
+## Step 3 — Check network interface bindings
 
-In the infrastructure/deployment configuration: find where network ports are defined — which interfaces each service binds to.
+In the infrastructure configuration: find port mapping definitions. For each internal service (database, cache, message broker, admin UI):
 
-For internal services (database, cache, message broker, admin UI): is the port bound to all network interfaces (equivalent to `0.0.0.0`) or only to the loopback interface (localhost / `127.0.0.1`)?
+**E — Internal service bound to all network interfaces**
+Is the port bound to all interfaces (equivalent to `0.0.0.0`) rather than localhost only?
 
-A database or message broker bound to all interfaces is directly reachable from the internet if this host is deployed on a cloud VM — even if you think it's "internal."
-
-→ **Submit per exposed internal service**: violated_invariant="[service: database / cache / broker / admin UI] port [port] is bound to all network interfaces in deployment configuration; directly internet-reachable on a cloud-deployed host", severity=8, confidence=9.
+→ Submit per service: violated_invariant="[service] port [port] is bound to all network interfaces; directly reachable from the internet on a cloud-deployed host", severity=8, confidence=9.
 
 ---
 
-## Step 5 — Application started with development server
+## Step 4 — Check the startup command
 
-In the infrastructure/deployment configuration or startup scripts: find how the application server process is launched. 
+In the infrastructure configuration or startup scripts: find how the application server process is started.
 
-Every framework has a development server for local use (it's convenient, hot-reloads, gives stack traces). The same framework has a production-grade server (handles concurrent connections, no debug output, no hot reload). The development server is never appropriate for a deployed environment.
+**F — Development server in deployment config**
+Is the startup command using the framework's built-in development server (designed for local use only) rather than a production-grade application server?
 
-Reason about what the startup command does: is it launching the framework's built-in development server, or a production server (gunicorn, uvicorn, nginx unit, puma, pm2 in cluster mode, etc.)?
-
-→ **Submit if development server in deployment config**: violated_invariant="deployment configuration starts the application using the framework's development server [server name]; development servers are single-threaded, expose debug output, and are not designed for concurrent production traffic", severity=6, confidence=8.
+→ Submit: violated_invariant="deployment starts the application with [development server name]; development servers are single-threaded and not designed for concurrent production traffic", severity=6, confidence=8.
 
 ---
 
 ## Finish
 
-Call finish() with all hypotheses. Do it now even if the list is empty.
+Call `finish()` now with all hypotheses. Even if the list is empty.

@@ -1,77 +1,68 @@
 # SKILL: hunt-debug-production-exposure
 
-## Goal
-
-Find development and test code that is reachable in production or staging environments — debug endpoints, secrets leaked in responses, and internal tooling with no environment gate.
+You are a security researcher. Find debug, test, and development code reachable in production or staging. Navigate the code — do not use search_graph or search_code.
 
 ---
 
-## Step 0 — Orient yourself
+## Step 1 — Read the route/URL configuration
 
-Call `get_architecture`. Find:
-- How does this project define its routes? (a URL config file, route annotations on controllers, a router module — depends on the language/framework)
-- Where is application configuration and environment detection?
+Call `get_architecture`. Find where routes or URL patterns are defined. Read that file.
 
-Read the route definitions completely. This is your main source for Steps 1 and 3.
+Look at every route registration. Are any inside a conditional block that checks the environment or a debug flag at startup? Note which diagnostic-looking routes are registered unconditionally (outside any such guard).
 
----
+**A — Unconditional diagnostic route**
+A route that looks like it triggers background jobs for all users, generates load, dumps internal state, or is only useful for development — but is registered unconditionally.
 
-## Step 1 — Unconditionally registered routes that should not exist in production
-
-In the route definitions: routes are either registered unconditionally (they always exist) or conditionally (only when some environment check is true at startup).
-
-Look at every route registration. For routes that exist for diagnostic, test, or internal tooling purposes — things that trigger background jobs for all users, generate synthetic load, expose internal system state, interact with test infrastructure — ask: is this registration inside a conditional block that checks the runtime environment or a debug flag?
-
-The bug: a diagnostic route registered unconditionally is part of the production route table. It is reachable in any deployment.
-
-→ **Submit per unconditional diagnostic route**: violated_invariant="[route path] is registered unconditionally; it exists in the production route table in every environment and is reachable without an environment gate", severity=7, confidence=9.
-
-Note routes that ARE behind an environment check — write them down — but do not submit for those.
+→ Submit: violated_invariant="[route path] is registered unconditionally in the production route table with no environment guard; reachable in every deployment", severity=7, confidence=9.
 
 ---
 
-## Step 2 — Secrets or auth codes leaked in HTTP response headers
+## Step 2 — Read registration/OTP handlers for response header leaks
 
-Navigate from the route definitions to the handlers for user registration, phone number verification, OTP delivery, and password reset. Read those handlers.
+From the route configuration: find handlers for user registration, phone verification, one-time code delivery, and password reset. Call `get_code_snippet` to read each.
 
-In the response construction: look for any place where a header is added to the HTTP response that contains a value the user should prove they received out-of-band (an OTP, a one-time code, a verification token, a temporary credential).
+In the response construction code: is a response header set that contains a one-time code, OTP, verification token, or temporary credential?
 
-These are sometimes added for testing purposes, behind a condition. The bug is when that condition includes environments other than strictly local development — for example, `if env != 'production'` includes staging and preprod.
+**B — Secret in response header in non-prod environments**
+Is the header set under a condition that includes staging or preprod (e.g., `env != 'production'` is true on staging too)?
 
-→ **Submit if found**: violated_invariant="[handler] places [credential/code type] in response header [header name] in non-production environments including staging; any network observer can read it and authenticate as the target user — bypassing the out-of-band delivery entirely", severity=8, confidence=9.
-
----
-
-## Step 3 — API documentation with no access control
-
-In the route definitions: find where API documentation (Swagger UI, OpenAPI explorer, API reference, developer docs) is registered. Read the condition under which it is enabled.
-
-The bug: documentation is served whenever the environment is not strictly production — which means staging and preprod users can view the full API surface including all endpoints, their parameters, and response schemas.
-
-→ **Submit if found**: violated_invariant="API documentation is served in [non-production environments including staging]; any user on those environments can enumerate the full API surface without authentication", severity=5, confidence=9.
+→ Submit: violated_invariant="[handler] places [code/token type] in HTTP response header [header name] in non-production environments including staging; any observer reads it and authenticates as any user without SMS delivery", severity=8, confidence=9.
 
 ---
 
-## Step 4 — Endpoints that perform unbounded computation on caller-supplied input
+## Step 3 — Find API documentation route and its condition
 
-In the route definitions: find any handler that performs a computation whose cost scales with a number supplied by the caller (iteration count, recursion depth, data size). Read that handler.
+From the route configuration: find where API documentation (Swagger UI, OpenAPI, Redoc, developer reference) is registered. Read the condition under which it is enabled.
 
-The bug: no upper bound on the caller-supplied number, and the endpoint is reachable in at least some deployed environment.
+**C — Documentation served in staging/preprod**
+If the condition is `env != 'production'` or `env in ('dev', 'stage')`, staging users can enumerate the full API surface.
 
-→ **Submit if found**: violated_invariant="[route path] performs [computation] scaled to caller-supplied parameter [field] with no upper bound; a caller supplies a large value to exhaust server CPU or memory", severity=4, confidence=8.
+→ Submit: violated_invariant="API documentation served in non-production environments including staging without access control; full API surface publicly enumerable on staging", severity=5, confidence=9.
 
 ---
 
-## Step 5 — Monitoring and metrics endpoints without authentication
+## Step 4 — Find computation handlers with unbounded input
 
-In the route definitions: find any route that exposes internal system metrics, health details, or operational statistics. This could be a metrics exporter (Prometheus-style), an actuator endpoint (Spring-style), or a custom health check that returns internal state.
+From the route configuration: find any handler that performs computation scaled by a caller-supplied number (iteration count, recursion depth, size). Call `get_code_snippet` to read it.
 
-Read the route definition and its handler. Is there authentication middleware on this route? Can an unauthenticated caller access it?
+**D — No upper bound on computation parameter**
+No cap on the caller-supplied number, and the endpoint is reachable in at least some deployed environment.
 
-→ **Submit if found**: violated_invariant="[route path] monitoring endpoint is accessible without authentication; exposes internal request rates, error rates, latency, and DB statistics — useful for targeting attacks", severity=6, confidence=9.
+→ Submit: violated_invariant="[route path] performs [computation type] scaled by caller-supplied [field] with no upper bound; a large value exhausts server CPU or memory", severity=4, confidence=8.
+
+---
+
+## Step 5 — Find monitoring route and check its authentication
+
+From the route configuration: find any route that exposes internal metrics, health details, or operational statistics. Read how the route is registered and what handler serves it.
+
+**E — No authentication on monitoring endpoint**
+The metrics/health endpoint is accessible without authentication.
+
+→ Submit: violated_invariant="[route path] monitoring/metrics endpoint has no authentication; internal request rates, error rates, DB latency publicly readable", severity=6, confidence=9.
 
 ---
 
 ## Finish
 
-Call finish() with all hypotheses. Do it now even if the list is empty.
+Call `finish()` now with all hypotheses. Even if the list is empty.
