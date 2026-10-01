@@ -2,69 +2,80 @@
 
 ## Goal
 
-Find specific authentication and authorization bypass vulnerabilities. Each step targets a specific bug class. Find the relevant code, check the condition, submit or skip immediately — do not explore broadly.
+Find bugs that let a caller authenticate as someone they are not, or gain privileges they don't have. You will read the actual code of this specific application — do not assume how its auth works.
 
 ---
 
-## Step 1 — Find the auth middleware and read it
+## Step 0 — Orient yourself
 
-Use `get_architecture` to identify the project structure. Find the authentication middleware, filter, or decorator that runs before HTTP handlers. Read its complete implementation.
+Call `get_architecture`. From the result, understand:
+- What language and framework is this?
+- Where does an HTTP request enter the application?
+- Where is the authentication layer? (middleware, filter, guard, interceptor — whatever the framework calls it)
 
-Check for:
+Read the authentication layer completely. Then proceed through the steps below. Each step is a single class of bug to look for in what you just read (and in code you navigate to from it).
 
-**A — Header short-circuit**: Does any code grant an authenticated or elevated identity based on a request header value without verifying against a database record or signed token?
-→ **submit immediately**: violated_invariant="authentication/authorization grants elevated access based on attacker-controlled HTTP header [name the header]; any caller can bypass identity verification", severity=10, confidence=8.
+---
 
-**B — Algorithm confusion**: Does the token decode call read the signing algorithm from the token itself rather than an explicit allowlist in the verifier?
-→ **submit immediately**: violated_invariant="token verifier reads algorithm from attacker-controlled token header; alg:none or RS256→HS256 confusion allows signature bypass", severity=10, confidence=8.
+## Step 1 — Does anything from the request short-circuit the identity check?
 
-**C — Fail-open on error**: Does any exception handler in the auth pipeline catch validation errors silently and allow the request through (pass, continue, return default user)?
-→ **submit immediately**: violated_invariant="auth validation exception handler fails open; crafted tokens that trigger exceptions are treated as authenticated", severity=10, confidence=9.
+Read the authentication and authorization decision code. Look for any branch where a value from the incoming request — a header, a query parameter, a field in the request body, a cookie other than the session — determines whether the caller is treated as authenticated or elevated-privilege, BEFORE or INSTEAD OF verifying a cryptographically-backed identity.
 
-## Step 2 — Check token claim validation
+The pattern: "if request contains X → grant access" where X is something the caller can set freely, not something the server issued.
 
-From the auth code found in Step 1, find where JWT/token claims are validated (expiry, issuer, audience, signature). Read that code.
+**Submit if found**: violated_invariant="caller-supplied [field type] [field name] is trusted to grant [access level] without cryptographic binding to the authenticated identity; any caller can satisfy the check by setting that field", severity=10, confidence=8.
 
-**A — Audience skipped**: Is audience (`aud`) validation absent, disabled, or using a non-exact match (substring, prefix)?
-→ **submit immediately**: violated_invariant="token audience not validated or validated loosely; tokens issued for service A are accepted by service B", severity=9, confidence=8.
+---
 
-**B — Revocation order**: If there is a token blacklist or revocation list — is it checked BEFORE or AFTER signature verification? Blacklist after signature means a forged token (never issued, never in the list) bypasses revocation entirely.
-→ If after: **submit immediately**: violated_invariant="token revocation check runs after signature validation; a token forged with a leaked key is never in the blacklist and bypasses revocation", severity=7, confidence=8.
+## Step 2 — Is any authentication requirement commented out?
 
-## Step 3 — Find signing secrets
+Read the payment, billing, wallet, and financial operation handlers. Navigate to them from the route definitions — read the route table, find the routes that handle financial operations, read those handlers.
 
-Find the config/settings file where signing keys, session secrets, and HMAC keys are defined. Read the value assignments.
+Look for commented-out lines that look like they were (or should be) an authentication requirement, ownership check, or identity verification. A block of code beginning with `#`, `//`, or `/*` that reads like a security check is a high-value signal.
 
-**A — Hardcoded fallback in application code**:
-```
-os.environ.get('KEY', 'some-literal-value')
-process.env.KEY || 'some-literal-value'
-```
-→ **submit immediately**: violated_invariant="signing/session secret has non-empty hardcoded fallback in application code; anyone with source access can forge tokens or sessions", severity=10, confidence=9.
+Also look for: does the handler accept an actor identity (the person being charged, the employee being billed) from the request body/params rather than reading it from the authenticated session/token?
 
-**B — Literal value in deployment config** (docker-compose, helm, k8s manifest): is the key set as a literal string rather than a secret manager reference like `${VAR}` or `secretKeyRef`?
-→ **submit immediately**: violated_invariant="signing secret committed as literal string in deployment config; any developer with repo access has the production secret", severity=9, confidence=9.
+**Submit if found (commented-out check)**: violated_invariant="authentication/authorization check is commented out in [handler]; the financial operation executes without verifying the caller's identity or ownership", severity=9, confidence=9.
 
-## Step 4 — Find commented-out security checks
+**Submit if found (caller-supplied actor)**: violated_invariant="[handler] reads actor identity [field name] from request input; caller names any identity as the party for the financial operation", severity=9, confidence=9.
 
-Read the payment, billing, and financial operation handlers — the views or controllers that handle money movement, wallet operations, or subscription purchases. Do not search by name; navigate from the routing file to the payment-related handlers.
+---
 
-**Commented-out auth/authz**: Is there any commented-out block (`#`, `//`, `/* */`) that looks like an authentication requirement, identity check, or authorization guard?
-→ **submit immediately**: violated_invariant="authentication/authorization check is commented out in [handler name]; the endpoint executes the sensitive operation without verifying the caller's identity or ownership", severity=9, confidence=9.
+## Step 3 — Is the credential validation correct?
 
-**Caller-supplied identity**: Does the handler accept an identity field (user ID, employee ID, account ID) from the request body and use it as the actor for a financial operation, instead of reading the actor from the authenticated session?
-→ **submit immediately**: violated_invariant="[operation] uses caller-supplied actor ID from request body rather than authenticated session; caller can operate as any identity by supplying their ID", severity=9, confidence=9.
+From the authentication code you read in Step 0: find where the credential (JWT, session token, signed cookie, API key — whatever this app uses) is validated. Read the validation logic completely.
 
-## Step 5 — Find TLS-disabled key fetches and dev auth injection
+Look for:
+- **Algorithm confusion**: does the validator read the signing algorithm from the credential itself, rather than checking against an explicit allowlist? If so, an attacker can set `alg: none` or swap RS256 for HS256.
+- **Missing claim validation**: for JWT-style tokens — is the audience (`aud`) validated with strict equality? Is expiry checked before other logic runs?
+- **Revocation order**: if there is a token blacklist or revocation store — is the revocation check performed BEFORE or AFTER the signature is verified? A blacklist checked after signature validation cannot catch a token forged with a leaked key.
 
-**A — TLS off for key fetch**: Find any HTTP call that fetches signing keys or auth configuration from an external service. Read the TLS/SSL verification parameter.
-- `verify=False`, `ssl=false`, `InsecureSkipVerify: true`, or `verify = not DEBUG`
-→ **submit immediately**: violated_invariant="signing key or auth config fetched with TLS verification disabled [or conditionally disabled]; MITM can inject forged key material", severity=7, confidence=8.
+**Submit per issue found**: describe the specific validation step that is absent or in wrong order.
 
-**B — Dev auth injection**: Find any middleware that creates or injects an authenticated identity for requests that would otherwise be unauthenticated. Read the activation condition.
-- Activates on a non-standard env var (not DEBUG itself) → could be set on staging accidentally
-→ **submit immediately**: violated_invariant="dev/test auth injection middleware activates on env var [name]; if accidentally set on staging, all unauthenticated requests are treated as authenticated", severity=8, confidence=7.
+---
+
+## Step 4 — Is the signing secret strong and external?
+
+Find where the application's signing secret (the key used to sign/verify tokens or sessions) is configured. This is typically loaded from an environment variable or config system at startup.
+
+Look for:
+- A **hardcoded fallback**: `get_env('KEY', 'some-literal-string')` — if the env var is absent, the fallback is used. Anyone with the source code can forge tokens.
+- A **literal value in deployment config**: the key is written as a plain string in infrastructure configuration (container config, orchestration manifests, environment files) rather than referenced from a secrets manager.
+
+**Submit per issue**: violated_invariant="signing secret [description] has hardcoded fallback / is committed as literal; source code or repo access gives an attacker a working signing key", severity=10, confidence=9.
+
+---
+
+## Step 5 — Are external keys fetched securely? Is there debug auth injection?
+
+**TLS for key fetch**: if the application fetches signing keys or auth configuration from an external service (JWKS endpoint, OIDC discovery, key server) — find that HTTP call and read its TLS verification setting. Is verification disabled, or disabled conditionally when a debug flag is set?
+→ Submit: violated_invariant="signing key fetched from [endpoint] with TLS verification disabled [or disabled when debug=true]; MITM can substitute forged key material", severity=7, confidence=8.
+
+**Debug auth injection**: is there any middleware or code path that automatically authenticates a request (injects a user identity, bypasses credential check) based on an environment variable? Read the activation condition — is it something that could be accidentally set on a staging or production server?
+→ Submit: violated_invariant="auth injection code activates on env var [name]; if set on staging, all requests are auto-authenticated without credentials", severity=8, confidence=7.
+
+---
 
 ## Finish
 
-Call finish() with all hypotheses. Call it now even if the list is empty.
+Call finish() with all hypotheses. Do it now even if the list is empty.
