@@ -311,8 +311,9 @@ class AradCodeApp(App):
     TITLE = f"Arad Code v{VERSION}"
     SUB_TITLE = "Security Research Terminal"
 
-    def __init__(self, **kwargs):
+    def __init__(self, initial_cmd: str = "", **kwargs):
         super().__init__(**kwargs)
+        self._initial_cmd = initial_cmd.strip()
         self._wf_model = WorkflowModel()
         self._task: Optional[asyncio.Task] = None
         self._history: list[str] = []
@@ -325,7 +326,6 @@ class AradCodeApp(App):
         self._last_repo: str = ""
         self._last_db = None
         self._scroll_locked: bool = False
-        self._input_multiline: bool = False
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -349,6 +349,8 @@ class AradCodeApp(App):
         log.write("")
         self._start_clock()
         self.query_one("#input", TextArea).focus()
+        if self._initial_cmd:
+            self.call_after_refresh(self._dispatch, self._initial_cmd)
 
     # ── Clock ─────────────────────────────────────────────────────────────────
 
@@ -912,7 +914,7 @@ class AradCodeApp(App):
 
     async def _cmd_cli(self, parts: list[str]):
         import sys
-        cmd = [sys.executable, "pentest.py"] + parts
+        cmd = [sys.executable, "pentest.py", "--headless"] + parts
         self._log(f"[dim]→ pentest {' '.join(parts)}[/dim]")
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -971,6 +973,6 @@ class AradCodeApp(App):
             self._task.cancel()
 
 
-def launch_tui():
-    app = AradCodeApp()
+def launch_tui(initial_cmd: str = ""):
+    app = AradCodeApp(initial_cmd=initial_cmd)
     app.run()
