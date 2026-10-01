@@ -2,43 +2,59 @@
 
 ## Goal
 
-Find security features that are off by default and credentials committed to the repository. Search, read, decide, submit immediately.
+Find security features that are disabled by default, secrets committed to the repository, and network services exposed to untrusted networks. Navigate to the configuration files — do not keyword-search. Read the settings, check the conditions, submit or skip immediately.
 
 ---
 
-## Step 1 — Security feature disabled by default
+## Step 1 — Read the application settings and check security feature defaults
 
-Search for security-relevant feature flags with default values (search_code for `THROTTLING`, `RATE_LIMIT`, `ENABLE_THROTTLING`, `CORS_ALLOW`, `SSL_VERIFY`, `CSRF_ENABLED`, `AUTH_REQUIRED`; also look for environment variable reads with fallback values in settings files).
-For each found: what is the default when the environment variable is not set?
-**Finding condition**: a security feature (rate limiting, throttling, CORS restriction, TLS verification, auth enforcement) is OFF by default — the operator must explicitly enable it, rather than explicitly disable it. Pattern: `os.getenv('FEATURE', 'false')`, `process.env.FEATURE || false`, `config.get('feature', false)`.
-→ **submit hypothesis per feature**: violated_invariant="[feature name] is disabled by default; deployment without explicit opt-in has no [rate limiting / TLS verification / etc.]", severity=7, confidence=9.
+Use `get_architecture` to find the project structure. Find the main application settings or configuration file (settings.py, application.yml, config.js, appsettings.json, or equivalent). Read it completely.
 
-## Step 2 — ALLOWED_HOSTS / trusted origins wildcard
+Look for security-related features: rate limiting, throttling, CORS restrictions, request size limits, session security, TLS enforcement, CSRF protection, content security policies. For each:
 
-Search for host allowlist configuration (search_code for `ALLOWED_HOSTS`, `allowedHosts`, `trusted_origins`, `CORS_ALLOWED`, `allow_all_origins`).
-**Finding condition**: value is a wildcard (`["*"]`, `*`, `/.*/`, `allow_all: true`) under any condition that could be true in a deployed environment (not strictly `ENV=local` or `ENV=dev`).
-→ **submit hypothesis immediately**: violated_invariant="wildcard host/origin policy allows Host header injection; password reset links, cache poisoning, CSRF origin bypass", severity=5, confidence=9.
+What is the default value when the environment variable or config key is not set? Look for the "get with fallback" pattern:
+```
+os.getenv('FEATURE', 'false')
+process.env.FEATURE || false
+config.get('feature', False)
+```
 
-## Step 3 — Secrets hardcoded in deployment configuration
+**Finding condition**: A security feature (rate limiting, throttling, TLS verification, auth enforcement) is **off** by default — the operator must explicitly set an env var to enable it, rather than explicitly setting one to disable it.
+→ **submit immediately**: violated_invariant="[feature] is disabled by default (default value: [default]); any deployment without explicit opt-in has no [rate limiting / throttling / etc.]", severity=7, confidence=9.
 
-Read the deployment configuration files (search_code for `docker-compose`, `docker-compose.yml`; also look for `k8s/`, `helm/`, `.env`, `env.local`, `application.properties` in the repo).
-Find environment variable blocks that define signing keys, database passwords, or API credentials.
-**Finding condition**: a signing key (JWT, session, HMAC), database password, or third-party API key is a literal string value in a deployment file (not a `${VAR}` / `$(VAR)` reference that pulls from a secret manager).
-→ **submit hypothesis per secret**: violated_invariant="[key type] hardcoded in deployment config; repository access gives attacker the key", severity=9, confidence=9.
+## Step 2 — Host/origin allowlist configuration
 
-## Step 4 — Network service exposed on all interfaces in deployment config
+In the same settings file: find the configuration for allowed hosts, trusted origins, or CORS allowed origins.
 
-In the same deployment configuration files: find port mappings.
-**Finding condition**: a database (PostgreSQL, MySQL, MongoDB, Redis), message broker (RabbitMQ, Kafka), or admin UI port is mapped to `0.0.0.0:PORT:PORT` or just `PORT:PORT` (not `127.0.0.1:PORT:PORT`), making it reachable from the network.
-→ **submit hypothesis immediately**: violated_invariant="database/broker port bound to all network interfaces; directly reachable from the internet if this host is cloud-deployed", severity=8, confidence=9.
+**Finding condition**: The value is a wildcard (`["*"]`, `*`, `/.*/`, `allow_all: true`) under any condition that could be true in a deployed environment (not strictly a condition that is impossible in staging or prod).
+→ **submit immediately**: violated_invariant="host/origin allowlist is wildcard under [condition]; Host header injection possible, enabling cache poisoning and password-reset link hijacking", severity=5, confidence=9.
 
-## Step 5 — Credential file not excluded from version control
+## Step 3 — Secrets in deployment configuration
 
-Check whether the deployment configuration or environment files are excluded from version control (search_code for `.gitignore`, `.dockerignore`).
-Read the ignore file. Is `env.local`, `.env`, `docker-compose.yml`, `application-prod.properties` listed?
-**Finding condition**: a file that contains plaintext secrets (found in Step 3) is not listed in `.gitignore` — meaning it is committed to the repository.
-→ **submit hypothesis immediately**: violated_invariant="secret-bearing file not in .gitignore; credentials committed to repository history", severity=8, confidence=9.
+Find the deployment configuration files — Docker Compose files, Kubernetes manifests, Helm values, or environment configuration files. Read the environment variable blocks.
+
+Look for signing keys (JWT, session, HMAC), database passwords, third-party API credentials.
+
+**Finding condition A**: A key is a literal string value in the deployment file (not a reference like `${VAR}` or `secretKeyRef` that pulls from a secrets manager).
+→ **submit immediately**: violated_invariant="[key type: JWT signing key / DB password / API key] committed as literal string in deployment config [file]; any developer with repo access has the secret", severity=9, confidence=9.
+
+**Finding condition B**: A credential file (env file, properties file) that contains plaintext secrets is not listed in `.gitignore`. Read the `.gitignore` to verify.
+→ **submit immediately**: violated_invariant="[file name] containing plaintext secrets is not in .gitignore; credentials are committed to git history", severity=8, confidence=9.
+
+## Step 4 — Network services exposed on all interfaces
+
+In the same deployment configuration files: read the port mapping blocks.
+
+**Finding condition**: A database, message broker, cache server, or admin UI port is mapped to all network interfaces (`0.0.0.0:PORT:PORT` or simply `PORT:PORT`) rather than localhost-only (`127.0.0.1:PORT:PORT`).
+→ **submit immediately**: violated_invariant="[service: PostgreSQL / Redis / RabbitMQ / etc.] port [PORT] bound to all network interfaces in deployment config; directly reachable from the internet if this host is cloud-deployed", severity=8, confidence=9.
+
+## Step 5 — Application running in development server mode in deployment
+
+In the deployment configuration or startup scripts: find how the application server is launched. Is it using the framework's built-in development server (Django `runserver`, Flask dev server, Express default, Rails WEBrick) rather than a production-grade server (gunicorn, uvicorn, nginx, puma)?
+
+**Finding condition**: The deployment config or start command runs the development server, not a production server.
+→ **submit immediately**: violated_invariant="application deployed using development server [server name]; development servers are single-threaded, not designed for production load, and may expose debug interfaces", severity=6, confidence=8.
 
 ## Finish
 
-Call finish() with all hypotheses found. Call it now even if the list is empty.
+Call finish() with all hypotheses. Call it now even if the list is empty.
