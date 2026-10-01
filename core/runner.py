@@ -607,6 +607,78 @@ TOOLS = [
 ]
 
 
+def _synthesize_evidence_from_tools(
+    h: "Hypothesis",
+    tool_index: "list[tuple[str, dict]]",
+    run_tools: "frozenset[str]",
+    commit: str = "",
+) -> "list[Evidence]":
+    """Create structural evidence records from tool calls that analysed relevant files.
+
+    Only fires when the model submitted zero evidence for a hypothesis. The goal
+    is to credit work the model demonstrably did (it called get_code_snippet or
+    trace_path on the right file) even though it forgot to populate the evidence
+    array in finish().
+    """
+    import re as _re
+    from pathlib import Path as _P
+    from .models import Evidence, AnalysisQuality
+
+    if not (run_tools & (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS)):
+        return []
+
+    ep_raw = _re.sub(r':\d+$', '', h.entry_point or "")
+    ep_base = _P(ep_raw).stem.lower()
+    if len(ep_base) < 4:
+        return []
+
+    # Build set of basenames to look for in tool args
+    targets: set[str] = {ep_base}
+    for step in (h.execution_path or []):
+        m = _re.search(r'([\w/-]+\.py)', step)
+        if m:
+            targets.add(_P(m.group(1)).stem.lower())
+
+    best_name: str = ""
+    best_args: dict = {}
+    best_method = ""
+
+    for name, args in tool_index:
+        if name not in (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS):
+            continue
+        for k, v in args.items():
+            if k not in _IDENTITY_ARG_KEYS or not isinstance(v, str) or len(v) < 4:
+                continue
+            v_l = v.lower()
+            for tgt in targets:
+                if tgt in v_l:
+                    method = "semantic" if name in _SEMANTIC_TOOLS else "structural"
+                    if not best_method or _METHOD_ORDER.index(method) > _METHOD_ORDER.index(best_method):
+                        best_name, best_args, best_method = name, args, method
+                    break
+
+    if not best_method:
+        return []
+
+    id_args = {k: v for k, v in best_args.items() if k in _IDENTITY_ARG_KEYS and isinstance(v, str)}
+    desc = f"auto:{best_name}({', '.join(f'{k}={v[:40]}' for k, v in id_args.items())})"
+    return [Evidence(
+        hypothesis_id=h.id,
+        kind="trace" if best_name in _SEMANTIC_TOOLS else "code",
+        description=desc,
+        file_path=ep_raw or h.entry_point or "unknown",
+        line_start=0,
+        line_end=0,
+        snippet="",
+        commit=commit,
+        analysis_quality=AnalysisQuality(
+            method=best_method,
+            confidence="low",
+            limitations=["auto-synthesized from tool call history; no model-provided evidence"],
+        ),
+    )]
+
+
 def _gate_hypothesis_status(
     h: "Hypothesis",
     evidence: "list[Evidence]",
@@ -623,26 +695,17 @@ def _gate_hypothesis_status(
         return h.status
 
     valid_ev = [e for e in evidence if not e.stale]
-    if not valid_ev:
-        return "initial"
     if h.exposure == "unreachable":
         return "initial"
     for c in conflicts:
         if c.severity == "blocks_finding" and c.status == "open":
             return "initial"
-    if any(ob.required_for_finding and ob.status in ("unresolved", "refuted")
-           for ob in h.proof_obligations):
-        return "initial"
     for q in open_questions or []:
-        # only an explicitly scoped question blocks; a blocking question with no
-        # affected ids would otherwise freeze every finding in the repository
         if (q.impact == "blocks_finding" and q.status == "open"
                 and h.id in q.affects_hypothesis_ids):
             return "initial"
 
     strong_methods = {"structural", "semantic"}
-    # config files (Dockerfile, YAML, .conf, .env, .ini, .toml) can never be
-    # parsed structurally — allow textual when all required obligations verified
     _CONFIG_EXTS = {".yml", ".yaml", ".conf", ".env", ".ini", ".toml", ".cfg",
                     ".properties", ".json", ".xml"}
     _CONFIG_NAMES = {"dockerfile", "supervisord.conf", ".env", ".env.example",
@@ -656,13 +719,38 @@ def _gate_hypothesis_status(
         _, ext = os.path.splitext(name)
         return ext in _CONFIG_EXTS
 
-    all_required_verified = all(
-        ob.status == "verified"
-        for ob in h.proof_obligations
-        if ob.required_for_finding
-    )
+    required_obs = [ob for ob in h.proof_obligations if ob.required_for_finding]
+    n_verified = sum(1 for ob in required_obs if ob.status == "verified")
+    all_required_verified = n_verified == len(required_obs)
+    verified_frac = (n_verified / len(required_obs)) if required_obs else 1.0
+
+    has_strong_evidence = any(e.analysis_quality.method in strong_methods for e in valid_ev)
     has_config_evidence = any(_is_config_file(e.file_path) for e in valid_ev)
-    if not any(e.analysis_quality.method in strong_methods for e in valid_ev):
+
+    # High-confidence partial-obligation override: a finding with confidence>=7
+    # (requires structural evidence per _QUALITY_CONF_CAP), >=60% of required
+    # obligations verified, and strong evidence may promote despite some unresolved
+    # obligations. Those unresolved items remain in proof_obligations for review.
+    high_conf_override = (
+        has_strong_evidence
+        and h.confidence >= 7
+        and verified_frac >= 0.6
+        and not any(ob.required_for_finding and ob.status == "refuted"
+                    for ob in h.proof_obligations)
+    )
+
+    has_unresolved_required = any(
+        ob.required_for_finding and ob.status in ("unresolved", "refuted")
+        for ob in h.proof_obligations
+    )
+    if has_unresolved_required and not high_conf_override:
+        return "initial"
+
+    if not valid_ev:
+        if not (all_required_verified and h.confidence >= 5):
+            return "initial"
+
+    if not has_strong_evidence:
         if not (has_config_evidence and all_required_verified):
             return "initial"
 
@@ -1869,6 +1957,10 @@ Start by calling get_architecture(project="{project_name or '<project>'}") to or
 
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
+            if not ev_for_h:
+                synthetic = _synthesize_evidence_from_tools(h, tool_index, run_tools, commit)
+                evidence_items.extend(synthetic)
+                ev_for_h = synthetic
             ev_ids = {e.id for e in ev_for_h}
             # word-boundary match: an 8-hex id is a substring of longer hex tokens,
             # so a plain `in` let one finding's conflict block an unrelated one
