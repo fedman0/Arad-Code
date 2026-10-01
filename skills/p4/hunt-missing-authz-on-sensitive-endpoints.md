@@ -2,31 +2,35 @@
 
 ## Goal
 
-Find endpoints handling sensitive operations that lack authentication or ownership verification. Read files directly. Submit hypotheses immediately.
+Find endpoints that handle sensitive operations (payments, file access, privileged actions) but lack authentication, ownership verification, or gateway signature validation. Search, read, decide, submit immediately.
 
 ---
 
-## Step 1 — Payment callback no auth / no signature
+## Step 1 — Payment or webhook callback without gateway signature
 
-Search for `PaymentCallBackView` or `callback` in `coreapi/web/views/PaymentViews.py`.
-Read the class. Check: is `permission_classes` set? Is there HMAC/signature verification of the gateway request body?
-Does the endpoint accept `provider=sandbox` query parameter?
-If no signature verification → **submit hypothesis**: violated_invariant="payment callback accepts unauthenticated requests with no gateway signature verification; attacker can forge payment confirmations", severity=9, confidence=8.
+Search for payment callback, webhook receiver, or IPN handler (search_code for `callback`, `webhook`, `notify`, `ipn`, `payment.*return`, `gateway.*confirm`; or search_graph for classes/functions handling payment provider redirects).
+Read the handler. Check:
+1. Is `permission_classes`, `authentication_required`, or equivalent set? If absent or `AllowAny` → unauthenticated.
+2. Is the request body/headers verified against a gateway-provided HMAC or signature? Look for HMAC computation, signature header extraction, or calls to the gateway SDK's verification method.
+3. Does the endpoint accept a `provider`, `type`, or `mode` parameter that selects different code paths — including a sandbox/test path?
+**Finding condition**: callback endpoint (a) has no authentication AND no gateway signature verification, OR (b) accepts a `sandbox`/`test` provider value that bypasses real verification.
+→ **submit hypothesis immediately**: violated_invariant="payment callback accepts unauthenticated requests without gateway signature verification; attacker can forge payment confirmation for arbitrary transactions", severity=9, confidence=8.
 
-## Step 2 — FileManager ownership check
+## Step 2 — File/object storage access without ownership check
 
-Read `coreapi/web/views/FileManager.py` (search_graph for `FileManager` if needed).
-In the GET handler: between `request.GET.get('file_name')` and `MinioClient.get_signed_url(file_name)`, is there a DB lookup verifying the requesting user owns that file?
-If no ownership check → **submit hypothesis**: violated_invariant="FileManager GET issues MinIO signed URL for any file_key without verifying the requester owns the file", severity=6, confidence=8.
+Search for views or handlers that issue presigned/signed URLs for object storage (search_code for `get_signed_url`, `presigned_url`, `generate_presigned`, `getObject`, `createSignedUrl`, `blob_url`; or search_graph for MinIO/S3/GCS client usage).
+Read the handler that accepts a file identifier from the request and returns the URL.
+**Finding condition**: between accepting the file key/name/id from the request and calling the storage client, there is NO database lookup that verifies the requesting user owns or has permission to access that specific file.
+→ **submit hypothesis immediately**: violated_invariant="signed storage URL issued for user-supplied file key without ownership verification; any authenticated user can access any file by key", severity=6, confidence=8.
 
-## Step 3 — Admin endpoints with weak is_admin
+## Step 3 — Admin operation with permission check bypassable by header
 
-Read `coreapi/application/utilities/AdminCheck.py` for `is_admin`.
-Then find one admin endpoint (search for `is_admin(request)` call site).
-Does the endpoint have `permission_classes = [IsAuthenticated]` (not `[IsAdminUser]`) and rely solely on `is_admin()` for the admin check?
-If is_admin() is the only gate → note this is coupled to the header bypass finding.
-Submit a hypothesis only if `is_admin()` has a bug (see hunt-auth-bypass-patterns Step 1).
+Search for admin permission check function (search_graph for `is_admin`, `isAdmin`, `checkAdmin`, `hasAdminRole`).
+Read it. If it grants admin based on a user-controlled HTTP header (see also hunt-auth-bypass-patterns Step 1), search for all call sites (search_code for `is_admin(` or `isAdmin(`).
+For each endpoint that calls this function: note that the permission check is bypassable.
+**Finding condition**: at least one endpoint grants access to sensitive data (all users' records, financial data, support tickets) based solely on the bypassable admin check with no secondary defense.
+→ **submit hypothesis per endpoint category**: violated_invariant="admin endpoint relies solely on bypassable admin check; any user who can send arbitrary headers accesses [admin resource]", severity=9, confidence=8.
 
 ## Finish
 
-Call finish() with all hypotheses found. Call it even with an empty list. Do NOT raise open questions for anything you could not verify — just set confidence lower.
+Call finish() with all hypotheses found. Call it now even if the list is empty. Set confidence lower rather than raising blocking open questions.

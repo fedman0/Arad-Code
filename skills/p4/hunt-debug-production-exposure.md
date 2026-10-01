@@ -2,37 +2,45 @@
 
 ## Goal
 
-Find debug/test code that reaches production or staging. Read files directly. Submit hypotheses immediately when a pattern is found.
+Find debug, test, and development code that is reachable in production or staging environments. For each step: search, read, decide, submit immediately. Do not investigate exhaustively.
 
 ---
 
-## Step 1 — Debug URLs unconditionally registered
+## Step 1 — Debug URL routes registered unconditionally
 
-Read `coreapi/web/urls.py`. Look for URL patterns outside of any `if settings.DEBUG:` or `if settings.ENV` block. Specifically look for `notification-debug`, `debug/interact`, `load-test`, `memory-test`.
-If any debug URL is registered unconditionally → **submit hypothesis**: violated_invariant="debug endpoint registered unconditionally in production URLconf", severity=7, confidence=9.
+Read the main URL routing file(s) of the application (search_graph for the URL router/dispatcher; in Django: `urls.py`, Express: `routes/`, Spring: `@RequestMapping`, Laravel: `routes/`, Rails: `routes.rb`).
+Look for debug/test URL registrations outside any `if DEBUG:` / `if ENV == 'development':` / `if (process.env.NODE_ENV === 'development')` guard.
+**Finding condition**: any route whose name/path contains `debug`, `test`, `notification-debug`, `load-test`, `memory-test`, `dev-only` is registered unconditionally in the production routing table.
+→ **submit hypothesis immediately**: violated_invariant="debug/test URL route registered unconditionally; reachable in all environments", severity=7, confidence=9.
 
-## Step 2 — OTP leaked in response header
+## Step 2 — One-time code or secret returned in response header
 
-Search for `X-Test-Code` in the codebase (search_code or grep).
-If found in a response `headers=` dict, note the condition — is it `if settings.DEBUG:` only, or `if settings.ENV != 'prod':`?
-If the condition includes staging → **submit hypothesis**: violated_invariant="OTP/verification code returned in X-Test-Code response header; any request to staging can read it", severity=8, confidence=9.
+Search for response header assignments containing test codes, OTPs, or tokens (search_code for `X-Test-Code`, `X-OTP`, `X-Debug`, `X-Token`, `X-Verification`; also search for `headers=` dicts in view/controller code near `otp`, `code`, `verification`).
+Read the code that sets the header. Note the condition — is it gated on a strict debug-only flag?
+**Finding condition**: OTP, verification code, or authentication token is written into a response header under a condition weaker than `DEBUG=True` (e.g., `ENV != 'prod'` includes staging, or no condition at all).
+→ **submit hypothesis immediately**: violated_invariant="one-time authentication code leaked in HTTP response header; any observer on staging can read it and authenticate as any user", severity=8, confidence=9.
 
-## Step 3 — Swagger on staging
+## Step 3 — API schema/documentation served in non-prod environments
 
-Read `hesaboai/urls.py`. Find where Swagger is registered.
-If the condition is `if settings.ENV in ('dev', 'stage')` or similar (not `if settings.DEBUG:` only) → **submit hypothesis**: violated_invariant="Swagger/OpenAPI docs served in staging environment without access control", severity=5, confidence=9.
+Search for API documentation route registration (search_code for `swagger`, `openapi`, `api-docs`, `redoc`, `schema_view`).
+Find the condition under which the docs are served.
+**Finding condition**: condition is `ENV in ('dev', 'stage')` or similar, meaning staging users can access full API schema; OR the docs are served unconditionally.
+→ **submit hypothesis immediately**: violated_invariant="API schema/documentation served in staging without access control; exposes all endpoint signatures", severity=5, confidence=9.
 
-## Step 4 — Debug endpoints behind DEBUG only
+## Step 4 — Load or stress test endpoints with unbounded computation
 
-Read `agents/urls.py`. Look for `if settings.DEBUG:` blocks registering `load-test`, `memory-test`, `debug/interact`, `cpu-usage`.
-If any of these includes an unbounded computation (e.g., fibonacci without upper bound) → **submit hypothesis**: violated_invariant="load-test endpoint behind DEBUG check only; unbounded fib(N) is DoS if DEBUG=True on server", severity=4, confidence=8.
+Search for load-test or benchmark routes (search_code for `load-test`, `stress-test`, `fib`, `fibonacci`, `cpu-test`, `memory-test`).
+Read the handler. Check if user-supplied input controls an expensive computation (iteration count, recursion depth) without an upper bound.
+**Finding condition**: endpoint accepts a numeric parameter that controls unbounded CPU/memory work, and is accessible in production or behind only `DEBUG=True` (which may be set on staging).
+→ **submit hypothesis immediately**: violated_invariant="load-test endpoint with unbounded computation reachable outside local dev; supplies a trivial DoS primitive", severity=4, confidence=8.
 
-## Step 5 — Prometheus /metrics no auth
+## Step 5 — Metrics/health endpoint without authentication
 
-Read `hesaboai/urls.py` for `django_prometheus.urls` include.
-Is there any authentication wrapper or IP restriction around it?
-If metrics exposed with no auth → **submit hypothesis**: violated_invariant="Prometheus /metrics endpoint served without authentication", severity=6, confidence=9.
+Search for monitoring/metrics route registration (search_code for `metrics`, `prometheus`, `actuator`, `healthz`, `/health`).
+Read how the route is registered. Is there authentication middleware on the route?
+**Finding condition**: metrics or internal status endpoint is accessible without authentication or IP restriction.
+→ **submit hypothesis immediately**: violated_invariant="metrics/monitoring endpoint exposed without authentication; discloses request rates, error rates, latency by endpoint — aids targeted attacks", severity=6, confidence=9.
 
 ## Finish
 
-Call finish() with all hypotheses found. Call it even with an empty list.
+Call finish() with all hypotheses found. Call it now even if the list is empty.
