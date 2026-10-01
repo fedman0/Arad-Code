@@ -805,6 +805,83 @@ is not found at or near that line, the NE is marked stale automatically.
 # Injected into every skill prompt. Skills describe WHAT to look for; this
 # describes what a finding must carry to survive the gate. Kept here rather
 # than duplicated across 44 skill files so it cannot drift from the engine.
+HUNT_OUTPUT_CONTRACT = """# Hunt Output Contract
+
+You are submitting **pattern-confirmed** findings. Fill every field exactly as described.
+
+## Required hypothesis fields (ALL must be present)
+
+| Field | What to set |
+|-------|-------------|
+| actor | "unauthenticated attacker", "authenticated user", or "network attacker" |
+| capability | One sentence: what the actor can do |
+| entry_point | "file/path.py:ClassName" — file and class/function where you found the pattern |
+| security_boundary | "HTTP request boundary" |
+| violated_invariant | Copy the exact text from the skill's → Submit instruction |
+| observable_impact | What the attacker gains (one sentence) |
+| severity | From skill instruction |
+| confidence | **7** — always use 7 for hunt findings (you used structural tools) |
+| reachability | **"proven"** — you READ the code and observed the exact pattern |
+| input_control | **"full"** — the attacker controls the relevant HTTP input |
+| guard_coverage | **"no_paths"** — you observed no guard covering this path |
+| exposure | "internet" if no auth needed, "authenticated" if login required |
+| proof_obligations | [] — empty array |
+
+## Required evidence fields (ALL must be present)
+
+| Field | What to set |
+|-------|-------------|
+| kind | "code" for source code, "config" for yaml/env/docker files |
+| description | One sentence: what pattern you observed |
+| file_path | Path to the file, e.g. "coreapi/auth.py" |
+| line_start | Line number (approximate is fine) |
+| line_end | Same as line_start or +2 |
+| snippet | The exact lines containing the pattern (>= 12 characters) |
+| hypothesis_index | **0-based index**: 0 = first hypothesis in your list, 1 = second, etc. |
+| analysis_quality | {"method": "structural", "confidence": "high"} |
+
+## Example (one hypothesis + one evidence):
+
+```json
+{
+  "hypotheses": [
+    {
+      "actor": "unauthenticated attacker",
+      "capability": "add Client header to gain admin access",
+      "entry_point": "app/auth/admin_check.py:is_admin",
+      "security_boundary": "HTTP request boundary",
+      "violated_invariant": "privilege granted based on caller-controlled request header without cryptographic binding; any caller adds that header to bypass the check",
+      "observable_impact": "attacker gains full admin access without credentials",
+      "severity": 10,
+      "confidence": 7,
+      "reachability": "proven",
+      "input_control": "full",
+      "guard_coverage": "no_paths",
+      "exposure": "internet",
+      "proof_obligations": []
+    }
+  ],
+  "evidence": [
+    {
+      "kind": "code",
+      "description": "is_admin() reads Client header and returns True if it contains 'admin-client'",
+      "file_path": "app/auth/admin_check.py",
+      "line_start": 12,
+      "line_end": 14,
+      "snippet": "if 'admin-client' in request.headers.get('Client', ''):\\n    return True",
+      "hypothesis_index": 0,
+      "analysis_quality": {"method": "structural", "confidence": "high"}
+    }
+  ]
+}
+```
+
+**Important**: hypothesis_index 0 = your FIRST hypothesis, 1 = your SECOND hypothesis, etc.
+Every evidence item must have hypothesis_index. Do not omit any field listed above.
+
+"""
+
+
 OUTPUT_CONTRACT = """# Output contract (applies to every finding you report)
 
 The engine gates findings. One missing field and a real vulnerability is
@@ -1753,12 +1830,13 @@ class SkillRunner:
 
         is_hunt = skill_name.startswith("hunt-")
         active_system_prompt = HUNT_SYSTEM_PROMPT if is_hunt else SYSTEM_PROMPT
+        _active_contract = HUNT_OUTPUT_CONTRACT if is_hunt else OUTPUT_CONTRACT
         start_instruction = (
             f"Repository: {repo_path}  (commit: {commit})\n\n"
             f"Project name for all graph tools: `{project_name or '<project>'}`\n\n"
             "# Skill Contract\n"
             f"{skill_text}\n\n"
-            f"{OUTPUT_CONTRACT}\n"
+            f"{_active_contract}\n"
             f"{_NE_INSTRUCTION if _ne_eligible else ''}"
             f"# Known Context\n{known_context}\n"
             f"{mcp_hint}\n"
