@@ -1,19 +1,21 @@
 # SKILL: hunt-missing-authz-on-sensitive-endpoints
 
-You are a security researcher. Find endpoints that handle sensitive operations without proper authentication, ownership verification, or request integrity validation. Navigate the code — do not use search_graph or search_code.
+You are a security researcher. Find endpoints that handle sensitive operations without proper authentication, ownership verification, or request integrity validation. Work in this order for every step: find the code → read it → check the condition → submit if found → move to the next step.
 
 ---
 
-## Step 1 — Read the route definitions
+## Step 1 — Find the routing table and sensitive handlers
 
-Call `get_architecture`. Find where this application defines its routes, URL patterns, or API endpoints. Read that file completely.
+Call `get_architecture` to understand the project structure.
 
-From the routes, identify and list:
-- **Financial routes**: payment processing, wallet operations, subscription purchase, external payment callbacks
-- **File/storage routes**: endpoints that return or issue access URLs for stored files
-- **Admin/privileged routes**: endpoints that operate on all users' data or require elevated privilege
+Then use `search_graph` to find route and endpoint registrations — search for nodes whose name contains terms like `route`, `endpoint`, `url`, `view`, `handler`, `controller`, `router`. Every web framework in every language uses one of these terms for its route definitions.
 
-For each category, call `get_code_snippet` with the handler class name to read its implementation.
+Read the route files you find. From the URL paths and handler names visible in the route table, identify:
+- **Financial routes**: any path segment containing words like `payment`, `wallet`, `billing`, `checkout`, `callback`, `subscribe`, `pay`, `transaction`
+- **File/storage routes**: any path segment containing `file`, `upload`, `download`, `storage`, `asset`, `media`, `bucket`
+- **Admin/privileged routes**: any path segment containing `admin`, `manage`, `dashboard`, `staff`, `superuser`
+
+For each route you identify, call `get_code_snippet` with the handler's qualified name to read its implementation.
 
 ---
 
@@ -22,7 +24,7 @@ For each category, call `get_code_snippet` with the handler class name to read i
 For each financial handler you read, check:
 
 **A — No authentication required**
-Is authentication enforced on this handler? Look for: permission class declarations, authentication decorators, guard annotations, middleware exclusion lists. Is this endpoint accessible to unauthenticated callers?
+Is authentication enforced? Look for: permission class declarations, authentication decorators, guard annotations, middleware exclusion lists, `@require_login`, `auth()`, `IsAuthenticated`, `@Authenticated`, `security([])`. Is this endpoint accessible to unauthenticated callers?
 
 → Submit: violated_invariant="[handler] performs financial operation but is accessible without credentials", severity=9, confidence=9.
 
@@ -37,20 +39,20 @@ Is there a code branch for a sandbox, test, or mock payment provider that skips 
 → Submit: violated_invariant="[handler] sandbox/test path skips gateway verification; caller sets provider=sandbox (or equivalent) to activate a paid subscription without a real transaction", severity=9, confidence=9.
 
 **D — Actor identity from request input**
-Does the handler read the identity of the party being charged (employee ID, user ID, account number) from the request body or query params, rather than from the verified session or token?
+Does the handler read the identity of the party being charged (user ID, account number, person ID) from the request body or query params, rather than from the verified session or token?
 
-→ Submit: violated_invariant="[handler] reads actor identity [field] from request input; caller names any person as the debited party", severity=9, confidence=9.
+→ Submit: violated_invariant="[handler] reads actor identity from request input rather than verified session; caller names any person as the debited party", severity=9, confidence=9.
 
 ---
 
 ## Step 3 — File/storage handlers: ownership check
 
-For each file/storage handler you read:
+For each file/storage handler:
 
 Trace from where the file identifier (key, name, ID) is read from the request to where the file or time-limited access URL is returned. Between those two points: is there a database lookup that verifies the requesting user owns or is authorized for that specific file?
 
 **E — No ownership check**
-→ Submit: violated_invariant="[handler] issues access to [file type] by caller-supplied [field] with no ownership verification; any authenticated user can access any file by its identifier", severity=7, confidence=9.
+→ Submit: violated_invariant="[handler] issues access to [file type] by caller-supplied identifier with no ownership verification; any authenticated user can access any file by its identifier", severity=7, confidence=9.
 
 ---
 
@@ -58,24 +60,24 @@ Trace from where the file identifier (key, name, ID) is read from the request to
 
 For any handler that accepts an object identifier (record ID, account ID, config ID) from the request and operates on that object: read the data fetch.
 
-Does the database query or data lookup filter by both the object ID AND the requesting user's identity? Or does it fetch by object ID alone?
+Does the database query filter by both the object ID AND the requesting user's identity? Or does it fetch by object ID alone?
 
 **F — No ownership filter in query**
-→ Submit: violated_invariant="[handler] fetches [object type] by caller-supplied [field] without co-filtering on the requesting user's identity; horizontal access to any record by ID enumeration", severity=7, confidence=8.
+→ Submit: violated_invariant="[handler] fetches [object type] by caller-supplied ID without filtering on the requesting user's identity; horizontal access to any record by ID enumeration", severity=7, confidence=8.
 
 **G — Caller supplies a different user's ID**
 Can the caller include a different user/person ID in the request body or params to access that other user's data?
 
-→ Submit: violated_invariant="[handler] accepts user/person ID from request and returns data for that ID; caller can access any user's data by supplying their ID", severity=8, confidence=9.
+→ Submit: violated_invariant="[handler] accepts user ID from request and returns data for that ID; caller can access any user's data by supplying their ID", severity=8, confidence=9.
 
 ---
 
-## Step 5 — Admin handlers and unconditional debug routes
+## Step 5 — Admin handlers and diagnostic routes
 
-**H — Admin handler with bypassable or absent authorization**
-For privileged handlers: read the authorization check. Is the decision derived from the verified identity (from the session or token), or from a value the caller can set (header, body field)?
+**H — Admin handler with bypassable authorization**
+For privileged handlers: is the authorization decision derived from the verified identity (from the session or token), or from a value the caller can set (header, body field)?
 
-→ Submit: violated_invariant="[handler] uses [input source] for its authorization decision; caller satisfies the check by controlling that input rather than by having actual privilege", severity=9, confidence=9.
+→ Submit: violated_invariant="[handler] grants admin access based on an attacker-controllable input rather than a server-side privilege record", severity=9, confidence=9.
 
 **I — Commented-out authorization**
 Is there a commented-out authorization requirement on a financial or admin handler?
@@ -96,4 +98,4 @@ Is there a metrics, observability, or health-detail route with no authentication
 
 ## Finish
 
-Call `finish()` now with all hypotheses. Even if the list is empty.
+Call `finish()` now with all hypotheses found. Even if the list is empty.

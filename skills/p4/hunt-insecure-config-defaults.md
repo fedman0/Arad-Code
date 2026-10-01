@@ -1,18 +1,22 @@
 # SKILL: hunt-insecure-config-defaults
 
-You are a security researcher. Find insecure default settings, committed secrets, and exposed network services. Navigate the code — do not use search_graph or search_code.
+You are a security researcher. Find insecure default settings, committed secrets, and exposed network services. Work in this order for every step: find the code → read it → check the condition → submit if found → move to the next step.
 
 ---
 
-## Step 1 — Read the application configuration/settings
+## Step 1 — Find and read the application configuration
 
-Call `get_architecture`. From the result: find the application configuration file (wherever this project loads environment variables and defines settings — could be a settings module, config class, YAML file, properties file, or environment loader).
+Call `get_architecture` to understand the project structure.
 
-Read it completely.
+Then use `search_graph` to find configuration and settings code — search for nodes whose name contains terms like `config`, `settings`, `configuration`, `environment`, `defaults`, `options`. Read every configuration file or class you find. Also read any infrastructure/deployment configuration that `get_architecture` identifies (container definitions, orchestration manifests, environment files).
 
-For every security-relevant feature (rate limiting, throttling, authentication enforcement, CORS policy, TLS verification, allowed hosts, content security): what is the default value when the environment variable is not set?
+---
 
-**A — Security feature off by default**
+## Step 2 — Check security feature defaults
+
+In every configuration file you read: for every security-relevant feature (rate limiting, throttling, authentication enforcement, CORS policy, TLS verification, allowed hosts, debug mode, content security), look at what value is active when the corresponding environment variable is NOT set.
+
+**A — Security feature disabled by default**
 If the feature is disabled by default (the operator must explicitly enable it rather than explicitly disable it):
 
 → Submit per feature: violated_invariant="[feature name] is disabled by default (default value: [value]); any deployment without explicit configuration has no [rate limiting / throttling / TLS enforcement / etc.]", severity=7, confidence=9.
@@ -24,23 +28,21 @@ If the allowed-hosts or allowed-origins configuration is set to a wildcard (`*`,
 
 ---
 
-## Step 2 — Read the deployment/infrastructure configuration
+## Step 3 — Check for literal secrets in deployment configuration
 
-From `get_architecture`: find the infrastructure configuration — how the application is packaged and deployed (container definitions, orchestration manifests, environment files, startup scripts). Read it.
+In the infrastructure/deployment configuration you read: find environment variable blocks that define signing keys, session secrets, database passwords, or API credentials. Is the value a literal string, rather than a reference to an external secrets manager?
 
 **C — Signing key or credential as literal string**
-Find environment variable blocks that define signing keys, session secrets, database passwords, or API credentials. Is the value a literal string, rather than a reference to an external secrets manager (`${VAR}`, `secretKeyRef`, `vault:path`)?
-
 → Submit per credential: violated_invariant="[credential type] is written as a literal string in [file]; repository access gives any developer the production secret", severity=9, confidence=9.
 
 **D — Credential file not in version control ignore list**
-Is the configuration file that contains literal secrets listed in the version control ignore file? Read the ignore file. If the credential file is not listed, it is committed to the repository.
+Is the configuration file that contains literal secrets listed in the version control ignore file? Read the ignore file. If the credential file is not listed:
 
 → Submit: violated_invariant="[file] with plaintext secrets is not in the version control ignore file; credentials are in repository history", severity=8, confidence=9.
 
 ---
 
-## Step 3 — Check network interface bindings
+## Step 4 — Check network interface bindings
 
 In the infrastructure configuration: find port mapping definitions. For each internal service (database, cache, message broker, admin UI):
 
@@ -51,12 +53,12 @@ Is the port bound to all interfaces (equivalent to `0.0.0.0`) rather than localh
 
 ---
 
-## Step 4 — Check the startup command
+## Step 5 — Check the startup command
 
 In the infrastructure configuration or startup scripts: find how the application server process is started.
 
 **F — Development server in deployment config**
-Is the startup command using the framework's built-in development server (designed for local use only) rather than a production-grade application server?
+Is the startup command using the framework's built-in development server (designed for local use only, typically named with words like `dev`, `runserver`, `develop`) rather than a production-grade application server?
 
 → Submit: violated_invariant="deployment starts the application with [development server name]; development servers are single-threaded and not designed for concurrent production traffic", severity=6, confidence=8.
 
@@ -64,4 +66,4 @@ Is the startup command using the framework's built-in development server (design
 
 ## Finish
 
-Call `finish()` now with all hypotheses. Even if the list is empty.
+Call `finish()` now with all hypotheses found. Even if the list is empty.
