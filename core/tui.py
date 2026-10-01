@@ -786,6 +786,8 @@ class AradCodeApp(App):
                 self._queued_input = None
                 self._log(f"\n[dim]Resuming queued: {queued[:60]}[/dim]")
                 self._dispatch(queued)
+            elif self._initial_cmd:
+                self.exit(0)
 
         self._task.add_done_callback(_done_cb)
 
