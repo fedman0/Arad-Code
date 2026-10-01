@@ -1,70 +1,91 @@
 # SKILL: hunt-debug-production-exposure
 
-You are a security researcher. Find debug, test, and development code reachable in production or staging. Work in this order for every step: find the code → read it → check the condition → submit if found → move to the next step.
+You are a security researcher. Find debug, test, and development code reachable in production or staging. For each step: (1) locate the code, (2) read it, (3) look for the exact pattern described, (4) submit if found, (5) move on. Do not conclude early — work through every check.
 
 ---
 
-## Step 1 — Find the route table and look for unconditional diagnostic routes
+## Step 1 — Read the routing table and find unconditional diagnostic routes
 
-Call `get_architecture` to understand the project.
+Call `search_graph` with `name_pattern="url|route|router|path|endpoint"` and `label="Module"` to find the file(s) where URL patterns are registered. Call `get_code_snippet` on the module, or use `read_file` to read the URL registration file.
 
-Then use `search_graph` to find route registrations — search for nodes whose name contains terms like `route`, `url`, `endpoint`, `router`, `path`, `view`. Read the file that registers all routes or URL patterns for the application.
+In the route definitions, look for a block like:
+```
+urlpatterns += [
+    path("debug/...", DebugView...),
+    path("notification-debug/...", ...),
+    path("benchmark/...", ...),
+    path("test/...", ...),
+]
+```
+where this `+=` block is OUTSIDE any `if settings.DEBUG:` or `if ENV != 'prod':` conditional.
 
-Look at every route registration. Are any inside a conditional block that checks the environment or a debug flag at startup? Note which routes with diagnostic-sounding URL paths are registered unconditionally (outside any such guard).
+**A — Unconditional diagnostic route**: a route appended to the URL table with a path that contains words like `debug`, `test`, `benchmark`, `memory`, `load`, `diagnostic` — registered without an environment guard.
 
-**A — Unconditional diagnostic route**
-A route whose URL path contains words like `debug`, `test`, `load`, `memory`, `benchmark`, `diagnostic` — but is registered unconditionally, outside any environment or debug check.
-
-→ Submit: violated_invariant="[route path] is registered unconditionally in the production route table with no environment guard; reachable in every deployment", severity=7, confidence=9.
-
----
-
-## Step 2 — Find registration and verification handlers for response-header leaks
-
-From the route table you already read: identify any handler for user registration, phone verification, one-time code delivery, or password reset. Call `get_code_snippet` to read each.
-
-In the response construction code: is a response header set that contains a one-time code, OTP, verification token, or temporary credential?
-
-**B — Secret in response header in non-production environments**
-Is the header set under a condition that would also be true on staging (e.g., `env != 'production'`, `env in ('dev', 'stage')`)?
-
-→ Submit: violated_invariant="[handler] places [code/token type] in HTTP response header [header name] in non-production environments including staging; any observer reads it and authenticates as any user without SMS delivery", severity=8, confidence=9.
+→ Submit per route group: violated_invariant="[route paths] are registered unconditionally in the production route table with no environment guard; reachable from any deployment", severity=7, confidence=9.
 
 ---
 
-## Step 3 — Find API documentation route and its condition
+## Step 2 — Find OTP/verification handlers and check for response-header leaks
 
-From the route table you already read: find where API documentation (Swagger UI, OpenAPI, Redoc, any developer reference) is registered. Read the condition under which it is enabled.
+From the route table: find handlers for SMS verification, phone registration, OTP delivery, or password reset. Call `get_code_snippet` on each.
 
-**C — Documentation served in staging/preprod**
-If the condition is `env != 'production'` or `env in ('dev', 'stage')`, staging users can enumerate the full API surface.
+Look for any line that sets a response header containing a verification code, OTP, or temporary secret:
+```
+response["X-Test-Code"] = code
+response.headers["Debug-OTP"] = otp_value
+headers = {"X-Test-Code": otp}
+```
 
-→ Submit: violated_invariant="API documentation served in non-production environments including staging without access control; full API surface publicly enumerable on staging", severity=5, confidence=9.
+Check the condition: is this inside `if ENV != 'production':` or `if not IS_PROD:` or similar? If so, it fires on staging too.
 
----
-
-## Step 4 — Find computation handlers with unbounded input
-
-From the route table: find any handler that performs computation scaled by a caller-supplied number (iteration count, recursion depth, size, list length). Call `get_code_snippet` to read it.
-
-**D — No upper bound on computation parameter**
-No cap on the caller-supplied number, and the endpoint is reachable in at least some deployed environment.
-
-→ Submit: violated_invariant="[route path] performs [computation type] scaled by caller-supplied [field] with no upper bound; a large value exhausts server CPU or memory", severity=4, confidence=8.
+**B — OTP in response header on non-production**: 
+→ Submit: violated_invariant="[handler] places the OTP/verification code in HTTP response header [header name] when ENV != 'production'; any observer on staging reads the code and authenticates as any user without SMS delivery", severity=8, confidence=9.
 
 ---
 
-## Step 5 — Find monitoring route and check its authentication
+## Step 3 — Find API documentation route and check its condition
 
-From the route table you already read: find any route that exposes internal metrics, health details, or operational statistics (look for path segments like `metrics`, `health`, `status`, `stats`, `monitor`). Read how the route is registered and what handler serves it.
+In the route registration file: look for routes that serve API documentation — paths containing `swagger`, `redoc`, `openapi`, `api-docs`, `api/docs`.
 
-**E — No authentication on monitoring endpoint**
-The metrics/health endpoint is accessible without authentication.
+Read the condition that gates them. The dangerous condition:
+```
+if settings.DEBUG or ENV == 'dev' or ENV == 'stage':
+    urlpatterns += [path("swagger/", ...)]
+```
+This serves full API docs on staging.
 
-→ Submit: violated_invariant="[route path] monitoring/metrics endpoint has no authentication; internal request rates, error rates, DB latency publicly readable", severity=6, confidence=9.
+**C — Documentation served on staging**:
+→ Submit: violated_invariant="API documentation endpoint is served when ENV is 'stage' or 'dev', without access control; full API surface is publicly enumerable on staging", severity=5, confidence=9.
+
+---
+
+## Step 4 — Find computation/load-test handlers
+
+From the route table: find any handler whose path contains `benchmark`, `load-test`, `memory-test`, `stress`, or similar. Call `get_code_snippet` on it.
+
+Check: does it accept a numeric parameter (iteration count, size) from the request without an upper bound cap?
+
+**D — Unbounded computation parameter**:
+→ Submit: violated_invariant="[route] accepts a caller-supplied numeric parameter controlling computation depth/count with no cap; large values exhaust server CPU or memory", severity=4, confidence=8.
+
+---
+
+## Step 5 — Find monitoring route and check authentication
+
+In the main URL file: look for an unconditional include of a metrics library's URLs:
+```
+path('', include('django_prometheus.urls'))
+path('/metrics', metricsHandler)
+app.use('/metrics', promClient.collectDefaultMetrics)
+```
+
+Check whether any authentication middleware or permission class is applied to this route.
+
+**E — Unauthenticated monitoring endpoint**:
+→ Submit: violated_invariant="metrics/monitoring endpoint is registered without authentication; internal request rates, error rates, and latency are publicly readable", severity=6, confidence=9.
 
 ---
 
 ## Finish
 
-Call `finish()` now with all hypotheses found. Even if the list is empty.
+Call `finish()` now with all hypotheses collected. Do not skip this. Call it even if the list is empty.
