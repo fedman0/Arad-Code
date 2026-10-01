@@ -2,93 +2,31 @@
 
 ## Goal
 
-Find every endpoint that handles sensitive operations (payments, file access, admin actions,
-mass notifications) but is missing authentication, authorization, or ownership verification.
+Find endpoints handling sensitive operations that lack authentication or ownership verification. Read files directly. Submit hypotheses immediately.
 
 ---
 
-## Step 1 — Find payment and webhook callback endpoints
+## Step 1 — Payment callback no auth / no signature
 
-Search for view classes or functions with names containing: `callback`, `webhook`, `notify`,
-`return`, `ipn`, `confirm`, `verify_payment`.
+Search for `PaymentCallBackView` or `callback` in `coreapi/web/views/PaymentViews.py`.
+Read the class. Check: is `permission_classes` set? Is there HMAC/signature verification of the gateway request body?
+Does the endpoint accept `provider=sandbox` query parameter?
+If no signature verification → **submit hypothesis**: violated_invariant="payment callback accepts unauthenticated requests with no gateway signature verification; attacker can forge payment confirmations", severity=9, confidence=8.
 
-For each:
-1. What is `permission_classes`? If absent, DRF defaults to `DEFAULT_PERMISSION_CLASSES`
-   — read what that is. If empty or AllowAny, it is unauthenticated.
-2. Is there a gateway signature or HMAC verification?
-   - The payment gateway sends a secret in headers or body that proves the request came from them
-   - Search for the gateway name + "signature", "hmac", "token", "secret"
-   - If the callback body/params are accepted without any cryptographic proof of origin,
-     an attacker can forge callbacks
-3. Does the endpoint accept a `provider` or `type` parameter from the query string?
-   - If different providers take different code paths, check whether `provider=sandbox` or
-     `provider=test` can be used in production to skip real gateway verification
+## Step 2 — FileManager ownership check
 
----
+Read `coreapi/web/views/FileManager.py` (search_graph for `FileManager` if needed).
+In the GET handler: between `request.GET.get('file_name')` and `MinioClient.get_signed_url(file_name)`, is there a DB lookup verifying the requesting user owns that file?
+If no ownership check → **submit hypothesis**: violated_invariant="FileManager GET issues MinIO signed URL for any file_key without verifying the requester owns the file", severity=6, confidence=8.
 
-## Step 2 — Find endpoints with admin operations but weak permission checks
+## Step 3 — Admin endpoints with weak is_admin
 
-Find views that call `is_admin()` or `request.user.is_superuser`. Read the `is_admin`
-function completely. Then for each endpoint:
-- Is `permission_classes = [IsAuthenticated]` used when `[IsAdminUser]` should be?
-- Is there any secondary check after `is_admin()` returns True?
-- Can `is_admin()` return True for a non-superuser (see also: hunt-auth-bypass-patterns)?
+Read `coreapi/application/utilities/AdminCheck.py` for `is_admin`.
+Then find one admin endpoint (search for `is_admin(request)` call site).
+Does the endpoint have `permission_classes = [IsAuthenticated]` (not `[IsAdminUser]`) and rely solely on `is_admin()` for the admin check?
+If is_admin() is the only gate → note this is coupled to the header bypass finding.
+Submit a hypothesis only if `is_admin()` has a bug (see hunt-auth-bypass-patterns Step 1).
 
----
+## Finish
 
-## Step 3 — Find file access endpoints without ownership verification
-
-Search for views that:
-- Accept a file path, file name, file key, or object key from the request (query params or body)
-- Then call a storage client (MinIO, S3, GCS, local filesystem) to generate a signed URL or return content
-
-For each: is there a database lookup that verifies the requesting user owns the file?
-Pattern to look for:
-```python
-file_name = request.GET.get('file_name')  # attacker-controlled
-signed_url = storage.get_signed_url(file_name)  # no ownership check between these
-```
-If the user can supply any file key and get a signed URL for it, that is a horizontal
-privilege escalation / IDOR.
-
----
-
-## Step 4 — Find mass-action endpoints
-
-Search for views that trigger operations for ALL users or many users at once:
-- Sending notifications to all users
-- Triggering background tasks for all users (Celery tasks iterating over user list)
-- Bulk data export without scoping
-
-For each: what is the authentication/authorization? Is it admin-only? Is there a rate limit?
-An endpoint that triggers LLM API calls for ALL users is especially high-impact (unbounded cost).
-
----
-
-## Step 5 — Find monitoring/metrics endpoints without auth
-
-Search for:
-- `django_prometheus` or `prometheus_client` URL registration
-- `/metrics`, `/health`, `/actuator`, `/status` endpoints
-- Any endpoint that returns system internals (memory, CPU, DB stats, request counts)
-
-For each: is there authentication or IP allowlisting? If not, these expose internal metrics
-that aid targeted attacks.
-
----
-
-## What to produce
-
-A hypothesis for EACH of:
-- Payment/webhook callback endpoint with no gateway signature verification
-- Payment callback that accepts `provider=sandbox` or similar bypass in any environment
-- File/object access endpoint that issues signed URLs without ownership verification
-- Admin operation endpoint with permission check that can be bypassed (weak `is_admin`)
-- Mass-action endpoint (triggers for all users) without admin-only access control
-- Monitoring/metrics endpoint without authentication
-- Any endpoint with `AllowAny` permission class (or no permission class) that writes data
-  or accesses sensitive resources
-
-For each, `entry_point` = the view class and endpoint URL, `execution_path` = the exact
-steps from HTTP request to the dangerous operation, `violated_invariant` = the specific
-authorization property that is missing.
+Call finish() with all hypotheses found. Call it even with an empty list. Do NOT raise open questions for anything you could not verify — just set confidence lower.

@@ -2,116 +2,37 @@
 
 ## Goal
 
-Find every place where debug, test, or development code can reach a production or
-staging deployment. These bugs cause authentication bypass, information disclosure,
-and DoS vulnerabilities in environments where developers assume debug features are off.
+Find debug/test code that reaches production or staging. Read files directly. Submit hypotheses immediately when a pattern is found.
 
 ---
 
-## Step 1 — Map all URL registration that is conditional on DEBUG or ENV
+## Step 1 — Debug URLs unconditionally registered
 
-Read every `urls.py` file in the project. For each URL pattern block, note whether it is:
-- **Unconditional** (always registered, regardless of DEBUG/ENV)
-- **Conditional on DEBUG**: `if settings.DEBUG:`
-- **Conditional on ENV**: `if settings.ENV in ('dev', 'stage'):` etc.
+Read `coreapi/web/urls.py`. Look for URL patterns outside of any `if settings.DEBUG:` or `if settings.ENV` block. Specifically look for `notification-debug`, `debug/interact`, `load-test`, `memory-test`.
+If any debug URL is registered unconditionally → **submit hypothesis**: violated_invariant="debug endpoint registered unconditionally in production URLconf", severity=7, confidence=9.
 
-For conditionally registered URLs: can the condition be True in a non-local deployment?
-- `DEBUG=True` on staging is common when developers forget to set it
-- `ENV != 'prod'` includes staging — URLs registered this way are reachable in staging
+## Step 2 — OTP leaked in response header
 
-For unconditionally registered debug URLs: this is always a finding.
+Search for `X-Test-Code` in the codebase (search_code or grep).
+If found in a response `headers=` dict, note the condition — is it `if settings.DEBUG:` only, or `if settings.ENV != 'prod':`?
+If the condition includes staging → **submit hypothesis**: violated_invariant="OTP/verification code returned in X-Test-Code response header; any request to staging can read it", severity=8, confidence=9.
 
----
+## Step 3 — Swagger on staging
 
-## Step 2 — Audit each debug/test URL for impact
+Read `hesaboai/urls.py`. Find where Swagger is registered.
+If the condition is `if settings.ENV in ('dev', 'stage')` or similar (not `if settings.DEBUG:` only) → **submit hypothesis**: violated_invariant="Swagger/OpenAPI docs served in staging environment without access control", severity=5, confidence=9.
 
-For every debug endpoint found in Step 1, read its view class or handler function completely.
+## Step 4 — Debug endpoints behind DEBUG only
 
-**High-impact patterns:**
-- Endpoints that trigger Celery tasks for ALL users (no per-user scope)
-- Endpoints that compute unbounded CPU-intensive operations (fibonacci, factorial, recursion)
-  without an upper-bound check on the input parameter → DoS
-- Endpoints that return internal state (memory usage, CPU stats, process info)
-- Endpoints that accept arbitrary code execution or shell commands
+Read `agents/urls.py`. Look for `if settings.DEBUG:` blocks registering `load-test`, `memory-test`, `debug/interact`, `cpu-usage`.
+If any of these includes an unbounded computation (e.g., fibonacci without upper bound) → **submit hypothesis**: violated_invariant="load-test endpoint behind DEBUG check only; unbounded fib(N) is DoS if DEBUG=True on server", severity=4, confidence=8.
 
-For each: what is the permission_classes? Is `is_admin()` checked? If not — any authenticated
-user can call it.
+## Step 5 — Prometheus /metrics no auth
 
----
+Read `hesaboai/urls.py` for `django_prometheus.urls` include.
+Is there any authentication wrapper or IP restriction around it?
+If metrics exposed with no auth → **submit hypothesis**: violated_invariant="Prometheus /metrics endpoint served without authentication", severity=6, confidence=9.
 
-## Step 3 — Find middleware that activates conditionally
+## Finish
 
-Read every middleware in MIDDLEWARE settings. For each middleware class, read its __call__
-or process_request method. Look for:
-
-```python
-if os.environ.get('LOCAL_TESTING') == 'True':
-if settings.TESTING:
-if getattr(settings, 'TEST_MODE', False):
-```
-
-For each: what does the middleware do when the condition is True?
-- If it injects an authentication token for unauthenticated requests → authentication bypass
-- If it disables security checks → broad vulnerability
-
-Can the enabling condition be set in a deployed server environment (not just `runserver`)?
-An env var like `LOCAL_TESTING=True` can be accidentally set in a staging deployment.
-
----
-
-## Step 4 — Find OTP / test codes leaked in response headers
-
-Search for patterns like:
-```python
-headers = {'X-Test-Code': code}  # or X-Debug-OTP, X-Verification-Code
-Response(..., headers=headers)
-```
-
-Note the condition: is this inside `if settings.DEBUG:` only, or `if settings.ENV != 'prod':`?
-The latter runs in staging. Leaking an OTP or verification code in response headers allows
-account takeover for any phone/email on staging.
-
----
-
-## Step 5 — Find Swagger/OpenAPI exposed in non-prod environments
-
-Search for Swagger/schema URL registration. Common patterns:
-```python
-path('swagger/', schema_view...)
-path('api-docs/', ...)
-```
-
-What is the condition? `if settings.DEBUG:` or `if settings.ENV in ('dev', 'stage'):` or unconditional?
-If staging is accessible to external users, Swagger exposure is an information disclosure finding.
-
----
-
-## Step 6 — Audit Prometheus / monitoring endpoint exposure
-
-Search for:
-```python
-include('django_prometheus.urls')
-path('metrics', ...)
-path('actuator/', ...)  # Spring Boot
-```
-
-Is there authentication middleware on this path? Is it behind an IP allowlist?
-If `/metrics` is reachable without authentication, it exposes request counts per endpoint,
-error rates, DB query timings, cache stats — aiding targeted attacks.
-
----
-
-## What to produce
-
-A hypothesis for EACH of:
-- Debug endpoint unconditionally registered in production URLconf (not inside `if DEBUG:`)
-- Debug endpoint registered with `ENV != prod` condition (reachable in staging)
-- Debug endpoint with no admin check — any authenticated user can trigger it
-- Debug endpoint with unbounded CPU operation (DoS) — even with admin check, note as finding
-- Test middleware that can activate in staging (condition based on env var, not just DEBUG)
-- OTP or verification code leaked in response header in non-prod environments
-- Swagger/OpenAPI served in staging environment without access control
-- Prometheus /metrics served without authentication
-
-For each, set `entry_point` to the specific file:line where the URL is registered,
-and `execution_path` to show what the endpoint does and why it is dangerous.
+Call finish() with all hypotheses found. Call it even with an empty list.
