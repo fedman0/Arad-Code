@@ -1,151 +1,201 @@
 # SKILL: hunt-missing-authz-on-sensitive-endpoints
 
-## ⚡ BREADTH SCAN — grep-first, semgrep-derived patterns, multi-language
+## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
 Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
 
 ---
 
-## Step 1 — Financial handler with no authentication enforcement
+## Step 1 — FastAPI routes missing auth dependency
 
 ```
-grep(pattern="payment|callback|wallet|checkout|billing|subscribe|transaction|purchase|charge|refund|transfer|deposit|withdraw", max_matches=40)
+grep(pattern="@(app|router)\.(get|post|put|patch|delete)\s*\(['\"][^'\"]*['\"]", max_matches=40)
 ```
 
-For each match in a route handler file: call `get_code_snippet` on the class or function. Look for the **absence** of:
+For each route on sensitive paths (account, admin, user, order, payment, profile, transfer): does the handler signature lack `Depends(get_current_user)`, `Security(...)`, `HTTPBearer()`, or `OAuth2PasswordBearer`?
 
-- **Python/Django DRF**: `permission_classes`, `@login_required`, `@permission_required`, `IsAuthenticated`, `get_permissions`
-- **FastAPI**: `Depends(get_current_user)`, `Security(...)`, `HTTPBearer`
-- **Express / Node**: `passport.authenticate`, `requireAuth`, `ensureLoggedIn`, `verifyToken`, `authenticate` middleware in router chain
-- **Go**: `AuthMiddleware`, `RequireAuth`, `JWTMiddleware`, `jwt.New` in route group
-- **Java / Spring**: `@Secured`, `@PreAuthorize`, `hasRole`, `SecurityConfig.configure` rule for this path, `@RolesAllowed`
-- **PHP / Laravel**: `$this->middleware('auth')`, `Route::middleware(['auth'])`, `auth:api`
-- **Ruby / Rails**: `before_action :authenticate_user!`, `before_action :require_login`, `before_action :authenticate!`
-- **C# / .NET**: `[Authorize]`, `RequireAuthorization()`, `policy.RequireAuthenticatedUser()`
+```
+async def endpoint():               # no dependency injection — unauthed
+async def endpoint(request: Request): # no user dep — unauthed
+async def endpoint(db: Session = Depends(get_db)):  # DB only, no auth
+```
 
-If NONE of these are present:
-
-**A — Financial handler without authentication**:
-→ Submit: violated_invariant="financial handler processes payment state or account changes but has no authentication requirement; any unauthenticated caller can trigger it", severity=9, confidence=7, exposure="internet"
+→ Submit: violated_invariant="FastAPI endpoint [path] has no authentication dependency; unauthenticated callers access sensitive functionality", severity=9, confidence=7, exposure="internet"
 
 ---
 
-## Step 2 — Sandbox/test mode bypasses payment gateway verification
+## Step 2 — Express / Node routes without auth middleware
 
 ```
-grep(pattern="sandbox|is_sandbox|isSandbox|test.*mode|mode.*test|provider.*test|testMode|fake.*payment|mock.*payment|isDev.*pay|TEST_PAYMENT", max_matches=20)
+grep(pattern="(app|router)\.(get|post|put|patch|delete)\s*\(['\"][^'\"]*['\"],\s*(async\s*)?\(", max_matches=40)
 ```
 
-For each match in a payment handler: call `get_code_snippet`. Look for a branch where sandbox/test condition causes the gateway signature or verification to be **skipped**, with execution going directly to account credit or subscription activation:
+For each sensitive route: is there a middleware argument between the path and the handler? Look for `passport.authenticate`, `authenticate`, `requireAuth`, `isAuthenticated`, `jwtMiddleware`, `verifyToken`.
 
-```python
-if provider == "sandbox":
-    is_sandbox = True          # no verify_payment() call
-if verify_result or is_sandbox:
-    activate_subscription()    # sandbox short-circuits verification
 ```
-```js
-if (req.body.testMode || req.body.sandbox) {
-    return activateSubscription(userId);   // skip gateway.verify()
-}
-```
-```csharp
-if (request.IsSandbox) {
-    // skip IPaymentGateway.Verify()
-    await ActivateSubscriptionAsync(userId);
-}
+app.get('/admin', handler)                          # no middleware
+app.delete('/user/:id', deleteUser)                 # no middleware
+router.post('/transfer', async (req, res) => {      # no middleware
 ```
 
-**B — Sandbox mode bypasses payment verification**:
-→ Submit: violated_invariant="sandbox/test path skips gateway signature verification and directly activates subscriptions or credits; caller sends sandbox=true to obtain paid service for free", severity=9, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="Express route [path] has no authentication middleware; requests execute handler without identity verification", severity=9, confidence=7, exposure="internet"
 
 ---
 
-## Step 3 — Actor identity for financial operation read from request input
+## Step 3 — Spring controllers missing authorization annotations
 
 ```
-grep(pattern="req\.body\.[a-z_]*[Ii]d|request\.data\.get.*_id|request\.json\(\)\[.*[Ii]d|body\.[a-z_]*[Ii]d|params\.[a-z_]*[Ii]d|request\.form\.get.*_id|\$request->input.*_id|params\[:.*_id\]", max_matches=20)
+grep(pattern="@(GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\s*\(['\"][^'\"]*['\"]", max_matches=40)
 ```
 
-For each match inside a financial/payment/transfer handler: is the value used to determine WHICH ACCOUNT to charge, credit, or transfer from/to?
+For each sensitive mapping: is there `@PreAuthorize`, `@Secured`, `@RolesAllowed`, or a method-level security annotation on the method or class?
 
-```python
-user_id = request.data.get('user_id')        # caller-controlled
-transfer_from = request.json.get('from_id')
 ```
-```csharp
-var targetUserId = request.Body.UserId;      // not from ClaimsPrincipal
+grep(pattern="@PreAuthorize|@Secured|@RolesAllowed|@WithMockUser", max_matches=30)
 ```
 
-**C — Financial actor identity from caller-supplied input**:
-→ Submit: violated_invariant="financial handler reads account to debit/credit from caller-supplied request field; any authenticated user can charge or credit any account by specifying its ID", severity=9, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="Spring controller method [method] has no method-level security annotation; Spring Security config may not cover this endpoint", severity=8, confidence=6, exposure="internet"
 
 ---
 
-## Step 4 — File or object access without ownership verification
+## Step 4 — Django views missing authentication
 
 ```
-grep(pattern="signed_url|presigned_url|getSignedUrl|createPresignedPost|get_object|getObject|signedUrl|downloadUrl|fileUrl|generateDownloadUrl|GetBlobSasUri|GetSharedAccessSignature", max_matches=20)
+grep(pattern="def\s+\w+\s*\(\s*request\b", max_matches=40)
 ```
 
-For each match in a handler: trace from where the file key/identifier is extracted from the request to where the URL or content is returned. Is there a query that filters by BOTH the file key AND the requesting user's identity?
+For each view handling sensitive operations: is there `@login_required`, `@permission_required`, `LoginRequiredMixin`, `PermissionRequiredMixin`, or a manual `request.user.is_authenticated` check?
 
-```python
-key = request.query_params.get('key')
-url = s3.generate_presigned_url(key)          # no user_id filter
 ```
-```csharp
-var blobName = request.Query["file"];
-var sas = container.GetBlobSasUri(blobName);  # no ownership check
+grep(pattern="@login_required|@permission_required|LoginRequiredMixin|is_authenticated", max_matches=30)
 ```
 
-If only the file key is used:
-
-**D — File access without ownership check**:
-→ Submit: violated_invariant="handler returns file access URL for any caller-supplied identifier without verifying the requesting user owns that resource; any authenticated user can access any file", severity=7, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="Django view [view] has no authentication decorator or mixin; any HTTP client accesses sensitive data", severity=9, confidence=7, exposure="internet"
 
 ---
 
-## Step 5 — Admin or monitoring endpoint without authentication
+## Step 5 — Rails controllers missing before_action auth filter
 
 ```
-grep(pattern="/metrics|/health|/admin|/status|/stats|/monitor|/actuator|/debug|/internal|/management|/sys|/ops", max_matches=30)
+grep(pattern="class\s+\w+Controller\s*<", max_matches=30)
 ```
 
-**C# / .NET — [AllowAnonymous] on sensitive endpoint:**
+For each controller: does it define or inherit `before_action :authenticate_user!` / `before_action :require_login` / `before_action :authorize!`? Check for `skip_before_action :authenticate_user!` that removes inherited protection.
+
 ```
-grep(pattern="\[AllowAnonymous\]", max_matches=15)
+grep(pattern="skip_before_action\s*:authenticate_user|skip_before_action\s*:require_login|before_action.*only.*\[\s*\]", max_matches=20)
 ```
 
-For each [AllowAnonymous] match: call `get_code_snippet`. Is it on an admin, management, or financial controller?
-
-For route-level matches: check if an authentication middleware is applied specifically to that path. Routes that match broad `*` or are registered before auth middleware run without authentication.
-
-**E — Sensitive endpoint without authentication**:
-→ Submit: violated_invariant="[endpoint] registered without authentication or with [AllowAnonymous]; internal state or administrative functionality publicly accessible", severity=6, confidence=7, exposure="internet"
+→ Submit: violated_invariant="Rails controller [controller] skips authentication filter for [actions]; unauthenticated access to sensitive endpoints", severity=9, confidence=7, exposure="internet"
 
 ---
 
-## Step 6 — IDOR: database record fetched by caller-supplied ID without ownership filter
+## Step 6 — C# actions with [AllowAnonymous] on sensitive paths
 
 ```
-grep(pattern="FindById|findById|GetById|getById|find_by_id|first_or_404|get_object_or_404|SingleOrDefault.*Id|FirstOrDefault.*Id|Where.*Id.*==", max_matches=30)
+grep(pattern="\[AllowAnonymous\]", max_matches=20)
 ```
 
-For each match in a handler: does the query include the current user's identity as a filter condition?
+For each `[AllowAnonymous]` attribute: what does the next method name indicate? `Delete`, `Update`, `Admin`, `Transfer`, `Reset` + AllowAnonymous = critical.
 
-```python
-order = Order.objects.get(pk=order_id)         # missing: user=request.user
 ```
-```csharp
-var order = await _repo.FindByIdAsync(orderId); // missing: .Where(o => o.UserId == userId)
-```
-```java
-Order order = orderRepo.findById(orderId).get(); // no ownership predicate
+grep(pattern="\[AllowAnonymous\]\s*\n\s*public.*\b(Delete|Admin|Transfer|Reset|Update|Create)\b", max_matches=15)
 ```
 
-**F — Record fetched without ownership filter (IDOR)**:
-→ Submit: violated_invariant="handler fetches record by caller-supplied ID without filtering by the requesting user's identity; any authenticated user can access any record of that type", severity=8, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="ASP.NET action [action] marked [AllowAnonymous]; bypasses controller-level [Authorize] for sensitive operation", severity=9, confidence=8, exposure="internet"
+
+---
+
+## Step 7 — PHP Laravel routes missing auth middleware
+
+```
+grep(pattern="Route::(get|post|put|patch|delete)\s*\(['\"][^'\"]*['\"]", max_matches=40)
+```
+
+For each route: is it inside a `Route::middleware(['auth'])` group, or does it have `->middleware('auth')` chained?
+
+```
+grep(pattern="->middleware\s*\(\s*['\"]auth['\"]|Route::middleware\s*\(\s*\[.*['\"]auth['\"]", max_matches=20)
+```
+
+→ Submit: violated_invariant="Laravel route [path] not in auth middleware group; unauthenticated requests reach the controller", severity=9, confidence=7, exposure="internet"
+
+---
+
+## Step 8 — Go Gin routes outside auth middleware group
+
+```
+grep(pattern="r\.(GET|POST|PUT|PATCH|DELETE)\s*\(['\"][^'\"]*['\"]", max_matches=40)
+```
+
+For each route: is it defined inside a `r.Group(...)` that applies a JWT/auth middleware, or directly on the root router with no middleware?
+
+```
+grep(pattern="r\.Group\s*\(['\"][^'\"]*['\"].*func.*{|gin\.New\s*\(\s*\)|router\.Use\s*\(.*[Aa]uth", max_matches=20)
+```
+
+→ Submit: violated_invariant="Gin route [path] registered on router without auth middleware group; JWT not validated", severity=9, confidence=6, exposure="internet"
+
+---
+
+## Step 9 — IDOR: object lookup by user-supplied ID without ownership check
+
+**Python (Django ORM):**
+```
+grep(pattern="get_object_or_404\s*\(\w+,\s*pk\s*=|get_object_or_404\s*\(\w+,\s*id\s*=|\.objects\.get\s*\(\s*id\s*=|\.objects\.get\s*\(\s*pk\s*=", max_matches=25)
+```
+
+**JavaScript / TypeScript:**
+```
+grep(pattern="findById\s*\(\s*req\.(params|body|query)|findByPk\s*\(\s*req\.(params|body|query)|findOne\s*\(\{.*req\.(params|body|query)", max_matches=25)
+```
+
+**Java:**
+```
+grep(pattern="findById\s*\(\s*\w+\)|getById\s*\(\s*\w+\)|findOne\s*\(\s*\w+\)|repository\.find\s*\(\s*\w+\)", max_matches=25)
+```
+
+**Go:**
+```
+grep(pattern="First\s*\(&\w+,\s*\w+\)|Find\s*\(&\w+,\s*\w+\)|Where\s*\(['\"]id\s*=\s*\?['\"],\s*\w+\)", max_matches=25)
+```
+
+**Ruby:**
+```
+grep(pattern="find\s*\(\s*params\[|find_by_id\s*\(\s*params\[|where\s*\(\s*id:\s*params\[", max_matches=25)
+```
+
+**PHP:**
+```
+grep(pattern="find\s*\(\s*\\\$request->|findOrFail\s*\(\s*\\\$request->|where\s*\(\s*['\"]id['\"],\s*\\\$request->", max_matches=25)
+```
+
+For each match: does the code verify `result.user_id == current_user.id` or equivalent before returning? IDOR confirmed if the caller's identity is never compared to the fetched record's owner.
+
+→ Submit: violated_invariant="Object [model] fetched by caller-supplied ID without ownership check; IDOR exposes any record to any authenticated user", severity=8, confidence=7, exposure="authenticated"
+
+---
+
+## Step 10 — Mass assignment (no attribute whitelist)
+
+**Ruby (Rails):**
+```
+grep(pattern="params\.permit!\s*\(\s*\)|update_attributes\s*\(\s*params\s*\)|update\s*\(\s*params\s*\)", max_matches=15)
+```
+
+**Python (Django):**
+```
+grep(pattern="\.objects\.update\s*\(\s*\*\*request\.data\)|serializer\.save\s*\(\s*\*\*request\.data|ModelForm.*Meta.*fields.*=.*'__all__'", max_matches=15)
+```
+
+**PHP (Laravel):**
+```
+grep(pattern="\\\$model->fill\s*\(\s*\\\$request->all\s*\(\s*\)\)|create\s*\(\s*\\\$request->all\s*\(\s*\)\)|update\s*\(\s*\\\$request->all\s*\(\s*\)\)", max_matches=15)
+```
+
+For each match: is there a `$guarded`, `$fillable`, `permit(:field1, :field2)`, or explicit field whitelist?
+
+→ Submit: violated_invariant="Mass assignment with no attribute whitelist; caller sets any model field including [role/is_admin/balance]", severity=8, confidence=7, exposure="authenticated"
 
 ---
 

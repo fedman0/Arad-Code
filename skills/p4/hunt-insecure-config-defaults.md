@@ -1,181 +1,198 @@
 # SKILL: hunt-insecure-config-defaults
 
-## ⚡ BREADTH SCAN — grep-first, semgrep-derived patterns, multi-language
+## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context, submit immediately. 2 tool calls per step max.
-
----
-
-## Step 1 — Security feature disabled by default via environment variable
-
-```
-grep(pattern="getenv.*[Ff]alse|os\.environ.*[Ff]alse|process\.env\..*\|\|.*false|ENV\.fetch.*false|config\.get.*false|System\.getenv.*false", max_matches=30)
-```
-
-Also:
-```
-grep(pattern="THROTTL.*[Ff]alse|RATE.*LIMIT.*[Ff]alse|CAPTCHA.*[Ff]alse|VERIFY.*[Ff]alse|ENABLED.*=.*[Ff]alse|SSL_VERIFY.*[Ff]alse|CSRF.*[Ff]alse", max_matches=20)
-```
-
-Is the variable name security-related (rate limiting, throttling, blocking, captcha, TLS, auth, CSRF)? If the default is `False`/`false`/`0`/`""`, any deployment without explicit config has that feature **off**.
-
-**A — Security feature off by default**:
-→ Submit per feature: violated_invariant="[feature] reads from env var with default false/disabled; any deployment without explicit config has [feature] disabled", severity=7, confidence=7, exposure="internet"
+Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
 
 ---
 
-## Step 2 — Wildcard CORS or allowed hosts
+## Step 1 — CORS wildcard (allow all origins)
 
-**Django:**
+**Python Django (django-cors-headers):**
 ```
-grep(pattern="ALLOWED_HOSTS\s*=\s*\[.*\*|CORS_ALLOW_ALL_ORIGINS\s*=\s*True|CORS_ORIGIN_ALLOW_ALL\s*=\s*True", max_matches=15)
-```
-
-**FastAPI (CORSMiddleware):**
-```
-grep(pattern="CORSMiddleware.*allow_origins.*\*|allow_origins=\[.*\*.*\]|allow_origins=\[\"?\*\"?\]", max_matches=15)
+grep(pattern="CORS_ALLOW_ALL_ORIGINS\s*=\s*True|CORS_ORIGIN_ALLOW_ALL\s*=\s*True", max_matches=15)
 ```
 
-**Flask (flask-cors):**
+**Python FastAPI:**
 ```
-grep(pattern="CORS\(.*origins.*\*|resources.*origins.*\*|@cross_origin\(\)|cross_origin\(.*\*", max_matches=15)
-```
-
-**Express / Node.js:**
-```
-grep(pattern="cors\(\{.*origin.*\*|cors\(\{.*origin.*true|res\.setHeader\(.*Access-Control.*\*|res\.header\(.*Access-Control.*\*", max_matches=15)
+grep(pattern="CORSMiddleware.*allow_origins.*\*|allow_origins\s*=\s*\[.*\*.*\]", max_matches=15)
 ```
 
-**Java (Spring / Servlet):**
+**Python Flask (flask-cors):**
 ```
-grep(pattern="addAllowedOrigin\(\"?\*\"?\)|setAllowedOrigins.*\*|addHeader.*[Aa]ccess-[Cc]ontrol.*\*|setHeader.*[Aa]ccess-[Cc]ontrol.*\*", max_matches=15)
+grep(pattern="CORS\(.*origins\s*=\s*['\"]?\*['\"]?\)|resources\s*=\s*\{.*\*.*origins.*\*", max_matches=15)
+```
+
+**JavaScript / TypeScript (Express cors):**
+```
+grep(pattern="cors\(\{[^}]*origin\s*:\s*['\"]?\*['\"]?|cors\(\{[^}]*origin\s*:\s*true", max_matches=15)
+```
+
+**Java (Spring):**
+```
+grep(pattern="addAllowedOrigin\s*\(\s*['\"]?\*['\"]?\)|allowedOrigins\s*\(\s*['\"]?\*['\"]?\)|@CrossOrigin\s*\(\s*\*\s*\)", max_matches=15)
 ```
 
 **PHP:**
 ```
-grep(pattern="header\(.*Access-Control-Allow-Origin.*\*|header\(.*access-control-allow-origin.*\*", max_matches=15)
+grep(pattern="header\s*\(\s*['\"]Access-Control-Allow-Origin:\s*\*['\"]", max_matches=15)
 ```
 
-**Ruby/Rails:**
+**Ruby (Rails):**
 ```
-grep(pattern="allow_any_origin!|origins\s+['\"][*]['\"]|cors.*origins.*\*", max_matches=15)
-```
-
-**B — Wildcard host/CORS allowlist**:
-→ Submit: violated_invariant="host or CORS origin allowlist set to wildcard; Host header injection enables cache poisoning and may hijack password-reset links", severity=5, confidence=7, exposure="internet"
-
----
-
-## Step 3 — Secret or credential with hardcoded fallback value
-
-**Shell variable substitution (docker-compose, Helm, k8s manifests):**
-```
-grep(pattern=":-[a-zA-Z0-9+/=$@#!_-]{8,}", max_matches=30)
+grep(pattern="origins\s+['\*]|origins\s*['\"]?\*['\"]?", max_matches=15)
 ```
 
-Also name-scoped:
+**Go (gin-contrib/cors, net/http):**
 ```
-grep(pattern="SECRET\s*:-|KEY\s*:-|PASSWORD\s*:-|TOKEN\s*:-|PASS\s*:-|CREDENTIAL\s*:-|SIGNING\s*:-", max_matches=20)
-```
-
-**Python (PyJWT literal):**
-```
-grep(pattern="jwt\.encode\([^,]+,\s*['\"][^'\"]{8,}['\"]|SECRET_KEY\s*=\s*['\"][^'\"]{8,}['\"]", max_matches=15)
+grep(pattern="AllowOrigins\s*:\s*\[\]string\{[^}]*\*[^}]*\}|AllowAllOrigins\s*:\s*true", max_matches=15)
 ```
 
-**JavaScript (jwt / express-jwt literal):**
+**Kotlin (Ktor):**
 ```
-grep(pattern="jwt\.sign\([^,]+,\s*['\"][^'\"]{8,}['\"]|express-jwt.*secret.*['\"][^'\"]{8,}['\"]|secretOrKey\s*:\s*['\"][^'\"]{8,}['\"]", max_matches=15)
-```
-
-**Java (HMAC literal):**
-```
-grep(pattern="HMAC256\(['\"][^'\"]{8,}['\"]|HMAC384\(['\"][^'\"]{8,}['\"]|HMAC512\(['\"][^'\"]{8,}['\"]", max_matches=15)
+grep(pattern="allowHost\s*\(\s*['\"]?\*['\"]?\)|anyHost\s*\(\s*\)|allowCredentials\s*=\s*true.*anyHost", max_matches=15)
 ```
 
-**C# (SymmetricSecurityKey literal):**
-```
-grep(pattern="SymmetricSecurityKey\(Encoding\.[^.]+\.GetBytes\(['\"][^'\"]{8,}['\"]", max_matches=15)
-```
+For each match: is `allowCredentials` / `allow_credentials` also set? CORS wildcard + credentials = full account takeover.
 
-Any non-empty literal after `:-` in a deployment config means that literal is the production secret when the env var is unset.
-
-**C — Credential with hardcoded fallback**:
-→ Submit per credential: violated_invariant="[credential] in [file] has a non-empty literal fallback; any deployment without explicit env vars uses this known value — forging tokens or DB access is trivial", severity=9, confidence=7, exposure="internet"
+→ Submit: violated_invariant="CORS allows all origins [+credentials if set]; attacker site can make credentialed requests as any logged-in user", severity=9, confidence=8, exposure="internet"
 
 ---
 
-## Step 4 — Credential file committed to repository (not in .gitignore)
+## Step 2 — Weak session cookie configuration
 
+**Python (Django):**
 ```
-grep(pattern="\.env\.local|\.env\.dev|\.env\.development|\.env\.staging|env\.local|secrets\.json|credentials\.json|\.env\.test", max_matches=10)
-```
-
-For each file found that is NOT `.gitignore` itself: check `.gitignore`:
-```
-grep(pattern="env\.local|\.env\.local|secrets\.json|credentials|\.env\.dev", file_glob=".gitignore", max_matches=5)
+grep(pattern="SESSION_COOKIE_SECURE\s*=\s*False|SESSION_COOKIE_HTTPONLY\s*=\s*False|SESSION_COOKIE_SAMESITE\s*=\s*None|CSRF_COOKIE_SECURE\s*=\s*False", max_matches=20)
 ```
 
-**D — Credential file not gitignored**:
-→ Submit: violated_invariant="[filename] contains plaintext credentials and is not in .gitignore; secrets are in version control history accessible to anyone with repo read access", severity=8, confidence=7, exposure="internet"
+**JavaScript / TypeScript (express-session, cookie options):**
+```
+grep(pattern="httpOnly\s*:\s*false|secure\s*:\s*false.*cookie|sameSite\s*:\s*['\"]none['\"].*secure\s*:\s*false", max_matches=20)
+```
+
+**PHP (session.cookie_secure):**
+```
+grep(pattern="session\.cookie_secure\s*=\s*0|session\.cookie_httponly\s*=\s*0|setcookie\(.*false.*false", max_matches=15)
+```
+
+**Java (Spring Boot):**
+```
+grep(pattern="cookie-http-only\s*:\s*false|cookie-secure\s*:\s*false|setCookieHttpOnly\s*\(\s*false\s*\)|setCookieSecure\s*\(\s*false\s*\)", max_matches=15)
+```
+
+**Ruby (Rails):**
+```
+grep(pattern="config\.session_store.*httponly.*false|http_only\s*:\s*false|secure\s*:\s*false.*session", max_matches=15)
+```
+
+For each match: is this in production config, not a test/dev environment?
+
+→ Submit: violated_invariant="session cookie [flag] disabled; cookie exposed to [JS/plaintext/cross-site] requests", severity=7, confidence=7, exposure="internet"
 
 ---
 
-## Step 5 — Internal service exposed on all network interfaces
+## Step 3 — Missing security headers
 
-**Docker Compose port mappings without host IP binding:**
+**CSP with unsafe-inline or unsafe-eval:**
 ```
-grep(pattern="\"[0-9]{2,5}:[0-9]{2,5}\"|'[0-9]{2,5}:[0-9]{2,5}'", max_matches=30)
+grep(pattern="['\"]unsafe-inline['\"]|['\"]unsafe-eval['\"]|script-src\s+['\*]|Content-Security-Policy.*\*", max_matches=20)
 ```
 
-For each match in a docker-compose or deployment config: does it specify a host IP (`127.0.0.1:5432:5432`) or is it bare (`5432:5432`)? Without a host IP, the port binds to `0.0.0.0`.
+**X-Frame-Options allowing framing:**
+```
+grep(pattern="X-Frame-Options.*ALLOW|X-Frame-Options.*ALLOWALL|frame-ancestors\s+['\*]", max_matches=15)
+```
 
-**E — Internal service on all interfaces**:
-→ Submit per service: violated_invariant="[service] port mapped without host IP binding; port bound to 0.0.0.0 and directly reachable from the internet on any cloud host", severity=8, confidence=7, exposure="internet"
+**HSTS with short max-age or disabled:**
+```
+grep(pattern="Strict-Transport-Security.*max-age=0|hsts.*false|includeSubDomains.*false", max_matches=15)
+```
+
+For each match: verify the header is set on the HTTP response (not just defined as a string constant).
+
+→ Submit: violated_invariant="security header [header] misconfigured; enables [clickjacking/XSS/downgrade attack]", severity=6, confidence=6, exposure="internet"
 
 ---
 
-## Step 6 — Development server in production startup command
+## Step 4 — Development server in production
 
-**Python (Django/Flask):**
+**Python (Flask/FastAPI/Uvicorn):**
 ```
-grep(pattern="manage\.py runserver|flask run|flask.*--debug|uvicorn.*--reload|python -m flask", max_matches=20)
-```
-
-**JavaScript / Node:**
-```
-grep(pattern="npm run dev|yarn dev|nodemon|node.*--inspect|ts-node-dev", max_matches=20)
+grep(pattern="app\.run\(.*debug\s*=\s*True|uvicorn\.run\(.*reload\s*=\s*True|DEBUG\s*=\s*True", max_matches=20)
 ```
 
-**Java (Spring Boot / Maven):**
+**JavaScript / TypeScript (Node hot reload, nodemon):**
 ```
-grep(pattern="mvn spring-boot:run|./mvnw spring-boot:run|gradle bootRun|java.*-jar.*SNAPSHOT", max_matches=15)
+grep(pattern="nodemon|webpack.*hot|HMR|__DEV__|NODE_ENV.*development.*require", max_matches=20)
 ```
 
-**Go:**
+**Go (Gin debug mode):**
 ```
-grep(pattern="go run main|go run \.", max_matches=15)
+grep(pattern="gin\.SetMode\s*\(\s*gin\.DebugMode\s*\)|gin\.Default\s*\(\s*\).*DEBUG", max_matches=15)
+```
+
+**Java (Spring dev tools in prod):**
+```
+grep(pattern="spring-boot-devtools|spring\.devtools\.restart\.enabled\s*=\s*true", max_matches=15)
+```
+
+**Ruby (Rails development config loaded):**
+```
+grep(pattern="config\.consider_all_requests_local\s*=\s*true|config\.cache_classes\s*=\s*false", max_matches=15)
 ```
 
 **PHP:**
 ```
-grep(pattern="php -S |php artisan serve", max_matches=15)
+grep(pattern="display_errors\s*=\s*(On|1)|error_reporting\s*=\s*E_ALL", max_matches=15)
 ```
 
-**Ruby:**
+**.NET (web.config):**
 ```
-grep(pattern="rails server|rails s|rackup|puma.*development|bundle exec rails", max_matches=15)
-```
-
-**C# / .NET:**
-```
-grep(pattern="dotnet watch|dotnet run.*Development|ASPNETCORE_ENVIRONMENT.*Development", max_matches=15)
+grep(pattern="<compilation\s+debug\s*=\s*['\"]true['\"]|<customErrors\s+mode\s*=\s*['\"]Off['\"]", max_matches=15)
 ```
 
-If found in a deployment file (Dockerfile, docker-compose.yml, Procfile, supervisord.conf, Kubernetes command field):
+For each match: confirm this is not guarded by `if os.environ.get('ENV') == 'development'` or equivalent.
 
-**F — Dev server in production**:
-→ Submit: violated_invariant="application container starts with a development server command; dev servers are single-threaded, expose debug pages, and are not production-safe", severity=6, confidence=7, exposure="internet"
+→ Submit: violated_invariant="development server mode enabled in production; stack traces/internals exposed to all clients", severity=7, confidence=6, exposure="internet"
+
+---
+
+## Step 5 — Rate limiting absent on auth endpoints
+
+```
+grep(pattern="@(app|router)\.(post|get)\(.*['\"][/]?(api/)?login|@(app|router)\.(post|get)\(.*['\"][/]?(api/)?register|@(app|router)\.(post|get)\(.*['\"][/]?(api/)?password", max_matches=30)
+```
+
+For each match: is there a rate limiter decorator/middleware between the route definition and the handler? Look for `@limiter.limit`, `RateLimit`, `throttle`, `slowDown`, `express-rate-limit`.
+
+→ Submit: violated_invariant="authentication endpoint [path] has no rate limiting; brute-force/credential stuffing at full request rate", severity=7, confidence=6, exposure="internet"
+
+---
+
+## Step 6 — Weak or default TLS configuration
+
+**Python (ssl minimum version):**
+```
+grep(pattern="ssl\.PROTOCOL_TLSv1\b|ssl\.PROTOCOL_SSLv2|ssl\.PROTOCOL_SSLv3|SSLContext\(ssl\.PROTOCOL_TLS\b", max_matches=15)
+```
+
+**Go (weak cipher suites):**
+```
+grep(pattern="tls\.TLS_RSA_WITH_RC4|tls\.TLS_RSA_WITH_3DES|tls\.TLS_ECDHE.*RC4|tls\.TLS_ECDHE.*3DES|MinVersion\s*:\s*tls\.VersionTLS10", max_matches=15)
+```
+
+**Java (SSLv3 / TLSv1.0 enabled):**
+```
+grep(pattern="SSLContext\.getInstance\(['\"]SSL['\"]|SSLContext\.getInstance\(['\"]TLSv1['\"]|setEnabledProtocols.*SSLv3|setEnabledProtocols.*TLSv1\b", max_matches=15)
+```
+
+**C# (.NET):**
+```
+grep(pattern="SecurityProtocolType\.Ssl3|SecurityProtocolType\.Tls\b|SslProtocols\.Tls\b|SslProtocols\.Ssl3", max_matches=15)
+```
+
+→ Submit: violated_invariant="TLS configured with deprecated protocol [proto] or weak cipher suite; downgrade attack possible", severity=7, confidence=7, exposure="internet"
 
 ---
 
