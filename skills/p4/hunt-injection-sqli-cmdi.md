@@ -222,6 +222,67 @@ grep(pattern="Process\.Start\s*\(.*\+|Process\.Start\s*\(.*string\.Format|Manage
 
 ---
 
+## Step 13 — Command injection: Rust (Actix-web / Rocket / Hyper)
+
+**Actix / Rocket — Command::new with user param:**
+```
+grep(pattern="std::process::Command::new\s*\(|Command::new\s*\(.*\).*\.arg\s*\(|Command::new\s*\(.*\).*\.args\s*\(", max_matches=20)
+```
+
+```
+grep(pattern="Command::new\s*\(['\"]sh['\"]|Command::new\s*\(['\"]bash['\"]|Command::new\s*\(['\"]cmd['\"]", max_matches=15)
+```
+
+For each `Command::new`: trace the argument chain. Is any `.arg()` or `.args()` value derived from `web::Query`, `web::Path`, `web::Json`, or `req.match_info()`? Rust does not automatically sanitize — untrusted args reach the process directly.
+
+→ Submit: violated_invariant="std::process::Command receives user-controlled argument; RCE without shell interpretation still runs attacker-chosen binary/flags", severity=10, confidence=8, exposure="internet"
+
+---
+
+## Step 14 — Command injection: Ruby (shell delegation)
+
+```
+grep(pattern="system\s*\(.*params\[|`[^`]*#\{.*params|exec\s*\(.*params\[|Open3\.popen3\s*\(.*params\[", max_matches=20)
+```
+
+```
+grep(pattern="%x\{[^}]*#\{|Kernel\.system\s*\(.*params|Kernel\.exec\s*\(.*params|spawn\s*\(.*params\[", max_matches=20)
+```
+
+→ Submit: violated_invariant="Ruby system/exec/backtick receives user params; RCE via shell metacharacter injection", severity=10, confidence=8, exposure="internet"
+
+---
+
+## Step 15 — SQL injection: Kotlin (JPA / Spring JDBC)
+
+```
+grep(pattern="createNativeQuery\s*\([^\"'][^)]*\+|createQuery\s*\([^\"'][^)]*\+|\.query\s*\([^\"'][^)]*\+", max_matches=20)
+```
+
+```
+grep(pattern="jdbcTemplate\.\w+\s*\([^,]*\+.*,|JdbcOperations\.\w+\s*\([^,]*\+", max_matches=15)
+```
+
+→ Submit: violated_invariant="Kotlin JPA/JdbcTemplate query built with string concat from user input; SQL injection", severity=10, confidence=8, exposure="internet"
+
+---
+
+## Step 16 — SQL injection: Scala (Slick / Doobie / JDBC)
+
+```
+grep(pattern="sql\"[^\"]*\$\{|sql\"[^\"]*\+|Fragment\.const\s*\(.*\+", max_matches=20)
+```
+
+```
+grep(pattern="createNativeQuery\s*\([^\"'][^)]*\+|createQuery\s*\([^\"'][^)]*\+|statement\.execute\s*\(.*\+", max_matches=15)
+```
+
+For `sql"..."` interpolation: only `${fr}` / `${param}` typed fragments are safe; raw `${}` with string variables is vulnerable.
+
+→ Submit: violated_invariant="Scala raw SQL interpolation with untyped string variable; SQL injection", severity=10, confidence=8, exposure="internet"
+
+---
+
 ## Finish
 
 Call `finish()` now with all hypotheses collected. Do not skip this.

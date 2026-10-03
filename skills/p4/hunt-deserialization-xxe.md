@@ -202,6 +202,60 @@ grep(pattern="\\\$XMLFACTORY\.setProperty\s*\(.*isSupportingExternalEntities.*tr
 
 ---
 
+## Step 12 — XXE: Swift (XMLParser / XMLDocument)
+
+```
+grep(pattern="shouldResolveExternalEntities\s*=\s*true", max_matches=15)
+```
+
+```
+grep(pattern="XMLParser\s*\(|XMLDocument\s*\(.*url|NSXMLDocument\s*\(", max_matches=20)
+```
+
+For each `XMLParser` init: check if `shouldResolveExternalEntities` is set to `false` immediately after. Default value allows external entities — any `XMLParser` without explicit `false` is vulnerable when parsing untrusted XML.
+
+→ Submit: violated_invariant="Swift XMLParser allows external entity resolution; XXE reads local files or triggers SSRF", severity=9, confidence=7, exposure="internet"
+
+---
+
+## Step 13 — Unsafe deserialization: Kotlin (Android / backend)
+
+**Native Java ObjectInputStream:**
+```
+grep(pattern="ObjectInputStream\s*\(|readObject\s*\(\s*\)", max_matches=20)
+```
+
+**Jackson enableDefaultTyping (same as Java):**
+```
+grep(pattern="enableDefaultTyping\s*\(|activateDefaultTyping\s*\(|ObjectMapper\(\)\.enable\s*\(MapperFeature", max_matches=15)
+```
+
+For each: trace the constructor argument — is it a network stream, user upload, or Redis/DB-loaded byte[]? ValidatingObjectInputStream with an explicit allowlist is safe.
+
+→ Submit: violated_invariant="Kotlin ObjectInputStream deserializes attacker-controlled bytes; gadget chains lead to RCE", severity=10, confidence=8, exposure="internet"
+
+---
+
+## Step 14 — Unsafe deserialization: Go (encoding/gob, json.Unmarshal to interface{})
+
+```
+grep(pattern="gob\.NewDecoder\s*\(|gob\.Decode\s*\(", max_matches=15)
+```
+
+```
+grep(pattern="json\.Unmarshal\s*\([^,]+,\s*&\w+Interface\|json\.Unmarshal\s*\([^,]+,\s*&interface", max_matches=15)
+```
+
+```
+grep(pattern="yaml\.Unmarshal\s*\([^,]+,\s*&\w+\)|xml\.Unmarshal\s*\([^,]+,\s*&\w+\)", max_matches=20)
+```
+
+For each: is the source `r.Body`, a user-uploaded file, or a Redis/Kafka message with attacker-controlled content? Go's standard library is generally safe against RCE, but `gob` with complex types can expose memory corruption.
+
+→ Submit: violated_invariant="Go gob.Decode on untrusted data; gob encoding trusts type information in the stream", severity=7, confidence=6, exposure="internet"
+
+---
+
 ## Finish
 
 Call `finish()` now with all hypotheses collected. Do not skip this.
