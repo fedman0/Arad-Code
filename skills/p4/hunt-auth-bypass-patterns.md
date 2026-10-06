@@ -259,12 +259,17 @@ For each match: is this in a real config/main file, not a test fixture or exampl
 grep(pattern="request\\.headers\\.get\\(['\"]X-|req\\.headers\\[['\"]X-|request\\.META\\.get\\(['\"]HTTP_X_|r\\.Header\\.Get\\(['\"]X-|request\\.getHeader\\(['\"]X-|\\$_SERVER\\[['\"]HTTP_X_", max_matches=30)
 ```
 
-For each match: does the function return `True`/`authorized`/`nil` based ONLY on the header value, with no cryptographic check or DB lookup?
+For each match: `get_code_snippet("containing_function")` to read the full function body.
+
+**Verify**:
+- Function returns `True`/`authorized`/`nil` based ONLY on the header value — no HMAC check, no DB lookup, no cryptographic comparison? → **SUBMIT**
+- Header value is verified against a DB record or a cryptographic secret (HMAC, signed token) → **SKIP**
 
 ```
-if header_value == "secret": return True         # instant bypass
-if header is not None: return True               # presence-only
-if (req.headers["X-Internal"] != null) allow()  # Java presence
+if header_value == "secret": return True         # instant bypass — SUBMIT
+if header is not None: return True               # presence-only — SUBMIT
+if (req.headers["X-Internal"] != null) allow()  # Java presence — SUBMIT
+if HMAC(header, secret_key) == expected: allow()  # cryptographic check — SKIP
 ```
 
 → Submit: violated_invariant="authorization decision made from caller-controlled request header alone; any caller sets the header to gain access", severity=10, confidence=7, exposure="internet"
@@ -277,9 +282,14 @@ if (req.headers["X-Internal"] != null) allow()  # Java presence
 grep(pattern="#\\s*(if|raise|assert).*[Aa]uth|#\\s*verify|#\\s*@login_required|#\\s*@require|//\\s*isAuthenticated|//\\s*auth\\.required|//\\s*passport\\.authenticate|//\\s*@Secured|//\\s*@PreAuthorize|/\\*.*[Aa]uth.*\\*/", max_matches=20)
 ```
 
-For each match in a sensitive handler (payment, admin, transfer, account): is the commented line the only place an auth check would be enforced?
+For each match: `get_code_snippet("containing_function_or_handler")` to read the full handler and its surrounding context.
 
-→ Submit: violated_invariant="authorization check commented out; handler runs without verifying caller identity", severity=9, confidence=7, exposure="authenticated"
+**Verify**:
+1. Is this handler for a sensitive operation (payment, admin, transfer, account, delete, update)? → **CONTINUE**
+2. Is the commented line the ONLY auth check? No decorator (`@login_required`, `@Secured`), no middleware call, no `request.user.is_authenticated` guard anywhere in the function → **SUBMIT**
+3. Auth is enforced by a decorator on the function or a middleware group in route registration → **SKIP**
+
+→ Submit: violated_invariant="authorization check commented out with no other enforcement; handler runs without verifying caller identity", severity=9, confidence=7, exposure="authenticated"
 
 ---
 
@@ -289,7 +299,12 @@ For each match in a sensitive handler (payment, admin, transfer, account): is th
 grep(pattern="inject.*[Aa]uth|[Aa]uth.*[Ii]nject|bypass.*[Aa]uth|skip.*[Aa]uth|TEST.*AUTH|TESTING.*=.*true.*auth|set.*Authorization.*header.*test|mock.*user.*auth", max_matches=20)
 ```
 
-For each match: what env var activates it? Can `TESTING=true`, `LOCAL=1`, or `NODE_ENV=test` be set on staging?
+For each match: `get_code_snippet("containing_function_or_module")` to read the full activation logic.
+
+**Verify**:
+- What env var activates it? Is it `TESTING=true`, `LOCAL=1`, `NODE_ENV=test`, `DEBUG=True`, or similar non-exclusive flag? These CAN be set in staging/prod environments → **SUBMIT**
+- Activation gated by a deploy-time secret or a production-exclusive mechanism (e.g., a cryptographic service account check) → **SKIP**
+- Env var is explicitly blocked in production deploy configs (checked against deploy scripts/IaC) → **SKIP**
 
 → Submit: violated_invariant="auth injection middleware activates on non-production-exclusive env var; all requests become pre-authenticated when variable is set", severity=8, confidence=7, exposure="internet"
 

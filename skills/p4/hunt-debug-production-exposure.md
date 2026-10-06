@@ -2,7 +2,23 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Read the file/config context before submitting — a debug flag in a dev config file is not a finding.
+
+---
+
+## CONFIG VERIFICATION PROTOCOL — run for every match before submitting
+
+For each grep match:
+
+**a.** `sqz_read_file("matched_file")` or `get_code_snippet("match_location")` — read the full config/handler context.
+
+**b.** Confirm production scope:
+- File is in `config/dev/`, `*test*`, `*development*`, `local_settings.py`, `test.yml`, `docker-compose.dev.yml` → **SKIP** (dev-only file)
+- File is `production.py`, `application.yml`, `application.properties`, `.env`, `config.py`, `app.py`, `web.config`, or any non-environment-gated file → **CONTINUE**
+
+**c.** Check for conditional override:
+- Setting is guarded by `if env != 'production'`, `if NODE_ENV === 'development'`, `if os.getenv('ENV') == 'development'` → **SKIP**
+- Setting is unconditional or defaults to unsafe value with no production override → **SUBMIT**
 
 ---
 
@@ -69,7 +85,13 @@ grep(pattern="management\.endpoints\.web\.exposure\.include\s*=\s*\*|management\
 grep(pattern="@Bean.*ManagementContextConfiguration|EndpointWebMvcAutoConfiguration", max_matches=15)
 ```
 
-For each match: is the actuator bound to the same port as the app with no authentication? Check for `management.server.port`, `spring.security.user.name` / `spring.security.user.password`.
+For each match: `sqz_read_file("application.properties")` or `sqz_read_file("application.yml")` to read the full config.
+
+**Verify**:
+- `management.server.port` set to a DIFFERENT port than main app AND that port is not internet-exposed → lower severity; if port is exposed → **SUBMIT**
+- `management.server.port` absent (defaults to same port as app) → **CONTINUE**
+- `spring.security.user.name` / `spring.security.user.password` or Spring Security configured with actuator auth → **SKIP**
+- No auth configuration, same port as main app → **SUBMIT**
 
 → Submit: violated_invariant="Spring Actuator exposes all endpoints including /env, /heapdump, /shutdown with no authentication", severity=9, confidence=7, exposure="internet"
 
@@ -136,7 +158,12 @@ grep(pattern="return.*str\s*\(\s*e\s*\)|return.*traceback|JsonResponse.*exceptio
 grep(pattern="e\.printStackTrace\s*\(\s*\)|\.printStackTrace\s*\(\s*response|\.fillInStackTrace", max_matches=20)
 ```
 
-For each match: is the exception detail returned in the HTTP body to the caller, not just logged server-side?
+For each match: `get_code_snippet("containing_handler")` to read the full exception handler.
+
+**Verify**:
+- `str(e)`, `traceback`, `err`, or `e.getMessage()` is written directly to the HTTP response body (`return JsonResponse(...)`, `res.send(err)`, `res.json({error: err})`) → **SUBMIT**
+- The exception is only `logger.error(e)` or written to a log file, not the response → **SKIP**
+- The response returns a generic message (`{"error": "Internal server error"}`) with details only in logs → **SKIP**
 
 → Submit: violated_invariant="exception detail (stack trace/message) returned in HTTP response body; leaks internal paths, library versions, SQL queries", severity=6, confidence=6, exposure="internet"
 
@@ -148,7 +175,12 @@ For each match: is the exception detail returned in the HTTP body to the caller,
 grep(pattern="['\"][/]debug['\"|/]|['\"][/]admin['\"|/]|['\"][/]_debug['\"|/]|['\"][/]phpinfo|['\"][/]server-status|['\"][/]metrics['\"|/]", max_matches=25)
 ```
 
-For each match: does this route have auth middleware applied? Check for `@login_required`, `passport.authenticate`, `[Authorize]`, `authRequired`.
+For each match: `get_code_snippet("containing_handler_or_route_registration")` to read the route definition and handler.
+
+**Verify**:
+- No auth decorator (`@login_required`, `@Secured`, `[Authorize]`), no middleware argument (`passport.authenticate`, `requireAuth`, `authRequired`), and not inside an auth-required router group → **SUBMIT**
+- Auth enforced by a global middleware (e.g., `app.before_request` always checks auth) → check if this route is excluded via an allowlist; if excluded → **SUBMIT**; if covered → **SKIP**
+- Auth is present → **SKIP**
 
 → Submit: violated_invariant="debug/admin endpoint [path] accessible without authentication", severity=8, confidence=6, exposure="internet"
 

@@ -86,7 +86,12 @@ grep(pattern="cookie-http-only\s*:\s*false|cookie-secure\s*:\s*false|setCookieHt
 grep(pattern="config\.session_store.*httponly.*false|http_only\s*:\s*false|secure\s*:\s*false.*session", max_matches=15)
 ```
 
-For each match: is this in production config, not a test/dev environment?
+For each match: `sqz_read_file("matched_file")` to read the full config context.
+
+**Verify**:
+- File is `production.py`, `settings.py` (non-dev), `application.yml`, `application.properties`, or `.env` without a surrounding dev-guard → **SUBMIT**
+- File is `settings/dev.py`, `local_settings.py`, `docker-compose.dev.yml`, `test_settings.py` → **SKIP**
+- Setting is inside `if DEBUG:` or `if os.getenv('ENV') == 'development':` block → **SKIP**
 
 → Submit: violated_invariant="session cookie [flag] disabled; cookie exposed to [JS/plaintext/cross-site] requests", severity=7, confidence=7, exposure="internet"
 
@@ -109,7 +114,13 @@ grep(pattern="X-Frame-Options.*ALLOW|X-Frame-Options.*ALLOWALL|frame-ancestors\s
 grep(pattern="Strict-Transport-Security.*max-age=0|hsts.*false|includeSubDomains.*false", max_matches=15)
 ```
 
-For each match: verify the header is set on the HTTP response (not just defined as a string constant).
+For each match: `get_code_snippet("containing_function_or_middleware")` to read the context.
+
+**Verify**:
+- The `unsafe-inline`/`unsafe-eval`/`*` value is part of an actual HTTP response header assignment or middleware config (not a string constant in a comment or docs) → **CONTINUE**
+- The header value is set conditionally only for dev mode → **SKIP**
+- The header is set on the response object (`response.headers[...]`, `res.setHeader(...)`, middleware `app.use(helmet(...))`) → **SUBMIT**
+- It is only a string constant assigned to a variable but never sent in a response → **SKIP**
 
 → Submit: violated_invariant="security header [header] misconfigured; enables [clickjacking/XSS/downgrade attack]", severity=6, confidence=6, exposure="internet"
 
@@ -152,7 +163,12 @@ grep(pattern="display_errors\s*=\s*(On|1)|error_reporting\s*=\s*E_ALL", max_matc
 grep(pattern="<compilation\s+debug\s*=\s*['\"]true['\"]|<customErrors\s+mode\s*=\s*['\"]Off['\"]", max_matches=15)
 ```
 
-For each match: confirm this is not guarded by `if os.environ.get('ENV') == 'development'` or equivalent.
+For each match: `sqz_read_file("matched_file")` to read the full file.
+
+**Verify**:
+- Setting is unconditional or at module level with no env-guard → **SUBMIT**
+- Setting is inside `if os.environ.get('ENV') == 'development':`, `if NODE_ENV === 'development':`, or similar production-exclusive guard → **SKIP**
+- Setting is in a dev-only file (`docker-compose.dev.yml`, `config/dev/`, `nodemon.json`) → **SKIP**
 
 → Submit: violated_invariant="development server mode enabled in production; stack traces/internals exposed to all clients", severity=7, confidence=6, exposure="internet"
 
@@ -164,7 +180,12 @@ For each match: confirm this is not guarded by `if os.environ.get('ENV') == 'dev
 grep(pattern="@(app|router)\.(post|get)\(.*['\"][/]?(api/)?login|@(app|router)\.(post|get)\(.*['\"][/]?(api/)?register|@(app|router)\.(post|get)\(.*['\"][/]?(api/)?password", max_matches=30)
 ```
 
-For each match: is there a rate limiter decorator/middleware between the route definition and the handler? Look for `@limiter.limit`, `RateLimit`, `throttle`, `slowDown`, `express-rate-limit`.
+For each match: `get_code_snippet("containing_route_handler")` to read the full route definition.
+
+**Verify**:
+- No `@limiter.limit(...)`, no `rateLimit({...})` middleware argument, no `throttle(...)`, no `slowDown(...)`, no `express-rate-limit` applied to this route or its router group → **SUBMIT**
+- Rate limiter is applied globally to all routes via `app.use(rateLimit(...))` → check if auth routes are covered; if covered → **SKIP**
+- Rate limiter decorator or middleware IS present on this route → **SKIP**
 
 → Submit: violated_invariant="authentication endpoint [path] has no rate limiting; brute-force/credential stuffing at full request rate", severity=7, confidence=6, exposure="internet"
 

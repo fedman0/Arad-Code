@@ -58,7 +58,12 @@ grep(pattern="CC_MD5\s*\(|CC_SHA1\s*\(|kCCHmacAlgMD5|kCCHmacAlgSHA1", max_matche
 grep(pattern="md5::compute\s*\(|sha1::Sha1::new\s*\(\s*\)|sha1::digest", max_matches=15)
 ```
 
-For each match: is the hash used for security-sensitive purpose (password hashing, HMAC, digital signature, integrity check)? MD5/SHA-1 for checksums on non-security data is lower severity. Password hashing with MD5 = critical.
+For each match: `get_code_snippet("containing_function")` to read the full function body and identify what the hash result is used for.
+
+**Verify**:
+- Hash output used to compare against a stored password, sign a token, check file integrity for security purposes, generate a CSRF token, or derive a key → **SUBMIT** (severity=8–9 depending on purpose; password hashing = critical severity=9)
+- Hash output used only for content-addressable storage, non-security deduplication, ETag generation, or cache keys → **SKIP** (not a security finding)
+- Unclear → `trace_path("function_name", mode="data_flow")` downstream to see where the digest value is consumed
 
 → Submit: violated_invariant="[MD5/SHA-1] used for [purpose]; collision attacks produce forged data / rainbow tables crack passwords in seconds", severity=8, confidence=7, exposure="internet"
 
@@ -124,21 +129,26 @@ For each match: is this encrypting session tokens, passwords, PII, or keys? DES 
 grep(pattern="random\.random\s*\(\s*\)|random\.randint\s*\(|random\.choice\s*\(|random\.shuffle\s*\(|random\.sample\s*\(", max_matches=20)
 ```
 
-For each match: is the value used for tokens, session IDs, OTPs, CSRF tokens, password reset links, or any security-sensitive purpose? `random` is predictable from seed.
+For each match: `get_code_snippet("containing_function")` to read the full function body and trace where the random value goes.
+
+**Verify** — the random value must reach a security-sensitive destination:
+- Assigned to a session token, password reset link, OTP, CSRF token, nonce, API key, UUID used as a secret → **SUBMIT**
+- Used only for load balancing, random delays, test data generation, non-security shuffling → **SKIP**
+- Unclear → `trace_path("function_name", mode="data_flow")` downstream to find the consumer
 
 **JavaScript (Math.random for tokens):**
 ```
 grep(pattern="Math\.random\s*\(\s*\)", max_matches=20)
 ```
 
-For each match: is the output used to generate tokens, nonces, UUIDs, or secrets?
+For each match: `get_code_snippet("containing_function")` — is the output used to generate tokens, nonces, UUIDs, or secrets? → **SUBMIT** if yes, **SKIP** if used for UI randomness or non-security purposes.
 
 **PHP (rand / mt_rand):**
 ```
 grep(pattern="rand\s*\(\s*\)|mt_rand\s*\(|shuffle\s*\(", max_matches=20)
 ```
 
-For each match: is the value used in a security context?
+For each match: `get_code_snippet("containing_function")` — is the value used in a security context? → **SUBMIT** if yes.
 
 Safe signal: `secrets.token_hex`, `crypto.randomBytes`, `openssl_random_pseudo_bytes`, `SecureRandom`.
 
@@ -199,7 +209,12 @@ grep(pattern="createHash\s*\(['\"]md5['\"].*password|createHash\s*\(['\"]sha1['\
 grep(pattern="MessageDigest\.getInstance\s*\(['\"]SHA-256['\"].*password|MessageDigest\.getInstance\s*\(['\"]MD5['\"].*password", max_matches=15)
 ```
 
-For each match: is the hash a raw digest without salt, PBKDF2, bcrypt, scrypt, or argon2?
+For each match: `get_code_snippet("containing_function")` to read the full password hashing call.
+
+**Verify**:
+- Hash is a raw `hexdigest()` / `digest()` with no salt argument and no KDF wrapping → **SUBMIT** (severity=9)
+- Hash is wrapped in PBKDF2, bcrypt, scrypt, or argon2 → **SKIP**
+- A salt is manually prepended/appended (e.g., `md5(salt + password)`) → still **SUBMIT** — unsalted KDF schemes are offline-crackable with precomputed tables
 
 → Submit: violated_invariant="Password hashed with [MD5/SHA-1/SHA-256 without KDF]; rainbow table / GPU cracking trivially recovers passwords", severity=9, confidence=8, exposure="internet"
 
