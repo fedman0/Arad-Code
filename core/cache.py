@@ -135,9 +135,8 @@ def mark_skill_done(repo_path: str, commit: str, skill_name: str) -> None:
     if not commit:
         return
     state = load_run_state(repo_path)
-    wt_hash = _working_tree_hash(repo_path)
-    if state.get("commit") != commit or state.get("wt_hash", "") != wt_hash:
-        state = {"commit": commit, "wt_hash": wt_hash, "completed": []}
+    if state.get("commit") != commit:
+        state = {"commit": commit, "completed": []}
     completed = state.setdefault("completed", [])
     if skill_name not in completed:
         completed.append(skill_name)
@@ -148,17 +147,12 @@ def mark_skill_done(repo_path: str, commit: str, skill_name: str) -> None:
 def completed_skills(repo_path: str, commit: str) -> set[str]:
     """Skills already finished at this commit; a different commit invalidates all.
 
-    An empty commit means the target is not a git repo, so there is nothing to
-    invalidate against — resuming would skip skills no matter how the files
-    changed, so nothing is ever resumable.
-
-    A dirty working tree (uncommitted edits) also invalidates the cache so that
-    skills re-run after the developer changes code without committing.
+    An empty commit means the target is not a git repo — nothing is resumable.
+    Use --restart to force a full re-scan regardless of commit.
     """
     if not commit:
         return set()
     state = load_run_state(repo_path)
-    wt_hash = _working_tree_hash(repo_path)
-    if state.get("commit") != commit or state.get("wt_hash", "") != wt_hash:
+    if state.get("commit") != commit:
         return set()
     return set(state.get("completed", []))
