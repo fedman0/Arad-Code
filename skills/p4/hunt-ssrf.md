@@ -2,7 +2,31 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full enclosing function.
+
+**b.** Identify variable `URL` passed to the HTTP client call.
+
+**c.** Trace URL's origin:
+- Hardcoded string literal / config constant / env var → **SKIP**
+- User-supplied: `request.args/body/form/GET/POST/json/params`, path param, or header value → **CONTINUE**
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream until you find the source
+
+**d.** Check for URL validation between source and HTTP call:
+- Allowlist host check (`url.host in ALLOWED_HOSTS`, `startswith("https://api.example.com/")`) → **SKIP**
+- `urlparse(url).netloc == expected` comparison → **SKIP**
+- No host validation, or blocklist-only (bypassable via DNS rebinding / IPv6 / redirects) → **SUBMIT**
+
+**Submit only when confirmed**: name the function, the user-input variable, and the missing guard (e.g. `params["webhook_url"] flows into requests.get in process_webhook() with no host allowlist`).
+
+---
 
 ---
 

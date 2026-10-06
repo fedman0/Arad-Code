@@ -2,7 +2,32 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full route handler AND any middleware chain.
+
+**b.** Determine authorization coverage for this endpoint:
+- Framework-level auth middleware applied globally (e.g. `@app.before_request` → `require_login()`) — check if the endpoint is excluded → **may be OK**
+- Route-level decorator (`@login_required`, `@auth.login_required`, `@PreAuthorize(...)`) → **SKIP**
+- No auth decorator AND not covered by middleware → **CONTINUE**
+
+**c.** For IDOR specifically: check whether object retrieval uses the authenticated user's ID:
+- `Object.query.filter_by(id=id, owner=current_user.id)` — scoped to user → **SKIP**
+- `Object.query.filter_by(id=id)` — not scoped → **SUBMIT** (IDOR)
+
+**d.** For mass assignment: does the framework bind all request fields to the model including sensitive ones (admin, role, owner_id)?
+- Explicit field allowlist (`fields=["name", "email"]`) → **SKIP**
+- Bind-all without exclusion → **SUBMIT**
+
+**Submit only when confirmed**: name the route, the missing auth decorator/middleware, and the impact (e.g. `DELETE /api/posts/<id> in delete_post() has no @login_required — any anonymous caller can delete any post`).
+
+---
 
 ---
 

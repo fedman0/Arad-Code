@@ -2,7 +2,33 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full enclosing function.
+
+**b.** Identify variable `R` used as the redirect target / Location header value.
+
+**c.** Trace R's origin:
+- Hardcoded path / constant → **SKIP**
+- User-supplied: HTTP query param (`?next=`, `?returnUrl=`, `?redirect_uri=`), form field, referer header → **CONTINUE**
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+
+**d.** Check for redirect validation between source and redirect call:
+- `url_has_allowed_host_and_scheme(url, allowed_hosts)` (Django) → **SKIP**
+- `Url.IsLocalUrl(returnUrl)` (ASP.NET) → **SKIP**
+- `allow_other_host: false` (Rails 7+) → **SKIP** (but confirm Rails version)
+- `urlparse(url).netloc == ""` or `url.startswith("/")` — weak check, bypassable with `//evil.com` → **SUBMIT**
+- No validation → **SUBMIT**
+
+**Submit only when confirmed**: name function, parameter, and bypass proof (e.g. `GET ?next= flows into redirect() in login_view with no host check — //evil.com bypass works`).
+
+---
 
 ---
 

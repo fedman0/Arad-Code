@@ -2,7 +2,36 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full enclosing function.
+
+**b.** Identify variable `I` used as LDAP filter string / template string.
+
+**c.** Trace I's origin:
+- Hardcoded literal / config constant → **SKIP**
+- User-supplied: HTTP param, request body, path variable, session value set by user → **CONTINUE**
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+
+**d. For LDAP injection:**
+- `ldap3.utils.conv.escape_filter_chars(I)` applied → **SKIP**
+- `LdapQueryBuilder` with type-safe parameters → **SKIP**
+- Raw string concat or %-format → **SUBMIT**
+
+**d. For SSTI:**
+- Template string from hardcoded file / resource (not user data) → **SKIP**
+- Template string from user input with no sandbox → **SUBMIT immediately** (SSTI = RCE with Jinja2/ERB/Velocity/FreeMarker)
+- Template string with sandbox but data leakage possible → **SUBMIT** at lower severity
+
+**Submit only when confirmed**: name function, variable, and source (e.g. `request.form["template"] passed to Jinja2 Environment().from_string() in render_email() — RCE via {{''.__class__.__mro__}}`).
+
+---
 
 ---
 

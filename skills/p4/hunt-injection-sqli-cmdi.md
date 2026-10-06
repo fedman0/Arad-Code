@@ -2,7 +2,32 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full enclosing function.
+
+**b.** Identify variable `X` passed to the dangerous call (query string, command string, etc.).
+
+**c.** Trace X's origin:
+- String literal / constant / config file / env var → **SKIP** (not user-controlled)
+- HTTP source: `request.GET/POST/args/body/form/json/params`, URL path param, header, cookie → **CONTINUE**
+- Unclear → `trace_path("function_name", mode="data_flow")` to follow upstream until source is known
+
+**d.** Check for sanitization between source and sink:
+- Parameterized query (`cursor.execute("SELECT … WHERE id=%s", (user_id,))`) → **SKIP**
+- ORM query builder with bound parameters → **SKIP**
+- `shlex.quote()` / array args with no shell → **SKIP**
+- Raw string passed directly / `shell=True` → **SUBMIT**
+
+**Submit only when confirmed**: `violated_invariant` must name the specific function, variable, and source (e.g. `req.query.name flows through fmt.Sprintf into db.Query without parameterization in SearchHandler`).
+
+---
 
 ---
 

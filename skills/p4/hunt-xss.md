@@ -2,7 +2,32 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full enclosing function.
+
+**b.** Identify variable `V` assigned to the DOM sink / reflected in HTML response.
+
+**c.** Trace V's origin:
+- Hardcoded constant / static template string → **SKIP**
+- User-supplied: HTTP param, query string, form field, URL fragment, WebSocket message, API response that includes user-contributed content → **CONTINUE**
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+
+**d.** Check for output encoding between source and sink:
+- `htmlspecialchars($v, ENT_QUOTES)` / `HtmlEncode` / `html.EscapeString` → **SKIP**
+- DOMPurify.sanitize applied immediately before → **SKIP**
+- `mark_safe` / `html_safe` / `dangerouslySetInnerHTML` / `v-html` / `bypassSecurityTrust*` without sanitization → **SUBMIT**
+- Raw template interpolation without escaping → **SUBMIT**
+
+**Submit only when confirmed**: name function, variable, source (user input), and missing encoder (e.g. `req.query.name interpolated into res.send("<p>" + name + "</p>") in search() without htmlEncode`).
+
+---
 
 ---
 

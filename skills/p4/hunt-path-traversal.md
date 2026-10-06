@@ -2,7 +2,35 @@
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages
 
-Run grep, read context with `get_code_snippet`, submit immediately. 2 tool calls per step max.
+**grep = CANDIDATES only.** Never submit from a grep match alone.
+
+---
+
+## FLOW VERIFICATION PROTOCOL — run for every candidate before submitting
+
+For each grep match:
+
+**a.** `get_code_snippet("containing_function_or_class")` — read the full enclosing function.
+
+**b.** Identify variable `F` used as a path component (filename, directory, etc.).
+
+**c.** Trace F's origin:
+- Hardcoded literal / internal constant / config → **SKIP**
+- User-supplied: request param, query string, path variable, URL segment, form field → **CONTINUE**
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+
+**d.** Check for path sanitization after source:
+- `os.path.realpath(joined)` followed by `startswith(base_dir)` check → **SKIP**
+- `filepath.EvalSymlinks` + prefix check (Go) → **SKIP**
+- `Path.GetFullPath` + `StartsWith` (C#) → **SKIP**
+- `basename` only (strips directory but not dangerous enough) → **SUBMIT** (bypassable with null bytes in some languages)
+- No sanitization, `os.path.join` with absolute-path injection, `include`/`require` → **SUBMIT**
+
+**Critical**: `os.path.join("/base", "/etc/passwd")` returns `/etc/passwd` in Python — absolute path in second arg silently overrides base. Always flag this.
+
+**Submit only when confirmed**: name the function, the path variable, and proof it is user-controlled (e.g. `request.args["file"] reaches os.open via os.path.join in download_handler without realpath check`).
+
+---
 
 ---
 
