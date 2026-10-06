@@ -17,7 +17,7 @@ from textual.widgets import Footer, Header, Input, RichLog, Static, Tree
 
 from .rtl import rtl_markup as _rtlm
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 
 _SEV_ICON = {
     "critical": "[bright_red]■[/bright_red]",
@@ -834,7 +834,7 @@ class AradCodeApp(App):
         except asyncio.CancelledError:
             self._log("\n[yellow]Stopped.[/yellow] (resume with --resume)")
         except Exception as exc:
-            self._log(f"\n[red]Error:[/red] {exc}")
+            self._log(f"\n[red]Error:[/red] {_escape(str(exc))}")
 
     # ── Deps ──────────────────────────────────────────────────────────────────
 
@@ -878,7 +878,7 @@ class AradCodeApp(App):
         try:
             cfg, db, mcp, runner = self._make_deps()
         except ValueError as exc:
-            self._log(f"[red]Config error:[/red] {exc}")
+            self._log(f"[red]Config error:[/red] {_escape(str(exc))}")
             return
 
         repo = str(Path(repo_path).resolve())
@@ -967,7 +967,7 @@ class AradCodeApp(App):
         try:
             cfg, db, mcp, runner = self._make_deps()
         except ValueError as exc:
-            self._log(f"[red]Config error:[/red] {exc}")
+            self._log(f"[red]Config error:[/red] {_escape(str(exc))}")
             return
 
         repo = str(Path(repo_path).resolve())
@@ -1028,7 +1028,7 @@ class AradCodeApp(App):
         try:
             cfg, db, mcp, runner = self._make_deps()
         except ValueError as exc:
-            self._log(f"[red]Config error:[/red] {exc}")
+            self._log(f"[red]Config error:[/red] {_escape(str(exc))}")
             return
 
         self._last_repo = repo_path
@@ -1080,7 +1080,7 @@ class AradCodeApp(App):
         try:
             cfg, db, mcp, runner = self._make_deps()
         except ValueError as exc:
-            self._log(f"[red]Config error:[/red] {exc}")
+            self._log(f"[red]Config error:[/red] {_escape(str(exc))}")
             return
 
         self._log(f"[bold]Deep Research:[/bold] {question}")
