@@ -180,7 +180,7 @@ class WorkflowPanel(Static):
         root.remove_children()
         root.label = Text.from_markup(
             "[dim]Workflow[/dim]"
-            + (f"  [yellow]⟳ {self._model.current_tool}[/yellow]" if self._model.current_tool else "")
+            + (f"  [yellow]⟳ {_escape(self._model.current_tool)}[/yellow]" if self._model.current_tool else "")
         )
         for phase in self._model.phases:
             elapsed_text = f"  [dim]{phase.elapsed:.1f}s[/dim]" if phase.done else ""
@@ -192,22 +192,23 @@ class WorkflowPanel(Static):
             else:
                 icon = "[dim]○[/dim]"
             p_node = root.add(
-                Text.from_markup(f"{icon} {phase.title}{elapsed_text}"),
+                Text.from_markup(f"{icon} {_escape(phase.title)}{elapsed_text}"),
                 data={"type": "phase", "name": phase.name},
             )
             for agent in phase.agents:
+                lbl = _escape(agent.label)
                 if agent.error:
-                    a_text = f"[red]✗[/red] {agent.label}  [red dim]{agent.error[:45]}[/red dim]"
+                    a_text = f"[red]✗[/red] {lbl}  [red dim]{_escape(agent.error[:45])}[/red dim]"
                 elif agent.done:
                     f_count = f"  [cyan]{len(agent.findings)}f[/cyan]" if agent.findings else ""
-                    a_text = f"[green]✓[/green] {agent.label}  [dim]{agent.elapsed:.1f}s[/dim]{f_count}"
+                    a_text = f"[green]✓[/green] {lbl}  [dim]{agent.elapsed:.1f}s[/dim]{f_count}"
                 else:
-                    a_text = f"[yellow]→[/yellow] {agent.label}"
+                    a_text = f"[yellow]→[/yellow] {lbl}"
                 if agent.findings:
                     a_node = p_node.add(Text.from_markup(a_text), data={"type": "agent", "label": agent.label})
                     for hyp in agent.findings:
                         icon = _SEV_ICON.get(_sev_label(getattr(hyp, "severity", "")), "[white]■[/white]")
-                        title = getattr(hyp, "violated_invariant", str(hyp))[:50]
+                        title = _escape(getattr(hyp, "violated_invariant", str(hyp))[:50])
                         a_node.add_leaf(
                             Text.from_markup(f"{icon} {title}"),
                             data={"type": "finding", "hyp": hyp},
@@ -441,7 +442,10 @@ class AradCodeApp(App):
         self._scan_lines.append(rendered)
         try:
             log = self.query_one("#output", RichLog)
-            log.write(rendered)
+            try:
+                log.write(rendered)
+            except Exception:
+                log.write(Text.plain(_escape(rendered)))
             if not self._scroll_locked:
                 log.scroll_end(animate=False)
         except NoMatches:
@@ -956,7 +960,7 @@ class AradCodeApp(App):
                 if panel:
                     panel.rebuild()
                 suffix = f"  [cyan]{h_count} finding(s)[/cyan]" if h_count else "  [dim]0[/dim]"
-                self._log(f"  [green]✓[/green] {name}{suffix}")
+                self._log(f"  [green]✓[/green] {_escape(name)}{suffix}")
                 if h_count:
                     self._add_finding(h_count)
             elif status == "skipped":
@@ -964,7 +968,7 @@ class AradCodeApp(App):
                 self._wf_model.finish_agent(name)
                 if panel:
                     panel.rebuild()
-                self._log(f"  [dim]✓ {name}: cached[/dim]")
+                self._log(f"  [dim]✓ {_escape(name)}: cached[/dim]")
 
         try:
             if phase:
