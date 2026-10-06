@@ -63,7 +63,7 @@ For each match: `get_code_snippet("containing_function")` to read the full funct
 **Verify**:
 - Hash output used to compare against a stored password, sign a token, check file integrity for security purposes, generate a CSRF token, or derive a key → **SUBMIT** (severity=8–9 depending on purpose; password hashing = critical severity=9)
 - Hash output used only for content-addressable storage, non-security deduplication, ETag generation, or cache keys → **SKIP** (not a security finding)
-- Unclear → `trace_path("function_name", mode="data_flow")` downstream to see where the digest value is consumed
+- Unclear → `trace_path("function_name", mode="data_flow")` downstream to see where the digest value is consumed; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 → Submit: violated_invariant="[MD5/SHA-1] used for [purpose]; collision attacks produce forged data / rainbow tables crack passwords in seconds", severity=8, confidence=7, exposure="internet"
 
@@ -134,7 +134,7 @@ For each match: `get_code_snippet("containing_function")` to read the full funct
 **Verify** — the random value must reach a security-sensitive destination:
 - Assigned to a session token, password reset link, OTP, CSRF token, nonce, API key, UUID used as a secret → **SUBMIT**
 - Used only for load balancing, random delays, test data generation, non-security shuffling → **SKIP**
-- Unclear → `trace_path("function_name", mode="data_flow")` downstream to find the consumer
+- Unclear → `trace_path("function_name", mode="data_flow")` downstream to find the consumer; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **JavaScript (Math.random for tokens):**
 ```

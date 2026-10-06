@@ -15,7 +15,7 @@ For each grep match:
 **b.** Identify the variable fed to the dangerous call and trace its origin:
 - Constant / config / server-internal → **SKIP**
 - HTTP request: body / query / path / header / cookie → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **c.** Check for sanitization:
 - MongoDB operator injection: typed schema validation (`mongooseSchema.strict`) or manual `$`-prefix strip → **SKIP**
@@ -150,7 +150,7 @@ grep(pattern="SpelExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)|Ex
 
 For each match: `get_code_snippet("containing_fun")` — read the full Kotlin function. Identify the variable passed to `parseExpression()`.
 
-**Verify**: same origin-tracing as Step 6 — is the variable a constant/config, or does it come from a request parameter (`@RequestParam`, `@PathVariable`, request body)? If unclear, `trace_path("fun_name", mode="data_flow")` upstream. User-controlled SpEL = RCE with no further verification needed.
+**Verify**: same origin-tracing as Step 6 — is the variable a constant/config, or does it come from a request parameter (`@RequestParam`, `@PathVariable`, request body)? If unclear, `trace_path("fun_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5**. User-controlled SpEL = RCE with no further verification needed.
 
 → Submit: violated_invariant="Kotlin Spring SpEL parseExpression receives user-controlled string; RCE via T(java.lang.Runtime).exec()", severity=10, confidence=9, exposure="internet"
 
@@ -184,7 +184,7 @@ For each match: `get_code_snippet("containing_method")` — read the full method
 - Fixed string literal or class-level constant → **SKIP**
 - Template loaded from a classpath resource at startup → **SKIP**
 - Assigned from HTTP input (`request.getParameter(...)`, `@RequestParam`, `@RequestBody` field) → **SUBMIT immediately**
-- Unclear → `trace_path("method", mode="data_flow")` to follow the assignment chain
+- Unclear → `trace_path("method", mode="data_flow")` to follow the assignment chain; if still unclear, **submit with confidence=5**
 
 → Submit: violated_invariant="Java expression engine (JEXL/MVEL/OGNL/ScriptEngine) evaluates user-supplied expression string; RCE via reflection gadgets available in the expression language runtime", severity=10, confidence=9, exposure="internet"
 
@@ -210,7 +210,7 @@ For each match: `get_code_snippet("containing_method")` to identify the variable
 - Has `\r` / `\n` strip: `value.replaceAll("[\r\n]", "")` → **SKIP**
 - No strip, user input flows directly → **SUBMIT**
 
-If unclear, `trace_path("method", mode="data_flow")` to follow the variable upstream.
+If unclear, `trace_path("method", mode="data_flow")` to follow the variable upstream; if still unclear, **submit with confidence=5**.
 
 → Submit: violated_invariant="HTTP response header value flows from request.getParameter() without CRLF stripping; HTTP response splitting injects arbitrary headers and body content", severity=7, confidence=8, exposure="internet"
 
@@ -226,7 +226,7 @@ For each match: `get_code_snippet("containing_method")` to identify the variable
 
 **Verify** — the variable must trace to HTTP user input to be a finding:
 - Internal server state, DB result, or fixed constant → **SKIP** (logging internal values is normal)
-- `trace_path("method", mode="data_flow")` if origin is unclear — follow the assignment upstream
+- `trace_path("method", mode="data_flow")` if origin is unclear — follow the assignment upstream; if still unclear, **submit with confidence=5**
 - Assigned from `request.getParameter(...)`, `@RequestParam`, request header, `@PathVariable`, request body → **CONTINUE**
 - No `\r\n` sanitization before the log call → **SUBMIT**
 

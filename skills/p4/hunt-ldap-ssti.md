@@ -17,7 +17,7 @@ For each grep match:
 **c.** Trace I's origin:
 - Hardcoded literal / config constant → **SKIP**
 - User-supplied: HTTP param, request body, path variable, session value set by user → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **d. For LDAP injection:**
 - `ldap3.utils.conv.escape_filter_chars(I)` applied → **SKIP**

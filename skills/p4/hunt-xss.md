@@ -17,7 +17,7 @@ For each grep match:
 **c.** Trace V's origin:
 - Hardcoded constant / static template string → **SKIP**
 - User-supplied: HTTP param, query string, form field, URL fragment, WebSocket message, API response that includes user-contributed content → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **d.** Check for output encoding between source and sink:
 - `htmlspecialchars($v, ENT_QUOTES)` / `HtmlEncode` / `html.EscapeString` → **SKIP**

@@ -17,7 +17,7 @@ For each grep match:
 **c.** Trace F's origin:
 - Hardcoded literal / internal constant / config → **SKIP**
 - User-supplied: request param, query string, path variable, URL segment, form field → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **d.** Check for path sanitization after source:
 - `os.path.realpath(joined)` followed by `startswith(base_dir)` check → **SKIP**

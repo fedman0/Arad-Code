@@ -17,7 +17,7 @@ For each grep match:
 **c.** Trace X's origin:
 - String literal / constant / config file / env var → **SKIP** (not user-controlled)
 - HTTP source: `request.GET/POST/args/body/form/json/params`, URL path param, header, cookie → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` to follow upstream until source is known
+- Unclear → `trace_path("function_name", mode="data_flow")` to follow upstream until source is known; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **d.** Check for sanitization between source and sink:
 - Parameterized query (`cursor.execute("SELECT … WHERE id=%s", (user_id,))`) → **SKIP**
@@ -154,6 +154,22 @@ grep(pattern="new SqlCommand\s*\(.*\+|new OleDbCommand\s*\(.*\+|new NpgsqlComman
 ```
 
 → Submit: violated_invariant="ADO.NET SqlCommand string concatenation with user input; parameterized AddWithValue not used", severity=10, confidence=8, exposure="internet"
+
+---
+
+## Step 7b — SQL injection: C# (EF Core raw SQL)
+
+```
+grep(pattern="FromSqlRaw\s*\(|ExecuteSqlRaw\s*\(|ExecuteSqlRawAsync\s*\(|FromSqlInterpolated\s*\(", max_matches=20)
+```
+
+For each match: read the calling code. Is the `sql` parameter a raw string built with concatenation or string interpolation?
+- `FromSqlRaw("SELECT ... WHERE id = " + id)` — string concat → **SUBMIT**
+- `FromSqlRaw($"SELECT ... WHERE id = {id}")` — string interpolation → **SUBMIT**
+- `FromSqlRaw("SELECT ... WHERE id = {0}", id)` — EF parameterized → **SKIP**
+- `ExecuteSqlRawAsync(sql)` where `sql` is a method parameter → trace caller; if user-controlled → **SUBMIT**
+
+→ Submit: violated_invariant="EF Core FromSqlRaw/ExecuteSqlRaw receives raw string without parameterization; SQL injection via caller-supplied input", severity=10, confidence=7, exposure="internet"
 
 ---
 

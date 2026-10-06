@@ -17,7 +17,7 @@ For each grep match:
 **c.** Trace R's origin:
 - Hardcoded path / constant → **SKIP**
 - User-supplied: HTTP query param (`?next=`, `?returnUrl=`, `?redirect_uri=`), form field, referer header → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **d.** Check for redirect validation between source and redirect call:
 - `url_has_allowed_host_and_scheme(url, allowed_hosts)` (Django) → **SKIP**

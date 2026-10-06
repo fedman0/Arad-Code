@@ -17,7 +17,7 @@ For each grep match:
 **c.** Trace URL's origin:
 - Hardcoded string literal / config constant / env var → **SKIP**
 - User-supplied: `request.args/body/form/GET/POST/json/params`, path param, or header value → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream until you find the source
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream until you find the source; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **d.** Check for URL validation between source and HTTP call:
 - Allowlist host check (`url.host in ALLOWED_HOSTS`, `startswith("https://api.example.com/")`) → **SKIP**

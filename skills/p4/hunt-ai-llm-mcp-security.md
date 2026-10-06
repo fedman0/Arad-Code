@@ -15,7 +15,7 @@ For each grep match:
 **b.** Trace the dangerous variable to its source:
 - Hardcoded literal / server-internal config → **SKIP**
 - MCP tool parameter / LLM API response / user prompt content → **CONTINUE**
-- Unclear → `trace_path("function_name", mode="data_flow")` upstream
+- Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **c.** Check for sanitization/validation:
 - URL allowlist before HTTP call → **SKIP** (for SSRF)
