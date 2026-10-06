@@ -36,12 +36,16 @@ For each grep match:
 grep(pattern="@server\.tool\s*\(|@mcp\.tool\s*\(|server\.add_tool\s*\(", max_matches=20)
 ```
 
-Then for each tool handler found:
+For each tool handler file/function found, `get_code_snippet("tool_handler_function")` to read the full function body. Then check whether that same function also calls:
 ```
 grep(pattern="subprocess\.(run|Popen|call|check_output)\s*\(|os\.system\s*\(|os\.popen\s*\(", max_matches=20)
 ```
 
-**Verify**: does the tool's parameter (`ctx.arguments["name"]`, `arguments.get("cmd")`, etc.) flow into the subprocess call without sanitization? If the tool advertises that it executes commands, the parameter IS the injection vector.
+**Verify** (both must be true in the SAME function):
+1. The subprocess/os.system call is inside the MCP tool handler (not a utility called with a fixed argument).
+2. The variable passed to subprocess originates from the tool's parameter dict (`ctx.arguments[...]`, `arguments.get(...)`, function arg) — not from a hardcoded config or fixed list.
+
+If the tool handler calls a helper function, `trace_path("helper_function", mode="data_flow")` to confirm the parameter reaches the shell call.
 
 → Submit: violated_invariant="MCP tool parameter flows into shell execution without sanitization; attacker controls LLM tool call to achieve RCE on MCP server host", severity=10, confidence=9, exposure="network"
 
@@ -54,18 +58,18 @@ grep(pattern="subprocess\.(run|Popen|call|check_output)\s*\(|os\.system\s*\(|os\
 grep(pattern="@server\.tool|@mcp\.tool|server\.add_tool", max_matches=15)
 ```
 
+For each tool handler found, `get_code_snippet("tool_handler_function")` to read the full function body. Look for HTTP calls inside that same function:
+
 ```
 grep(pattern="requests\.(get|post|put)\s*\(|httpx\.(get|post|AsyncClient)\s*\(|urllib\.request\.urlopen\s*\(", max_matches=20)
 ```
 
-**Verify**: does the URL argument of the HTTP call originate from a tool parameter (`ctx.arguments["url"]`, `arguments["endpoint"]`)? No allowlist check on the URL host?
+**Verify** (both must be true in the SAME function):
+1. The HTTP call is inside the MCP tool handler body.
+2. The URL argument comes from the tool's parameter dict (`ctx.arguments["url"]`, function arg like `url: str`) — not from a hardcoded config, environment variable, or allowlist lookup.
+3. No host allowlist check: `if urlparse(url).hostname not in ALLOWED_HOSTS` → **SKIP**; no such check → **CONTINUE**.
 
-**Flow trace example** (Python):
-```python
-@server.tool(name="fetch_url")
-async def fetch_url(url: str) -> str:
-    return requests.get(url).text   # CRITICAL: url is directly from tool parameter
-```
+If the HTTP call is in a helper, `trace_path("helper", mode="data_flow")` to confirm the URL parameter flows from the tool input.
 
 → Submit: violated_invariant="MCP tool parameter flows into HTTP request URL; attacker sends crafted tool call to pivot to internal network (metadata service, K8s API)", severity=10, confidence=9, exposure="network"
 
@@ -111,7 +115,12 @@ grep(pattern="host\s*=\s*['\"]0\.0\.0\.0['\"]|host\s*=\s*['\"]['\"]|uvicorn\.run
 grep(pattern="r\.Header\.Get\s*\(['\"]Origin['\"]|r\.Header\.Get\s*\(['\"]X-Forwarded-For['\"]", max_matches=10)
 ```
 
-**Verify** for bind: is this an MCP server (not a public API)? Per MCP spec 2025-06-18, HTTP transport MCP servers MUST only bind to `127.0.0.1`. Binding to `0.0.0.0` without auth exposes the MCP server to network-level attacks.
+**Verify** for each bind match:
+
+`get_code_snippet("server_startup_function")` to read the full server initialization:
+1. Is this file an MCP server (contains `@server.tool`, `mcp.Server`, `FastMCP`, `McpServer`)? If it's a public web API, `0.0.0.0` is expected → **SKIP**.
+2. Is authentication middleware applied before the MCP routes? Look for `app.add_middleware(BearerTokenMiddleware)`, API key header check, mTLS config → **SKIP**.
+3. No auth on a confirmed MCP server → **SUBMIT**.
 
 → Submit: violated_invariant="MCP HTTP server bound to 0.0.0.0 (all interfaces) without authentication; any host on the network can call MCP tools as if they were the LLM client", severity=8, confidence=8, exposure="network"
 
@@ -119,15 +128,23 @@ grep(pattern="r\.Header\.Get\s*\(['\"]Origin['\"]|r\.Header\.Get\s*\(['\"]X-Forw
 
 ## Step 6 — MCP insecure connection (no TLS)
 
+Only HTTP-transport MCP clients are in scope here. `StdioServerTransport` uses stdin/stdout — skip it entirely.
+
 ```
-grep(pattern="StdioServerTransport\s*\(\s*\)|SSEServerTransport\s*\(.*http://|mcp\.connect\s*\(.*http://", max_matches=15)
+grep(pattern="SSEServerTransport\s*\(.*['\"]http://|mcp\.connect\s*\(.*['\"]http://", max_matches=15)
 ```
 
 ```
-grep(pattern="mcp_client.*url\s*=\s*['\"]http://|McpClient.*url\s*=\s*['\"]http://|ClientSession.*http://", max_matches=15)
+grep(pattern="mcp_client.*url\s*=\s*['\"]http://[^l]|McpClient.*url\s*=\s*['\"]http://[^l]|ClientSession.*['\"]http://[^l]", max_matches=15)
 ```
 
-→ Submit: violated_invariant="MCP client connects via unencrypted HTTP; tool calls and responses (including credentials/tool outputs) transmitted in plaintext", severity=7, confidence=8, exposure="network"
+The `[^l]` excludes `http://localhost` and `http://127.` — those are local dev connections, not a network threat.
+
+**Verify** for each match: `get_code_snippet` to confirm:
+1. The `http://` URL is a non-localhost remote host (not `127.0.0.1`, `localhost`, `::1`).
+2. No TLS termination proxy sits in front (no nginx/envoy config nearby that upgrades to HTTPS).
+
+→ Submit: violated_invariant="MCP client connects to remote MCP server via unencrypted HTTP; tool calls, parameters, and API keys transmitted in plaintext on the network", severity=7, confidence=8, exposure="network"
 
 ---
 
@@ -196,23 +213,26 @@ No flow verification needed — these tool classes unconditionally execute LLM-g
 
 ## Step 10 — Claude Code / Cursor hooks: RCE via hook config
 
-**Hooks fetching and piping to shell:**
+**Find hook config files specifically:**
 ```
-grep(pattern="wget\s+.*\s*|\s*bash|curl\s+.*\s*|\s*sh|curl\s+.*\s*|\s*bash", max_matches=15)
-```
-
-```
-grep(pattern="\"command\"\s*:\s*['\"].*curl.*|\s*bash['\"]|\"command\"\s*:\s*['\"].*wget.*|\s*sh['\"]", max_matches=15)
+grep(pattern="\"hooks\"\s*:\s*\{|\"PreToolUse\"\s*:|\"PostToolUse\"\s*:|\"Stop\"\s*:", max_matches=15)
 ```
 
-**Hooks with unconditional allow (bypasses all permissions):**
+For each match: `get_code_snippet` to confirm the file is `.claude/settings.json`, `.claude/settings.local.json`, or equivalent hook config. Only these files are in scope.
+
+**Check 1 — hook command fetches and pipes to shell:**
 ```
-grep(pattern="permissionDecision.*allow|\"allow\"\s*$", max_matches=15)
+grep(pattern="\"command\"\s*:\s*\"[^\"]*curl[^\"]*\\|(bash|sh)|\"command\"\s*:\s*\"[^\"]*wget[^\"]*\\|(bash|sh)", max_matches=10)
 ```
 
-**Verify**: is this a Claude Code `.claude/settings.json` hook or a Cursor `.cursorrc` hook? Does the `permissionDecision: "allow"` have any conditional check before it, or is it unconditional?
+**Check 2 — unconditional allow (bypasses all tool permissions):**
+```
+grep(pattern="\"permissionDecision\"\s*:\s*\"allow\"", max_matches=15)
+```
 
-→ Submit: violated_invariant="Claude Code hook unconditionally allows all tool execution OR fetches external script and pipes to shell; hook compromise leads to full shell RCE on developer machine", severity=10, confidence=9, exposure="local"
+For each `permissionDecision: "allow"` match: `get_code_snippet` to read the surrounding hook rule. Is the allow inside a conditional `if` block (e.g. checking tool name, path pattern)? Or is it the only response for that hook event with no condition? Unconditional blanket allow → **SUBMIT**. Conditional allow (specific tool/path) → **lower severity** but still flag.
+
+→ Submit: violated_invariant="Claude Code hook unconditionally allows all tool execution OR hook command fetches external script and pipes to shell; malicious repo `.claude/settings.json` achieves full shell RCE on developer machine on clone", severity=10, confidence=9, exposure="local"
 
 ---
 

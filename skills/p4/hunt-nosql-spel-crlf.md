@@ -66,29 +66,41 @@ grep(pattern="\.find\s*\(\s*\{[^}]*\$where[^}]*request\.|aggregate\s*\(\s*\[\s*\
 
 ## Step 3 — MongoDB operator injection: Go (gin / net/http / gorilla)
 
+The first grep already requires user input in the bson.M literal — use only that:
 ```
 grep(pattern="bson\.M\{[^}]*r\.(URL\.Query\(\)\.Get|FormValue|PostForm)\s*\(|bson\.D\{[^}]*r\.(URL\.Query\(\)\.Get|FormValue)", max_matches=20)
 ```
 
-```
-grep(pattern="collection\.FindOne\s*\(\s*ctx,\s*bson\.M\{|collection\.Find\s*\(\s*ctx,\s*bson\.M\{", max_matches=20)
-```
+For each match: `get_code_snippet("containing_handler_function")` to read the full query construction.
 
-**Verify**: are any values in the `bson.M{}` filter derived from `r.URL.Query()`, `r.FormValue()`, or parsed JSON body? Specifically, can a user inject a BSON operator key?
+**Verify**:
+1. The `bson.M{}` value is assigned directly from `r.URL.Query().Get(...)` / `r.FormValue(...)` / decoded JSON body — not sanitized into a typed primitive first.
+2. No operator-key filter: `strings.HasPrefix(value, "$")` → **SKIP**; `reflect.TypeOf(value) == reflect.String` typed assertion → **SKIP**.
+3. If the filter is built via `bson.M{"username": username}` where `username` is a `string` from a typed struct → **SKIP** (Go's type system prevents operator injection). Only flag if the value can be `interface{}` or `map[string]interface{}`.
 
-→ Submit: violated_invariant="Go MongoDB filter uses user-supplied values in bson.M without operator key validation; operator injection possible", severity=9, confidence=7, exposure="internet"
+→ Submit: violated_invariant="Go MongoDB filter uses untyped user value (interface{}) in bson.M without operator key check; {\"$gt\":\"\"} bypasses authentication", severity=9, confidence=7, exposure="internet"
 
 ---
 
 ## Step 4 — MongoDB operator injection: Rust (actix / hyper / rocket)
 
+The dangerous case is untyped JSON deserialized to `serde_json::Value` used in a filter — grep for that specifically:
 ```
-grep(pattern="collection\.find\s*\(\s*doc!\s*\{[^}]*\w+\s*=>\s*\w+\)|collection\.find_one\s*\(\s*doc!\s*\{", max_matches=15)
+grep(pattern="serde_json::Value|Value::Object\s*\(|from_value\s*\(.*body|from_value\s*\(.*payload", max_matches=20)
 ```
 
-**Verify**: do any `doc!{}` values come from `web::Query`, `web::Json`, or path parameters? The `doc!{}` macro is type-checked at compile time, but if JSON is deserialized to `serde_json::Value` (untyped), operators can be injected.
+```
+grep(pattern="collection\.find\s*\(\s*doc!\s*\{|collection\.find_one\s*\(\s*doc!\s*\{|collection\.find_one\s*\(\s*\w+\s*,", max_matches=15)
+```
 
-→ Submit: violated_invariant="Rust MongoDB query uses serde_json::Value from user input in filter; operator injection bypasses strict type checking", severity=9, confidence=7, exposure="internet"
+For each MongoDB call: `get_code_snippet("containing_function")` and check the filter argument type:
+- `doc!{"username": username}` where `username: String` (typed) → **SKIP** (Rust type system prevents injection)
+- `bson::to_bson(&user_input)?` where `user_input: serde_json::Value` (untyped, from JSON body) → **CONTINUE**
+- `bson::Document` built from user-supplied `HashMap<String, Value>` → **CONTINUE**
+
+Does the `serde_json::Value` come from `web::Json::<serde_json::Value>` or `body.get("filter")` without a typed struct? → **SUBMIT**.
+
+→ Submit: violated_invariant="Rust MongoDB filter uses serde_json::Value from request body without typed deserialization; attacker injects {\"$gt\":\"\"} operator to bypass authentication", severity=9, confidence=7, exposure="internet"
 
 ---
 
@@ -98,9 +110,15 @@ grep(pattern="collection\.find\s*\(\s*doc!\s*\{[^}]*\w+\s*=>\s*\w+\)|collection\
 grep(pattern="FilterExpression\s*=\s*['\"].*\+|FilterExpression\s*=\s*f['\"].*\{|KeyConditionExpression\s*=\s*['\"].*\+", max_matches=15)
 ```
 
-**Verify**: is the FilterExpression string assembled with user input concatenation? DynamoDB uses ExpressionAttributeValues for parameterization — raw string concat in FilterExpression is injectable.
+For each match: `get_code_snippet("containing_function")` to identify what's being concatenated into the expression string.
 
-→ Submit: violated_invariant="DynamoDB FilterExpression built with string concatenation; injection alters filter logic to return unauthorized records", severity=8, confidence=7, exposure="internet"
+**Verify**:
+- Is the concatenated variable from `event["queryStringParameters"]`, `request.args`, `body.get(...)`, or another HTTP input source? → **CONTINUE**
+- Is it an application-internal constant (e.g. a fixed attribute name like `"#status = :s"` with only the value parameterized via `ExpressionAttributeValues`)? → **SKIP**
+- DynamoDB parameterization pattern (safe): `FilterExpression="#attr = :val"` with `ExpressionAttributeValues={":val": user_input}` — attribute names and operators are hardcoded, only values are user-controlled → **SKIP**
+- Dangerous: `FilterExpression="attribute_name = " + user_input` where `user_input` is the entire expression tail → **SUBMIT**
+
+→ Submit: violated_invariant="DynamoDB FilterExpression assembled with user-supplied string; attacker injects OR/AND conditions to bypass filters and return unauthorized records", severity=8, confidence=7, exposure="internet"
 
 ---
 
@@ -109,20 +127,18 @@ grep(pattern="FilterExpression\s*=\s*['\"].*\+|FilterExpression\s*=\s*f['\"].*\{
 ## Step 6 — SpEL injection: Java Spring
 
 ```
-grep(pattern="ExpressionParser\s*\(\s*\)|SpelExpressionParser\s*\(\s*\)|new SpelExpressionParser\s*\(\s*\)", max_matches=20)
+grep(pattern="parser\.parseExpression\s*\(\s*\w+\s*\)|expressionParser\.parseExpression\s*\(\s*\w+\s*\)|new SpelExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)", max_matches=20)
 ```
 
-```
-grep(pattern="parser\.parseExpression\s*\(\s*\w+\s*\)|expressionParser\.parseExpression\s*\(\s*\w+\s*\)", max_matches=20)
-```
+For each match: `get_code_snippet("containing_method")` to read the full method. Identify the variable `\w+` passed to `parseExpression()`.
 
-**Verify**: is the string passed to `parseExpression()` user-supplied? Even a single character of user input in a SpEL expression allows RCE:
-```java
-String expr = userInput;  // "T(java.lang.Runtime).exec('id')"
-parser.parseExpression(expr).getValue(context)  // RCE
-```
+**Verify** — trace the variable's origin:
+- Declared as a compile-time constant: `private static final String EXPR = "user.age > 18"` → **SKIP**
+- Loaded from a properties file / application config at startup (not per-request) → **SKIP**
+- Assigned from HTTP request: `@RequestParam String expr`, `request.getParameter("filter")`, `@PathVariable` → **SUBMIT immediately** (SpEL = RCE, no further verification needed once user input confirmed)
+- Unclear: `trace_path("method_name", mode="data_flow")` to follow the variable's assignment chain upstream
 
-→ Submit: violated_invariant="Spring SpEL parseExpression() receives user-controlled string; attacker evaluates T(java.lang.Runtime).exec() for immediate RCE", severity=10, confidence=9, exposure="internet"
+→ Submit: violated_invariant="Spring SpEL parseExpression() receives user-controlled string; attacker evaluates T(java.lang.Runtime).exec() for immediate RCE on the server", severity=10, confidence=9, exposure="internet"
 
 ---
 
@@ -132,9 +148,11 @@ parser.parseExpression(expr).getValue(context)  // RCE
 grep(pattern="SpelExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)|ExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)", max_matches=20)
 ```
 
-**Verify**: same as Java — Kotlin Spring apps share the SpEL engine. User-controlled expression string = RCE.
+For each match: `get_code_snippet("containing_fun")` — read the full Kotlin function. Identify the variable passed to `parseExpression()`.
 
-→ Submit: violated_invariant="Kotlin Spring SpEL parseExpression with user input; RCE via T(Runtime).exec()", severity=10, confidence=9, exposure="internet"
+**Verify**: same origin-tracing as Step 6 — is the variable a constant/config, or does it come from a request parameter (`@RequestParam`, `@PathVariable`, request body)? If unclear, `trace_path("fun_name", mode="data_flow")` upstream. User-controlled SpEL = RCE with no further verification needed.
+
+→ Submit: violated_invariant="Kotlin Spring SpEL parseExpression receives user-controlled string; RCE via T(java.lang.Runtime).exec()", severity=10, confidence=9, exposure="internet"
 
 ---
 
@@ -160,9 +178,15 @@ grep(pattern="Ognl\.getValue\s*\(\s*\w+\s*[,)]|Ognl\.parseExpression\s*\(\s*\w+\
 grep(pattern="ScriptEngine.*eval\s*\(\s*\w+\s*\)|engine\.eval\s*\(\s*\w+\s*\)", max_matches=15)
 ```
 
-**Verify**: does the expression string originate from HTTP request? JEXL, MVEL, OGNL, and javax.script all enable RCE when user input reaches the engine.
+For each match: `get_code_snippet("containing_method")` — read the full method. Identify the variable/argument passed to `eval()` / `createExpression()` / `getValue()`.
 
-→ Submit: violated_invariant="Java expression engine (JEXL/MVEL/OGNL/ScriptEngine) evaluates user-supplied expression; RCE via reflection gadgets built into the expression language", severity=10, confidence=9, exposure="internet"
+**Verify**: trace the argument's origin:
+- Fixed string literal or class-level constant → **SKIP**
+- Template loaded from a classpath resource at startup → **SKIP**
+- Assigned from HTTP input (`request.getParameter(...)`, `@RequestParam`, `@RequestBody` field) → **SUBMIT immediately**
+- Unclear → `trace_path("method", mode="data_flow")` to follow the assignment chain
+
+→ Submit: violated_invariant="Java expression engine (JEXL/MVEL/OGNL/ScriptEngine) evaluates user-supplied expression string; RCE via reflection gadgets available in the expression language runtime", severity=10, confidence=9, exposure="internet"
 
 ---
 
@@ -175,12 +199,20 @@ grep(pattern="response\.setHeader\s*\(\s*['\"][^'\"]+['\"],\s*\w+\s*\)|response\
 ```
 
 ```
-grep(pattern="response\.sendRedirect\s*\(\s*\w+\s*\)|response\.setStatus\s*\(", max_matches=20)
+grep(pattern="response\.sendRedirect\s*\(\s*\w+\s*\)", max_matches=20)
 ```
 
-**Verify**: does the header value (`\w+` above) originate from `request.getParameter()`? If so, an attacker injects `\r\nContent-Type: text/html\r\n\r\n<script>alert(1)</script>` into the header, inserting a fake HTTP response body.
+For each match: `get_code_snippet("containing_method")` to identify the variable `\w+` being set as the header value or redirect URL.
 
-→ Submit: violated_invariant="HTTP response header set from user parameter without CRLF stripping; HTTP response splitting injects arbitrary headers and XSS into browsers that cache the split response", severity=7, confidence=8, exposure="internet"
+**Verify** — trace the variable's origin:
+- Hardcoded string, comes from a DB query result (not user-controlled), or comes from server-internal logic → **SKIP**
+- Assigned from `request.getParameter(...)`, `request.getHeader(...)`, `@RequestParam`, path variable → **CONTINUE**
+- Has `\r` / `\n` strip: `value.replaceAll("[\r\n]", "")` → **SKIP**
+- No strip, user input flows directly → **SUBMIT**
+
+If unclear, `trace_path("method", mode="data_flow")` to follow the variable upstream.
+
+→ Submit: violated_invariant="HTTP response header value flows from request.getParameter() without CRLF stripping; HTTP response splitting injects arbitrary headers and body content", severity=7, confidence=8, exposure="internet"
 
 ---
 
@@ -190,9 +222,15 @@ grep(pattern="response\.sendRedirect\s*\(\s*\w+\s*\)|response\.setStatus\s*\(", 
 grep(pattern="log\.(info|debug|warn|error)\s*\(\s*['\"].*\+\s*\w+|logger\.(info|debug|warn|error)\s*\(\s*['\"].*\+\s*\w+", max_matches=20)
 ```
 
-**Verify**: does the string concatenated into the log message come from user input (HTTP parameter, API request body)? An attacker can inject fake log lines: `username=admin\n2024-01-01 WARN [auth] Login succeeded for admin` — forges the audit trail.
+For each match: `get_code_snippet("containing_method")` to identify the variable being concatenated into the log message.
 
-→ Submit: violated_invariant="User input concatenated into log statement without sanitization; CRLF injection in log forges audit trail entries, breaks log parsers, may cause log injection attacks in aggregation tools", severity=5, confidence=7, exposure="internet"
+**Verify** — the variable must trace to HTTP user input to be a finding:
+- Internal server state, DB result, or fixed constant → **SKIP** (logging internal values is normal)
+- `trace_path("method", mode="data_flow")` if origin is unclear — follow the assignment upstream
+- Assigned from `request.getParameter(...)`, `@RequestParam`, request header, `@PathVariable`, request body → **CONTINUE**
+- No `\r\n` sanitization before the log call → **SUBMIT**
+
+→ Submit: violated_invariant="User input from [source] concatenated into log statement without CRLF sanitization; attacker injects newlines to forge audit log entries and break SIEM parsers", severity=5, confidence=7, exposure="internet"
 
 ---
 

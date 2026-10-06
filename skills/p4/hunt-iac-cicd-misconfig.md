@@ -150,13 +150,14 @@ grep(pattern="capabilities:\s*\{[^}]*add:\s*\[[^\]]*\"NET_ADMIN\"|capabilities:\
 grep(pattern="^USER\s+root\b|^USER\s+0\b", max_matches=15)
 ```
 
-```
-grep(pattern="FROM\s+[^\n]+\nRUN|FROM\s+[^\n]+\n.*\n.*RUN.*apt.*install", max_matches=10)
-```
+For each Dockerfile that matches (or for Dockerfiles with no `USER` directive at all): `get_code_snippet("Dockerfile")` or read the **full Dockerfile** with `sqz_read_file`.
 
-For each Dockerfile: does it have `USER <non-root>` before the last `CMD`/`ENTRYPOINT`? If `USER root` is set explicitly and never changed, or if there is no `USER` directive at all (defaults to root), → **SUBMIT**.
+**Verify** — multi-stage builds require reading the whole file:
+1. Is `USER root` in a **build stage** (before a `FROM ... AS final` line)? Build stages running as root are common (need root to install packages). What matters is the **final stage**.
+2. After the last `FROM` line, is there a `USER <non-root>` instruction before `CMD`/`ENTRYPOINT`? If yes → **SKIP**.
+3. Last `FROM` stage has no `USER` directive, or has `USER root` without a subsequent `USER` change → **SUBMIT**.
 
-→ Submit: violated_invariant="Container process runs as root; any container escape or app exploit immediately gives root on host (if no other isolation)", severity=7, confidence=8, exposure="local"
+→ Submit: violated_invariant="Dockerfile final stage runs as root (no USER directive or USER root); container process has UID 0 — any app exploit gives root inside the container", severity=7, confidence=8, exposure="local"
 
 ---
 
@@ -167,12 +168,19 @@ grep(pattern="privileged:\s*true", max_matches=15)
 ```
 
 ```
-grep(pattern="ports:\s*\n\s*-\s*['\"]?[0-9]+:[0-9]+['\"]?", max_matches=20)
+grep(pattern="ports:\s*\n\s*-\s*['\"]?[0-9]", max_matches=20)
 ```
 
-For port mappings: `0.0.0.0:PORT:PORT` (or just `PORT:PORT`) binds to all interfaces — if this is a development database port (5432, 3306, 6379, 27017), it is directly exposed to network. `127.0.0.1:PORT:PORT` is safe.
+For each match: `get_code_snippet` to read the full port mapping string, including any leading IP prefix.
 
-→ Submit: violated_invariant="Docker Compose exposes database port [PORT] on 0.0.0.0; database directly accessible from network without authentication if firewall has that port open", severity=8, confidence=8, exposure="network"
+**Verify**:
+- `"127.0.0.1:5432:5432"` — bound to localhost only → **SKIP** (safe)
+- `"5432:5432"` (no IP prefix) — defaults to `0.0.0.0` in Docker → **CONTINUE**
+- `"0.0.0.0:5432:5432"` — explicit all-interfaces bind → **CONTINUE**
+
+For the CONTINUE cases: is the port a database/cache port (5432, 3306, 6379, 27017, 9200, 5984) or admin port (9090, 8080 management)? These are dangerous to expose. Port 80/443 for a web service → **SKIP**.
+
+→ Submit: violated_invariant="Docker Compose binds [database_port] to 0.0.0.0 (all interfaces); database directly reachable from network, bypassing application auth layer", severity=8, confidence=8, exposure="network"
 
 ---
 
@@ -180,19 +188,29 @@ For port mappings: `0.0.0.0:PORT:PORT` (or just `PORT:PORT`) binds to all interf
 
 ## Step 12 — GHA: shell injection via `${{ github.* }}` interpolation
 
-```
-grep(pattern="\\\$\{\{\s*github\.(event\.(issue|pull_request|comment|review)|head_commit)\.", max_matches=20)
-```
+The first grep finds `${{ github.event.* }}` anywhere in the workflow — including safe `env:` block uses. Only flag if it appears inside a `run:` shell step. Use the more specific grep first:
 
 ```
-grep(pattern="run:.*\\\$\{\{\s*github\.event\.(issue\.title|pull_request\.title|comment\.body|review\.body)", max_matches=15)
+grep(pattern="run:.*\\\$\{\{\s*github\.event\.(issue\.(title|body)|pull_request\.(title|body|head\.ref)|comment\.body|review\.body)", max_matches=20)
 ```
 
-For each match: is the GitHub context variable (`github.event.issue.title`, `github.event.pull_request.head.ref`, etc.) used directly inside a `run:` shell step without intermediate env var assignment? This is injection — title/body can contain shell metacharacters.
+For each match: `get_code_snippet` to read the surrounding YAML context. Confirm the `${{ github.event.* }}` expression is:
+1. Inside a `run:` multiline block (indented under `run: |` or `run: >`)
+2. **Not** inside an `env:` block assignment like `env:\n  TITLE: ${{ ... }}`
 
-Safe pattern: `env: TITLE: ${{ github.event.issue.title }}` then `run: echo "$TITLE"` (env var). Dangerous: `run: echo ${{ github.event.issue.title }}` directly.
+Safe pattern (not a finding):
+```yaml
+env:
+  TITLE: ${{ github.event.issue.title }}
+run: echo "$TITLE"        # env var — shell-quoted, safe
+```
 
-→ Submit: violated_invariant="GitHub Actions run: step interpolates github context directly; attacker creates PR/issue with title containing $(malicious_cmd) to execute arbitrary commands in CI", severity=9, confidence=9, exposure="internet"
+Dangerous (submit):
+```yaml
+run: echo ${{ github.event.issue.title }}   # direct interpolation into shell
+```
+
+→ Submit: violated_invariant="GHA run: step interpolates ${{github.event.*}} directly into shell command; attacker creates issue/PR with title containing \`$(malicious_cmd)\` to execute arbitrary commands in the CI runner", severity=9, confidence=9, exposure="internet"
 
 ---
 
