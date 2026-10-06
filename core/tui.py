@@ -362,6 +362,7 @@ class AradCodeApp(App):
         self._queued_input: Optional[str] = None
         self._wf_visible: bool = False
         self._wf_open_node_id: Optional[int] = None
+        self._wf_last_click_time: float = 0.0
         self._finding_count: int = 0
         self._last_repo: str = ""
         self._last_db = None
@@ -645,10 +646,15 @@ class AradCodeApp(App):
     @on(Tree.NodeSelected, "#wf-tree")
     def _on_wf_node_selected(self, event: Tree.NodeSelected) -> None:
         node_id = id(event.node)
+        now = time.monotonic()
         if node_id == self._wf_open_node_id:
+            if now - self._wf_last_click_time < 0.4:
+                return
             self._wf_open_node_id = None
+            self._wf_last_click_time = now
             self._log_chat("[dim]──[/dim]")
             return
+        self._wf_last_click_time = now
         self._wf_open_node_id = node_id
         data = event.node.data
         if not data:
@@ -899,15 +905,34 @@ class AradCodeApp(App):
             clear_run_state(repo)
             self._log("[dim]Run state cleared.[/dim]")
 
+        self._wf_model.reset()
+        self._wf_model.add_phase("run", "Skill Scan")
+
         if resume:
             from .cache import completed_skills
+            from collections import defaultdict
             commit = runner._get_commit(repo)
             done = completed_skills(repo, commit)
             if done:
                 self._log(f"[dim]Resuming — {len(done)} skill(s) already done[/dim]")
-
-        self._wf_model.reset()
-        self._wf_model.add_phase("run", "Skill Scan")
+                try:
+                    existing = db.list_hypotheses(repo)
+                    if existing:
+                        by_skill: dict[str, list] = defaultdict(list)
+                        for h in existing:
+                            by_skill[h.skill_source or "unknown"].append(h)
+                        for skill_nm, hyps in by_skill.items():
+                            self._wf_model.add_agent(skill_nm, "run")
+                            self._wf_model.finish_agent(skill_nm)
+                            self._wf_model.add_findings(skill_nm, hyps)
+                        self._finding_count = len(existing)
+                        try:
+                            self.query_one("#status", StatusBar).findings = self._finding_count
+                        except NoMatches:
+                            pass
+                        self._log(f"[dim]  {len(existing)} finding(s) from previous run loaded[/dim]")
+                except Exception:
+                    pass
         if not self._wf_visible:
             self.action_toggle_workflow()
 
@@ -1169,10 +1194,15 @@ class AradCodeApp(App):
         self.exit(result=("headless", self._initial_cmd))
 
     async def on_unmount(self) -> None:
+        import contextlib
         if self._clock_task:
             self._clock_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._clock_task
         if self._task and not self._task.done():
             self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._task
 
 
 def launch_tui(initial_cmd: str = "") -> Optional[tuple]:
