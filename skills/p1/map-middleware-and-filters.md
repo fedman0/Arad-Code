@@ -1,3 +1,7 @@
+---
+order: 60
+---
+
 # SKILL: map-middleware-and-filters
 
 ## Contract

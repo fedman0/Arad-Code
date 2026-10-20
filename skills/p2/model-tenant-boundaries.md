@@ -1,3 +1,7 @@
+---
+order: 40
+---
+
 # SKILL: model-tenant-boundaries
 
 ## Contract

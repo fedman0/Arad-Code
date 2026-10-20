@@ -1,3 +1,7 @@
+---
+order: 30
+---
+
 # SKILL: model-resource-ownership
 
 ## Contract

@@ -1,3 +1,7 @@
+---
+order: 50
+---
+
 # SKILL: extract-state-machines
 
 ## Contract

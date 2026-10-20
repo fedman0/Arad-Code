@@ -14,8 +14,9 @@ from core.models import (
 )
 from core.peer_analysis import find_deviations, deviation_to_hypothesis
 from core.profile import load_profile
-from core.runner import (
-    SkillRunner, _gate_hypothesis_status, _apply_profile,
+from core.runner import SkillRunner
+from core.evidence_gate import (
+    _gate_hypothesis_status, _apply_profile,
     _cap_method_from_calls, _extract_called_tools,
     _cap_method_per_evidence, _build_tool_call_index,
     _apply_quality_caps,

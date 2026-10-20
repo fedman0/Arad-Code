@@ -1,3 +1,7 @@
+---
+order: 10
+---
+
 # SKILL: inventory-repository
 
 ## Contract

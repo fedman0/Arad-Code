@@ -1,3 +1,7 @@
+---
+order: 40
+---
+
 # SKILL: map-entry-points
 
 ## Contract

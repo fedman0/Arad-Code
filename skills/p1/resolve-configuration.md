@@ -1,3 +1,7 @@
+---
+order: 30
+---
+
 # SKILL: resolve-configuration
 
 ## Contract

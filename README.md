@@ -486,7 +486,17 @@ Things that keep a skill working:
 - `shell` runs one read-only command at a time with no pipes: `git log/show/blame/diff/ls-files/ls-tree/rev-parse/status/shortlog/describe/grep`, `find` (tests only, no `-exec` or `-delete`), `tree`, `wc`, `head`, `tail`, `file`, `stat`, `sha256sum`, `sha1sum`, `md5sum`, `jq`, `diff`, `strings`, `cut`. Paths have to stay inside the repo.
 - Valid `exposure` values are `internet`, `authenticated`, `internal`, `admin_only` and `unreachable`. Anything else gets reset to `unspecified`.
 
-New skills in `p1` and `p2` run after the built-in ones in that phase, in alphabetical order.
+A skill file can start with a short YAML header. For now it holds `order`, which decides where the skill runs inside its phase. Lower numbers go first, and a skill without a header counts as 100, so it runs after the numbered ones, in alphabetical order. The built-in `p1` and `p2` skills use 10, 20, 30 and so on, which leaves room to slot one in between:
+
+```markdown
+---
+order: 35
+---
+
+# SKILL: map-graphql-schema
+```
+
+The header is stripped before the skill text goes to the model. A header that doesn't parse stops the run with the file name in the error, instead of being sent along as text.
 
 ## Where things are stored
 
@@ -528,5 +538,19 @@ python -m pytest
 ```
 
 None of the tests need an API key or network access; the model is replaced by scripted fakes and the TUI is driven through Textual's test pilot. `tests/test_audit_regressions.py` can also be run directly as a script, and it prints one line per check.
+
+The engine lives in `core/`:
+
+| File | What's in it |
+|---|---|
+| `runner.py` | the agent loop for skills, verification and workflow prompts |
+| `tool_exec.py` | the tools the model can call |
+| `intake.py`, `evidence_gate.py` | turning the model's report into hypotheses, and the gate that decides what gets exported |
+| `reconcile.py` | re-checking stored evidence against the current code |
+| `prompts.py`, `tool_specs.py` | system prompts, output contracts and tool definitions |
+| `skills.py` | loading skill files and their headers |
+| `db.py` | the SQLite evidence store |
+
+Changes to the evidence store's schema go in as numbered migrations in `db.py`. The database remembers which version it's at (`PRAGMA user_version`), so an older database is upgraded in place the first time a new release opens it, and a database written by a newer release is refused instead of being damaged.
 
 Every push to `main` runs the suite on GitHub Actions: Python 3.10 to 3.14 on Ubuntu, 3.14 on macOS, once more with every dependency pinned to the oldest version `requirements.txt` allows, and a last job that builds the wheel, installs it into a clean virtualenv and runs the `arad` command.

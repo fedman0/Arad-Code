@@ -1,3 +1,7 @@
+---
+order: 60
+---
+
 # SKILL: extract-business-invariants
 
 ## Contract

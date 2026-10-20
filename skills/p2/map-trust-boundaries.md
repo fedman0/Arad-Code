@@ -1,3 +1,7 @@
+---
+order: 70
+---
+
 # SKILL: map-trust-boundaries
 
 ## Contract

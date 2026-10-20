@@ -1,3 +1,7 @@
+---
+order: 50
+---
+
 # SKILL: resolve-dependency-injection
 
 ## Contract

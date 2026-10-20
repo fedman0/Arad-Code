@@ -12,6 +12,214 @@ from .models import (
 )
 
 
+class SchemaVersionError(RuntimeError):
+    pass
+
+
+def _migrate_baseline(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS repositories (
+        path TEXT PRIMARY KEY,
+        commit_sha TEXT,
+        indexed_at TEXT,
+        languages TEXT,
+        notes TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS hypotheses (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT,
+        data TEXT NOT NULL,
+        created_at TEXT,
+        status TEXT,
+        severity INTEGER,
+        confidence INTEGER,
+        priority INTEGER,
+        skill_source TEXT,
+        commit_sha TEXT,
+        FOREIGN KEY(repo_path) REFERENCES repositories(path)
+    );
+
+    CREATE TABLE IF NOT EXISTS evidence (
+        id TEXT PRIMARY KEY,
+        hypothesis_id TEXT,
+        repo_path TEXT,
+        data TEXT NOT NULL,
+        stale INTEGER DEFAULT 0,
+        commit_sha TEXT,
+        FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS coverage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_path TEXT,
+        kind TEXT,
+        name TEXT,
+        status TEXT,
+        blocker TEXT,
+        exclusion_reason TEXT,
+        UNIQUE(repo_path, kind, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS validation_runs (
+        id TEXT PRIMARY KEY,
+        hypothesis_id TEXT,
+        data TEXT NOT NULL,
+        ran_at TEXT,
+        FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS entry_points (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_path TEXT,
+        data TEXT NOT NULL,
+        commit_sha TEXT,
+        handler_qn TEXT,
+        path TEXT,
+        UNIQUE(repo_path, handler_qn, path)
+    );
+
+    CREATE TABLE IF NOT EXISTS guards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_path TEXT,
+        data TEXT NOT NULL,
+        commit_sha TEXT,
+        location_qn TEXT,
+        line INTEGER,
+        UNIQUE(repo_path, location_qn, line)
+    );
+
+    CREATE TABLE IF NOT EXISTS threat_models (
+        target TEXT PRIMARY KEY,
+        content TEXT NOT NULL,
+        amendments TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        created_by_skill TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS function_summaries (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT,
+        qualified_name TEXT,
+        data TEXT NOT NULL,
+        created_at TEXT,
+        commit_sha TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_fnsummary_repo_qn ON function_summaries(repo_path, qualified_name);
+
+    CREATE TABLE IF NOT EXISTS open_questions (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT,
+        data TEXT NOT NULL,
+        raised_at TEXT,
+        status TEXT,
+        impact TEXT,
+        raised_by_skill TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS conflicts (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT,
+        data TEXT NOT NULL,
+        created_at TEXT,
+        kind TEXT,
+        severity TEXT,
+        status TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS return_value_contracts (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT,
+        function_qualified_name TEXT,
+        data TEXT NOT NULL,
+        created_at TEXT,
+        security_relevance TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_rvc_repo_fn ON return_value_contracts(repo_path, function_qualified_name);
+
+    CREATE TABLE IF NOT EXISTS triage_decisions (
+        hypothesis_id TEXT PRIMARY KEY,
+        repo_path TEXT,
+        decision TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        confidence_at_decision INTEGER,
+        severity_at_decision INTEGER,
+        skill_source TEXT,
+        decided_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_triage_repo ON triage_decisions(repo_path);
+
+    CREATE TABLE IF NOT EXISTS negative_evidence (
+        id TEXT PRIMARY KEY,
+        repo_path TEXT NOT NULL,
+        entry_point TEXT NOT NULL,
+        safe_from TEXT NOT NULL,
+        because TEXT NOT NULL,
+        anchor_file TEXT NOT NULL,
+        anchor_line INTEGER NOT NULL,
+        anchor_text TEXT NOT NULL,
+        anchor_stale INTEGER DEFAULT 0,
+        commit_sha TEXT DEFAULT '',
+        created_at REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ne_repo ON negative_evidence(repo_path);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ne_ep_safe
+        ON negative_evidence(repo_path, entry_point, safe_from);
+    """)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(triage_decisions)")}
+    if "fingerprint" not in cols:
+        conn.execute("ALTER TABLE triage_decisions ADD COLUMN fingerprint TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_triage_fp ON triage_decisions(fingerprint)")
+    hyp_cols = {r["name"] for r in conn.execute("PRAGMA table_info(hypotheses)")}
+    if "fingerprint" not in hyp_cols:
+        conn.execute("ALTER TABLE hypotheses ADD COLUMN fingerprint TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hyp_fp ON hypotheses(repo_path, fingerprint)")
+    if "rejected_at_commit" not in hyp_cols:
+        conn.execute("ALTER TABLE hypotheses ADD COLUMN rejected_at_commit TEXT DEFAULT ''")
+
+    ep_cols = {r["name"] for r in conn.execute("PRAGMA table_info(entry_points)")}
+    if "handler_qn" not in ep_cols:
+        conn.execute("DROP TABLE entry_points")
+        conn.execute("""
+            CREATE TABLE entry_points (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_path TEXT,
+                data TEXT NOT NULL,
+                commit_sha TEXT,
+                handler_qn TEXT,
+                path TEXT,
+                UNIQUE(repo_path, handler_qn, path)
+            )""")
+
+    g_cols = {r["name"] for r in conn.execute("PRAGMA table_info(guards)")}
+    if "location_qn" not in g_cols:
+        conn.execute("DROP TABLE guards")
+        conn.execute("""
+            CREATE TABLE guards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_path TEXT,
+                data TEXT NOT NULL,
+                commit_sha TEXT,
+                location_qn TEXT,
+                line INTEGER,
+                UNIQUE(repo_path, location_qn, line)
+            )""")
+
+    ne_cols = {r["name"] for r in conn.execute("PRAGMA table_info(negative_evidence)")}
+    if "disputed" not in ne_cols:
+        conn.execute("ALTER TABLE negative_evidence ADD COLUMN disputed INTEGER DEFAULT 0")
+
+
+
+_MIGRATIONS = (
+    _migrate_baseline,
+)
+SCHEMA_VERSION = len(_MIGRATIONS)
+
+
 class EvidenceStore:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -24,202 +232,16 @@ class EvidenceStore:
         self._init_schema()
 
     def _init_schema(self):
-        self.conn.executescript("""
-        CREATE TABLE IF NOT EXISTS repositories (
-            path TEXT PRIMARY KEY,
-            commit_sha TEXT,
-            indexed_at TEXT,
-            languages TEXT,
-            notes TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS hypotheses (
-            id TEXT PRIMARY KEY,
-            repo_path TEXT,
-            data TEXT NOT NULL,
-            created_at TEXT,
-            status TEXT,
-            severity INTEGER,
-            confidence INTEGER,
-            priority INTEGER,
-            skill_source TEXT,
-            commit_sha TEXT,
-            FOREIGN KEY(repo_path) REFERENCES repositories(path)
-        );
-
-        CREATE TABLE IF NOT EXISTS evidence (
-            id TEXT PRIMARY KEY,
-            hypothesis_id TEXT,
-            repo_path TEXT,
-            data TEXT NOT NULL,
-            stale INTEGER DEFAULT 0,
-            commit_sha TEXT,
-            FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS coverage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_path TEXT,
-            kind TEXT,
-            name TEXT,
-            status TEXT,
-            blocker TEXT,
-            exclusion_reason TEXT,
-            UNIQUE(repo_path, kind, name)
-        );
-
-        CREATE TABLE IF NOT EXISTS validation_runs (
-            id TEXT PRIMARY KEY,
-            hypothesis_id TEXT,
-            data TEXT NOT NULL,
-            ran_at TEXT,
-            FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS entry_points (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_path TEXT,
-            data TEXT NOT NULL,
-            commit_sha TEXT,
-            handler_qn TEXT,
-            path TEXT,
-            UNIQUE(repo_path, handler_qn, path)
-        );
-
-        CREATE TABLE IF NOT EXISTS guards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_path TEXT,
-            data TEXT NOT NULL,
-            commit_sha TEXT,
-            location_qn TEXT,
-            line INTEGER,
-            UNIQUE(repo_path, location_qn, line)
-        );
-
-        CREATE TABLE IF NOT EXISTS threat_models (
-            target TEXT PRIMARY KEY,
-            content TEXT NOT NULL,
-            amendments TEXT NOT NULL DEFAULT '[]',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            created_by_skill TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS function_summaries (
-            id TEXT PRIMARY KEY,
-            repo_path TEXT,
-            qualified_name TEXT,
-            data TEXT NOT NULL,
-            created_at TEXT,
-            commit_sha TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_fnsummary_repo_qn ON function_summaries(repo_path, qualified_name);
-
-        CREATE TABLE IF NOT EXISTS open_questions (
-            id TEXT PRIMARY KEY,
-            repo_path TEXT,
-            data TEXT NOT NULL,
-            raised_at TEXT,
-            status TEXT,
-            impact TEXT,
-            raised_by_skill TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS conflicts (
-            id TEXT PRIMARY KEY,
-            repo_path TEXT,
-            data TEXT NOT NULL,
-            created_at TEXT,
-            kind TEXT,
-            severity TEXT,
-            status TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS return_value_contracts (
-            id TEXT PRIMARY KEY,
-            repo_path TEXT,
-            function_qualified_name TEXT,
-            data TEXT NOT NULL,
-            created_at TEXT,
-            security_relevance TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_rvc_repo_fn ON return_value_contracts(repo_path, function_qualified_name);
-
-        CREATE TABLE IF NOT EXISTS triage_decisions (
-            hypothesis_id TEXT PRIMARY KEY,
-            repo_path TEXT,
-            decision TEXT NOT NULL,
-            reason TEXT NOT NULL DEFAULT '',
-            confidence_at_decision INTEGER,
-            severity_at_decision INTEGER,
-            skill_source TEXT,
-            decided_at TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_triage_repo ON triage_decisions(repo_path);
-
-        CREATE TABLE IF NOT EXISTS negative_evidence (
-            id TEXT PRIMARY KEY,
-            repo_path TEXT NOT NULL,
-            entry_point TEXT NOT NULL,
-            safe_from TEXT NOT NULL,
-            because TEXT NOT NULL,
-            anchor_file TEXT NOT NULL,
-            anchor_line INTEGER NOT NULL,
-            anchor_text TEXT NOT NULL,
-            anchor_stale INTEGER DEFAULT 0,
-            commit_sha TEXT DEFAULT '',
-            created_at REAL
-        );
-        CREATE INDEX IF NOT EXISTS idx_ne_repo ON negative_evidence(repo_path);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_ne_ep_safe
-            ON negative_evidence(repo_path, entry_point, safe_from);
-        """)
-        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(triage_decisions)")}
-        if "fingerprint" not in cols:
-            self.conn.execute("ALTER TABLE triage_decisions ADD COLUMN fingerprint TEXT")
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_triage_fp ON triage_decisions(fingerprint)")
-        hyp_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(hypotheses)")}
-        if "fingerprint" not in hyp_cols:
-            self.conn.execute("ALTER TABLE hypotheses ADD COLUMN fingerprint TEXT")
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_hyp_fp ON hypotheses(repo_path, fingerprint)")
-        if "rejected_at_commit" not in hyp_cols:
-            self.conn.execute("ALTER TABLE hypotheses ADD COLUMN rejected_at_commit TEXT DEFAULT ''")
-
-        ep_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(entry_points)")}
-        if "handler_qn" not in ep_cols:
-            self.conn.execute("DROP TABLE entry_points")
-            self.conn.execute("""
-                CREATE TABLE entry_points (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    repo_path TEXT,
-                    data TEXT NOT NULL,
-                    commit_sha TEXT,
-                    handler_qn TEXT,
-                    path TEXT,
-                    UNIQUE(repo_path, handler_qn, path)
-                )""")
-
-        g_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(guards)")}
-        if "location_qn" not in g_cols:
-            self.conn.execute("DROP TABLE guards")
-            self.conn.execute("""
-                CREATE TABLE guards (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    repo_path TEXT,
-                    data TEXT NOT NULL,
-                    commit_sha TEXT,
-                    location_qn TEXT,
-                    line INTEGER,
-                    UNIQUE(repo_path, location_qn, line)
-                )""")
-
-        ne_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(negative_evidence)")}
-        if "disputed" not in ne_cols:
-            self.conn.execute("ALTER TABLE negative_evidence ADD COLUMN disputed INTEGER DEFAULT 0")
-
-        self.conn.commit()
+        current = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if current > SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"the evidence database uses schema version {current}, but this version of "
+                f"Arad Code only knows up to {SCHEMA_VERSION}; upgrade Arad Code or point "
+                f"db_path at a different file")
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            _MIGRATIONS[version - 1](self.conn)
+            self.conn.execute(f"PRAGMA user_version={version}")
+            self.conn.commit()
 
     def upsert_repo(self, path: str, commit: str, languages: list[str], notes: str = ""):
         self.conn.execute(
