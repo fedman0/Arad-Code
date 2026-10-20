@@ -103,6 +103,16 @@ python3 -m venv .venv
 
 and install `ripgrep` from your package manager. The minimum versions in `requirements.txt` are the oldest ones the test suite passes with; anything newer, up to the current releases, works too. semgrep is intentionally not in `requirements.txt`; its pinned dependencies fight with the rest, so give it its own environment (`pipx install semgrep` is the easy way).
 
+If you'd rather have it as a normal command, install the checkout with pipx (or `uv tool install .`):
+
+```bash
+pipx install .
+arad --version
+arad --headless list-skills
+```
+
+That gives you an `arad` command on your `PATH` with the skills bundled in, and it takes the same subcommands as `python pentest.py`. ripgrep and codebase-memory-mcp still come from your system, so install those separately.
+
 ## Configuration
 
 The fastest way is the interactive setup:
@@ -513,7 +523,10 @@ It's interactive. Type `headless`, or run `python pentest.py --headless triage <
 ## Development
 
 ```bash
-python -m pytest tests/
+pip install -r requirements.txt pytest
+python -m pytest
 ```
 
-`tests/test_audit_regressions.py` can also be run directly as a script. It prints one line per check and needs no API key, since the model is replaced by a scripted fake.
+None of the tests need an API key or network access; the model is replaced by scripted fakes and the TUI is driven through Textual's test pilot. `tests/test_audit_regressions.py` can also be run directly as a script, and it prints one line per check.
+
+Every push to `main` runs the suite on GitHub Actions: Python 3.10 to 3.14 on Ubuntu, 3.14 on macOS, once more with every dependency pinned to the oldest version `requirements.txt` allows, and a last job that builds the wheel, installs it into a clean virtualenv and runs the `arad` command.
