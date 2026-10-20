@@ -7,7 +7,7 @@
 ![python](https://img.shields.io/badge/python-3.10%20to%203.14-3776AB?logo=python&logoColor=white)
 ![interface](https://img.shields.io/badge/interface-TUI%20%2B%20CLI-0d1117)
 ![output](https://img.shields.io/badge/output-SARIF%202.1.0-2ea043)
-![version](https://img.shields.io/badge/version-2.3.2-informational)
+![version](https://img.shields.io/badge/version-2.3.3-informational)
 
 </div>
 
