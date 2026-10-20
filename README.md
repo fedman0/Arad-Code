@@ -19,8 +19,27 @@ Arad Code drives an LLM through a set of audit "skills" (plain markdown playbook
 
 Every finding goes through an evidence gate before it's allowed out. The engine re-reads the cited file, checks the quoted code is actually at those lines, caps confidence by how the evidence was gathered (a grep hit counts for less than a traced call chain), and keeps anything with unresolved proof obligations out of the report. What survives is something you can open in your editor and check.
 
+## Why Arad Code
+
+There are plenty of SAST tools. Most of them match patterns: they're fast, but they can't tell whether the line they flagged is reachable, who can reach it, or whether a check two calls up already stops it. You get hundreds of results and spend the afternoon closing them. The newer LLM scanners go the other way. They hand files to a model and print what it says, and nothing stands between a confident guess and your report.
+
+Arad Code is built around one rule: nothing reaches the report unless it can be pointed to in the code. The model does the reading and the reasoning, and the engine treats everything it says as a claim that still has to be checked.
+
+- **Every finding points at real code.** Evidence names a file, a line range and a verbatim quote. The engine re-reads the file and throws out anything that isn't actually there. When the code changes later, the anchor goes stale and the finding is checked again.
+- **Confidence is earned, not claimed.** A finding backed by a grep hit is capped far below one backed by a traced call chain, whatever the model says about itself.
+- **Proof obligations.** Each finding carries the questions that decide whether it's real: is the input attacker controlled, is the endpoint reachable, does a guard cover this path. It stays out of the report until they're answered with evidence.
+- **It learns the project before it hunts.** Entry points, middleware, identities, ownership, tenants, trust boundaries and business invariants are mapped first and stored, so the hunts start from a threat model instead of a blank page. That's what lets it find broken authorization and business logic bugs, which no pattern can describe.
+- **It also writes down why something is safe.** With `-N`, a skill records the exact guard line that protects an entry point. If a later commit removes that line, the entry point is flagged again.
+- **Small findings add up.** The last phase looks for low severity issues that combine into a serious one, and only reports a chain when the link between the steps is shown in the code.
+- **Some checks need no model at all.** `peers` finds routes that are missing a protection nearly all their siblings have, straight from the mapped entry points.
+- **You stay in charge.** Your triage decisions survive rescans. `verify` hands a finding to an adversarial pass, optionally on a different model, whose only job is to refute it. `calibrate` shows how the model's stated confidence compares with what you actually accepted.
+- **Safe to point at hostile code.** The model's tools are read-only and can't leave the repository, and the whole scan runs in a locked down container by default.
+- **You know what it costs.** Every call is metered per skill and model, a budget stops a run before it overspends, skills that can't apply to your stack are skipped, independent skills run side by side, and every conversation is saved so you can see how a finding was reached.
+- **It fits what you already use.** SARIF 2.1.0 for GitHub code scanning, a Markdown report, any OpenAI compatible endpoint (OpenAI, OpenRouter, a local model), and skills that are plain markdown files you can write yourself.
+
 ## Contents
 
+- [Why Arad Code](#why-arad-code)
 - [How a scan works](#how-a-scan-works)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -240,16 +259,20 @@ Which skills count as "fast" is set in each skill's header (`tier: fast`, see [W
 ## Quick start
 
 ```bash
+python pentest.py --headless sandbox build
 python pentest.py --headless init ~/src/acme-shop
 python pentest.py run ~/src/acme-shop
 python pentest.py --headless report ~/src/acme-shop --md > report.md
 python pentest.py --headless sarif ~/src/acme-shop --output-dir out/
+python pentest.py --headless usage ~/src/acme-shop
 ```
 
-1. `init` indexes the repo with codebase-memory-mcp and registers it in the evidence store. Run it again after big changes so the graph is fresh.
-2. `run` opens the terminal UI and starts a full scan. A full scan is a few dozen skills, so expect it to take a while and spend real tokens. Ctrl+C stops it, and finished skills are kept.
-3. `report --md` writes a Markdown report, deduplicated and sorted by priority.
-4. `sarif` writes `out/findings.sarif` for GitHub code scanning or any other SARIF viewer.
+1. `sandbox build` builds the container image the scans run in. You can skip it, since the first command that needs the image builds it anyway. It takes a few minutes, once.
+2. `init` indexes the repo with codebase-memory-mcp and registers it in the evidence store. Run it again after big changes so the graph is fresh.
+3. `run` opens the terminal UI and starts a full scan. A full scan is a few dozen skills, so expect it to take a while and spend real tokens. Ctrl+C stops it, and finished skills are kept. Once prices are in your config, `--budget 10` stops it at ten dollars.
+4. `report --md` writes a Markdown report, deduplicated and sorted by priority.
+5. `sarif` writes `out/findings.sarif` for GitHub code scanning or any other SARIF viewer.
+6. `usage` shows what each run cost, step by step and model by model.
 
 To scan only part of the pipeline, pass a phase: `--phase p4` (or just `--phase 4`). To run a single skill: `python pentest.py skill hunt-ssrf ~/src/acme-shop`.
 
@@ -337,6 +360,8 @@ Everything is a subcommand of `pentest.py`. `run` and `skill` open the UI unless
 
 Commands that call the model accept `--api-key`, `--api-base`, `--model` and `--config`. Commands that only read the store take `--config` and work without a key.
 
+`--allow-dangerously-trust` goes before the subcommand (`pentest.py --allow-dangerously-trust run REPO`) and runs it without the container. See [The sandbox](#the-sandbox).
+
 ### Scanning
 
 ```
@@ -346,6 +371,8 @@ pentest.py run REPO [--phase P] [--resume] [--restart] [-N] [-v] [--concurrency 
 pentest.py skill SKILL REPO [--context TEXT] [-N] [--fast-model M] [BUDGET OPTIONS]
 pentest.py verify HYPOTHESIS_ID REPO [--verify-model M] [BUDGET OPTIONS]
 pentest.py list-skills
+pentest.py sandbox build [--no-semgrep]
+pentest.py sandbox status
 ```
 
 - `--resume` skips skills already finished at the current commit. If a run was interrupted and you start it again without a flag, you'll be asked whether to resume.
@@ -669,6 +696,12 @@ python -m pytest
 
 None of the tests need an API key or network access; the model is replaced by scripted fakes and the TUI is driven through Textual's test pilot. `tests/test_audit_regressions.py` can also be run directly as a script, and it prints one line per check.
 
+`tests/sandbox_smoke.py` is the one check that needs Docker. It uses the real image (building it if needed), runs `init` and a skill inside the container against a fake model server, and then probes the container: the repository and root filesystem must be read-only, files outside the mounts invisible, all capabilities dropped, and the API key absent from the command line.
+
+```bash
+python tests/sandbox_smoke.py
+```
+
 The engine lives in `core/`:
 
 | File | What's in it |
@@ -679,8 +712,12 @@ The engine lives in `core/`:
 | `reconcile.py` | re-checking stored evidence against the current code |
 | `prompts.py`, `tool_specs.py` | system prompts, output contracts and tool definitions |
 | `skills.py` | loading skill files and their headers |
+| `stack.py` | the quick look at the repository that decides which skills apply |
+| `context.py` | shortening old tool output in long conversations |
+| `llm.py`, `usage.py`, `transcript.py` | talking to the model, metering it, saving the conversation |
+| `sandbox.py` | starting commands inside the container |
 | `db.py` | the SQLite evidence store |
 
 Changes to the evidence store's schema go in as numbered migrations in `db.py`. The database remembers which version it's at (`PRAGMA user_version`), so an older database is upgraded in place the first time a new release opens it, and a database written by a newer release is refused instead of being damaged.
 
-Every push to `main` runs the suite on GitHub Actions: Python 3.10 to 3.14 on Ubuntu, 3.14 on macOS, once more with every dependency pinned to the oldest version `requirements.txt` allows, and a last job that builds the wheel, installs it into a clean virtualenv and runs the `arad` command.
+Every push to `main` runs the suite on GitHub Actions: Python 3.10 to 3.14 on Ubuntu, 3.14 on macOS, once more with every dependency pinned to the oldest version `requirements.txt` allows, a job that builds the sandbox image and runs the smoke test, and a last one that builds the wheel, installs it into a clean virtualenv and runs the `arad` command.
