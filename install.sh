@@ -173,7 +173,7 @@ if have python3; then
     ok "python3 $PYV"
   else err "python3 $PYV is too old (need >= 3.10)"; FAILED+=(python3); fi
 else
-  sys_pkg python3 python3 python3 python python3 python@3.12
+  sys_pkg python3 python3 python3 python python3 python@3.14
 fi
 
 sys_pkg git   git          git          git       git       git

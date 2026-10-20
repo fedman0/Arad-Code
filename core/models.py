@@ -2,7 +2,11 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 def _norm_fp(text: str) -> str:
@@ -98,7 +102,7 @@ class OpenQuestion(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     question: str
     raised_by_skill: str = ""
-    raised_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    raised_at: str = Field(default_factory=utc_now_iso)
     impact: Literal["blocks_finding", "affects_confidence", "informational"] = "informational"
     affects_hypothesis_ids: list[str] = Field(default_factory=list)
     resolution_hint: Optional[str] = None
@@ -111,7 +115,7 @@ class FunctionSummary(BaseModel):
     qualified_name: str
     file_path: str
     line: int
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=utc_now_iso)
     created_by_skill: str = ""
     commit: str = ""
     inputs: list[str] = Field(default_factory=list)
@@ -137,7 +141,7 @@ class ReturnValueContract(BaseModel):
     security_relevance: Literal["critical", "high", "medium", "low"] = "high"
     expected_handling: Literal["must_check", "may_ignore", "context_dependent"] = "must_check"
     consequence_if_ignored: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=utc_now_iso)
     created_by_skill: str = ""
     commit: str = ""
     ignored_at: list[str] = Field(default_factory=list)
@@ -145,7 +149,7 @@ class ReturnValueContract(BaseModel):
 
 class ConflictRecord(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=utc_now_iso)
     kind: Literal[
         "guard_mismatch",
         "status_inconsistency",
@@ -163,7 +167,7 @@ class ConflictRecord(BaseModel):
 
 class Hypothesis(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=utc_now_iso)
 
     actor: str
     capability: str
@@ -301,8 +305,8 @@ class CoverageItem(BaseModel):
 class ThreatModel(BaseModel):
     target: str
     content: str
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
     amendments: list[dict] = Field(default_factory=list)
     created_by_skill: str = ""
 
@@ -317,13 +321,13 @@ class AttackChain(BaseModel):
     combined_reachability: Literal["proven", "probable", "unknown"] = "unknown"
     attack_steps: list[str] = Field(default_factory=list)
     created_by_skill: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=utc_now_iso)
 
 
 class ValidationRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4())[:8])
     hypothesis_id: str
-    ran_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    ran_at: str = Field(default_factory=utc_now_iso)
     approach: str
     positive_result: Optional[bool] = None
     negative_result: Optional[bool] = None

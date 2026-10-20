@@ -4,7 +4,7 @@
 
 **A security code auditor that reads your codebase like a reviewer would,<br>and only reports what it can point to in the code.**
 
-![python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![python](https://img.shields.io/badge/python-3.10%20to%203.14-3776AB?logo=python&logoColor=white)
 ![interface](https://img.shields.io/badge/interface-TUI%20%2B%20CLI-0d1117)
 ![output](https://img.shields.io/badge/output-SARIF%202.1.0-2ea043)
 ![version](https://img.shields.io/badge/version-2.3.0-informational)
@@ -67,7 +67,7 @@ Only `evidence_supported`, `reproduced` and `human_confirmed` findings are expor
 
 ## Requirements
 
-- Python 3.10 or newer (I develop on 3.12)
+- Python 3.10 or newer. 3.10, 3.11, 3.12, 3.13 and 3.14 are all tested. The 3.15 betas don't work yet because PyYAML has no build for them.
 - An OpenAI compatible chat completions endpoint with tool calling. OpenAI, OpenRouter and self-hosted gateways that speak the same API all work.
 - `git` and [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). The grep tool depends on ripgrep's regex syntax.
 - Recommended: [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) for the code graph (`search_graph`, `trace_path`, `get_code_snippet`). Without it the agent falls back to grep and reads more files by hand.
@@ -101,7 +101,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-and install `ripgrep` from your package manager. semgrep is intentionally not in `requirements.txt`; its pinned dependencies fight with the rest, so give it its own environment (`pipx install semgrep` is the easy way).
+and install `ripgrep` from your package manager. The minimum versions in `requirements.txt` are the oldest ones the test suite passes with; anything newer, up to the current releases, works too. semgrep is intentionally not in `requirements.txt`; its pinned dependencies fight with the rest, so give it its own environment (`pipx install semgrep` is the easy way).
 
 ## Configuration
 

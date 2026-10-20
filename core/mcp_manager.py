@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -166,7 +167,8 @@ def _make_opener(name: str, cfg: dict):
             from mcp.client.stdio import stdio_client
             params = StdioServerParameters(command=command, args=cfg.get("args") or [],
                                            env=cfg.get("env") or None)
-            streams = await stack.enter_async_context(stdio_client(params))
+            errlog = stack.enter_context(open(os.devnull, "w"))
+            streams = await stack.enter_async_context(stdio_client(params, errlog=errlog))
             return await stack.enter_async_context(ClientSession(streams[0], streams[1]))
         return open_stdio
 

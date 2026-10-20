@@ -8,7 +8,7 @@ from .models import (
     Hypothesis, Evidence, CoverageItem, ValidationRun,
     EntryPoint, Guard, SkillResult, ThreatModel,
     FunctionSummary, OpenQuestion, ConflictRecord, ReturnValueContract,
-    NegativeEvidence,
+    NegativeEvidence, utc_now_iso,
 )
 
 
@@ -222,10 +222,9 @@ class EvidenceStore:
         self.conn.commit()
 
     def upsert_repo(self, path: str, commit: str, languages: list[str], notes: str = ""):
-        from datetime import datetime
         self.conn.execute(
             "INSERT OR REPLACE INTO repositories (path, commit_sha, indexed_at, languages, notes) VALUES (?,?,?,?,?)",
-            (path, commit, datetime.utcnow().isoformat(), json.dumps(languages), notes)
+            (path, commit, utc_now_iso(), json.dumps(languages), notes)
         )
         self.conn.commit()
 
@@ -357,8 +356,7 @@ class EvidenceStore:
         return {r["status"]: r["cnt"] for r in rows}
 
     def save_threat_model(self, repo_path: str, content: str, skill: str = "") -> None:
-        from datetime import datetime
-        now = datetime.utcnow().isoformat()
+        now = utc_now_iso()
         self.conn.execute(
             """INSERT INTO threat_models (target, content, amendments, created_at, updated_at, created_by_skill)
                VALUES (?,?,'[]',?,?,?)
@@ -388,7 +386,6 @@ class EvidenceStore:
         return content
 
     def amend_threat_model(self, repo_path: str, addendum: str, skill: str = "") -> bool:
-        from datetime import datetime
         row = self.conn.execute(
             "SELECT amendments FROM threat_models WHERE target=?", (repo_path,)
         ).fetchone()
@@ -397,12 +394,12 @@ class EvidenceStore:
         amendments = json.loads(row["amendments"] or "[]")
         amendments.append({
             "content": addendum,
-            "added_at": datetime.utcnow().isoformat(),
+            "added_at": utc_now_iso(),
             "added_by_skill": skill,
         })
         self.conn.execute(
             "UPDATE threat_models SET amendments=?, updated_at=? WHERE target=?",
-            (json.dumps(amendments), datetime.utcnow().isoformat(), repo_path)
+            (json.dumps(amendments), utc_now_iso(), repo_path)
         )
         self.conn.commit()
         return True
@@ -601,14 +598,13 @@ class EvidenceStore:
 
     def save_triage_decision(self, repo_path: str, h: Hypothesis,
                              decision: str, reason: str = "") -> None:
-        from datetime import datetime
         self.conn.execute(
             """INSERT OR REPLACE INTO triage_decisions
                (hypothesis_id, repo_path, decision, reason, confidence_at_decision,
                 severity_at_decision, skill_source, decided_at, fingerprint)
                VALUES (?,?,?,?,?,?,?,?,?)""",
             (h.id, repo_path, decision, reason, h.confidence, h.severity,
-             h.skill_source, datetime.utcnow().isoformat(), h.fingerprint())
+             h.skill_source, utc_now_iso(), h.fingerprint())
         )
         self.conn.commit()
 
