@@ -1,8 +1,17 @@
 from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Optional
+from urllib.parse import urlsplit
 from openai import AsyncOpenAI
 from .config import Config
+
+
+def _is_openrouter(api_base: Optional[str]) -> bool:
+    try:
+        host = (urlsplit(api_base or "").hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
 
 class LLMClient:
@@ -15,6 +24,14 @@ class LLMClient:
         self._max_tokens = cfg.max_tokens
         self._temperature = cfg.temperature
         self._reasoning_effort = cfg.reasoning_effort or ""
+        self._openrouter = _is_openrouter(cfg.api_base)
+
+    def _reasoning_kwargs(self) -> dict:
+        if not self._reasoning_effort:
+            return {}
+        if self._openrouter:
+            return {"extra_body": {"reasoning": {"effort": self._reasoning_effort}}}
+        return {"extra_body": {"reasoning_effort": self._reasoning_effort}}
 
     async def complete(
         self,
@@ -30,6 +47,7 @@ class LLMClient:
             messages=all_messages,
             max_tokens=self._max_tokens,
             temperature=self._temperature,
+            **self._reasoning_kwargs(),
         )
         return resp.choices[0].message.content or ""
 
@@ -44,9 +62,6 @@ class LLMClient:
         if system:
             all_messages.append({"role": "system", "content": system})
         all_messages.extend(messages)
-        extra: dict = {}
-        if self._reasoning_effort:
-            extra["extra_body"] = {"reasoning": {"effort": self._reasoning_effort}}
         resp = await self._client.chat.completions.create(
             model=self._model,
             messages=all_messages,
@@ -54,7 +69,7 @@ class LLMClient:
             tool_choice=tool_choice or "auto",
             max_tokens=self._max_tokens,
             temperature=self._temperature,
-            **extra,
+            **self._reasoning_kwargs(),
         )
         msg = resp.choices[0].message
         return msg.content, msg.tool_calls
@@ -74,6 +89,7 @@ class LLMClient:
             max_tokens=self._max_tokens,
             temperature=self._temperature,
             stream=True,
+            **self._reasoning_kwargs(),
         )
         async for chunk in stream:
             delta = chunk.choices[0].delta.content if chunk.choices else None
@@ -99,6 +115,7 @@ class LLMClient:
             },
             max_tokens=self._max_tokens,
             temperature=self._temperature,
+            **self._reasoning_kwargs(),
         )
         raw = resp.choices[0].message.content or ""
         try:

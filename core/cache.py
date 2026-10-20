@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -43,6 +44,8 @@ def read_profile_cache(repo_path: str, source: Optional[Path]) -> Optional[dict]
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+    if payload.get("source") != _source_key(source):
+        return None
     if payload.get("mtime") != _source_mtime(source):
         return None
     return payload.get("data")
@@ -52,10 +55,34 @@ def write_profile_cache(repo_path: str, source: Optional[Path], data: dict) -> N
     path = _profile_cache_file(repo_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(
-            {"mtime": _source_mtime(source), "cached_at": time.time(), "data": data}))
+        _atomic_write(path, json.dumps(
+            {"source": _source_key(source), "mtime": _source_mtime(source),
+             "cached_at": time.time(), "data": data}))
     except OSError:
         pass
+
+
+def _source_key(source: Optional[Path]) -> Optional[str]:
+    if source is None:
+        return None
+    try:
+        return str(Path(source).expanduser().resolve())
+    except (OSError, RuntimeError):
+        return str(source)
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _source_mtime(source: Optional[Path]) -> Optional[float]:
@@ -89,7 +116,7 @@ def save_run_state(repo_path: str, state: dict) -> None:
     path = _state_file(repo_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(state, indent=2))
+        _atomic_write(path, json.dumps(state, indent=2))
     except OSError:
         pass
 
