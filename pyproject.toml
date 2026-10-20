@@ -41,13 +41,16 @@ packages = [
     "arad_skills.p3",
     "arad_skills.p4",
     "arad_skills.p5",
+    "arad_sandbox",
 ]
 
 [tool.setuptools.package-dir]
 arad_skills = "skills"
+arad_sandbox = "sandbox"
 
 [tool.setuptools.package-data]
 "*" = ["*.md"]
+arad_sandbox = ["Dockerfile"]
 
 [tool.setuptools.dynamic]
 version = { attr = "core.version.VERSION" }

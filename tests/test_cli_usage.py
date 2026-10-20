@@ -70,8 +70,9 @@ def env(tmp_path, fake_api):
     subprocess.run(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "i"],
                    cwd=repo, check=True)
     e = {k: v for k, v in os.environ.items() if not k.startswith("PENTEST_")}
+    e = {k: v for k, v in e.items() if not k.startswith("ARAD_")}
     e.update(HOME=str(home), XDG_CACHE_HOME=str(tmp_path / "cache"), COLUMNS="200",
-             NO_COLOR="1", TERM="dumb")
+             NO_COLOR="1", TERM="dumb", ARAD_ALLOW_DANGEROUSLY_TRUST="1")
     return {"cfg": str(cfg), "repo": str(repo), "env": e, "tmp": tmp_path}
 
 
@@ -149,3 +150,21 @@ def test_dollar_budget_checks_every_model_in_use(env):
             "--budget", "2")
     assert r.returncode != 0
     assert "needs prices for unpriced-small" in (r.stdout + r.stderr)
+
+
+def test_scans_refuse_to_run_unprotected_without_a_container_runtime(env, fake_api):
+    e = dict(env["env"])
+    e.pop("ARAD_ALLOW_DANGEROUSLY_TRUST")
+    e["ARAD_SANDBOX_RUNTIME"] = "no-such-container-runtime"
+    r = subprocess.run([sys.executable, str(ROOT / "pentest.py"), "--headless", "skill",
+                        "compose-attack-chains", env["repo"], "--config", env["cfg"]],
+                       capture_output=True, text=True, env=e, cwd=env["tmp"], timeout=120)
+    assert r.returncode == 2
+    assert "no container runtime found" in r.stderr and "--allow-dangerously-trust" in r.stderr
+    assert fake_api.requests == []
+    ok = subprocess.run([sys.executable, str(ROOT / "pentest.py"), "--allow-dangerously-trust",
+                         "--headless", "skill", "compose-attack-chains", env["repo"],
+                         "--config", env["cfg"]],
+                        capture_output=True, text=True, env=e, cwd=env["tmp"], timeout=300)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "Running without the sandbox" in ok.stderr and len(fake_api.requests) == 1

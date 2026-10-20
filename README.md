@@ -26,6 +26,7 @@ Every finding goes through an evidence gate before it's allowed out. The engine 
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Quick start](#quick-start)
+- [The sandbox](#the-sandbox)
 - [The terminal UI](#the-terminal-ui)
 - [CLI reference](#cli-reference)
 - [Reading the results](#reading-the-results)
@@ -77,6 +78,7 @@ Only `evidence_supported`, `reproduced` and `human_confirmed` findings are expor
 - `git` and [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`). The grep tool depends on ripgrep's regex syntax.
 - Recommended: [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) for the code graph (`search_graph`, `trace_path`, `get_code_snippet`). Without it the agent falls back to grep and reads more files by hand.
 - Optional: `semgrep`, `jq`, `tree`, `file`.
+- Docker or Podman. Scans run in a container by default (see [The sandbox](#the-sandbox)). Without one, pass `--allow-dangerously-trust`.
 
 ## Installation
 
@@ -250,6 +252,43 @@ python pentest.py --headless sarif ~/src/acme-shop --output-dir out/
 4. `sarif` writes `out/findings.sarif` for GitHub code scanning or any other SARIF viewer.
 
 To scan only part of the pipeline, pass a phase: `--phase p4` (or just `--phase 4`). To run a single skill: `python pentest.py skill hunt-ssrf ~/src/acme-shop`.
+
+## The sandbox
+
+By default every command that lets the model drive tools on a repository (`run`, `skill`, `verify`, `init` and the terminal UI) runs inside a Docker or Podman container. The model reads code that somebody else wrote, and that code can try to talk it into things. The container is a second wall behind the path checks the tools already do.
+
+What the container gets:
+
+- the repository you scan, read-only
+- the evidence store directory and `~/.cache/pentest`, read-write, so results and saved conversations land where they always did (a `transcripts_dir` you moved elsewhere is shared read-write too)
+- your config file and Arad's own code, read-only
+- the `PENTEST_*` and `ARAD_*` variables, passed by name so the key never ends up on a command line
+
+Nothing else from your home directory is mounted. The root filesystem is read-only, all capabilities are dropped, privilege escalation is blocked, and the process runs with your uid under memory and process limits. The network is not restricted, because the model API needs it. Proxies come from your shell's `HTTP_PROXY` style variables, not from Docker's own proxy settings, so the container reaches the network the same way arad does without it. If your endpoint is on localhost (Ollama, a local gateway), or your proxy is, the container shares the host network so it can reach it.
+
+The image is built the first time you need it and tagged with the Arad version, so an upgrade rebuilds it. To build it ahead of time or check the setup:
+
+```bash
+python pentest.py --headless sandbox build
+python pentest.py --headless sandbox status
+```
+
+`sandbox build --no-semgrep` leaves semgrep out, which makes the image a lot smaller.
+
+To run without the container, for example on a machine without Docker:
+
+```bash
+python pentest.py --allow-dangerously-trust run ~/src/acme-shop
+```
+
+`ARAD_ALLOW_DANGEROUSLY_TRUST=1`, or `allow_dangerously_trust: true` in `~/.pentest/config.yaml` (or the file you pass with `--config`), does the same every time. A `config.yaml` picked up from the current directory can't turn the sandbox off, since that directory may be the repository you're scanning. Only skip the sandbox for code you trust.
+
+Good to know:
+
+- The terminal UI only sees the directory you start it in. Start it inside the project you want to scan. Your home directory itself is never shared. `sarif` typed inside the UI can't write into that read-only directory, so run it headless.
+- Extra MCP servers from `~/.claude.json` aren't available inside the container.
+- The image has its own codebase-memory-mcp with its own index under `~/.cache/pentest/sandbox`, so run `init` again the first time you scan a repo in the sandbox.
+- `ARAD_SANDBOX_IMAGE`, `ARAD_SANDBOX_RUNTIME`, `ARAD_SANDBOX_NETWORK`, `ARAD_SANDBOX_MEMORY` (default `4g`) and `ARAD_SANDBOX_PIDS` (default `1024`) change the defaults.
 
 ## The terminal UI
 
@@ -594,10 +633,14 @@ The header is stripped before the skill text goes to the model. A header that do
 | Model conversations | `transcripts/` next to the evidence store (`transcripts_dir`) |
 | tree-sitter grammars | `~/.cache/tree-sitter-language-pack` |
 | Code graph | managed by codebase-memory-mcp |
+| Sandbox code graph and grammars | `~/.cache/pentest/sandbox` |
 
 Nothing is written into the repository you scan.
 
 ## Troubleshooting
+
+**`no container runtime found` or `daemon is not reachable`**
+Scans run in a container by default. Install or start Docker or Podman, or use `--allow-dangerously-trust` for code you trust.
 
 **`api_key is required`**
 Set `PENTEST_API_KEY`, run `config-init`, or pass `--api-key`.

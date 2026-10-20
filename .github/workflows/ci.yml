@@ -101,6 +101,26 @@ jobs:
                       text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
                       print(f"::error title={case.get('classname')}::{case.get('name')}%0A{text}")
 
+  sandbox:
+    name: container sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install host dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Sandbox unit tests
+        run: python -m pytest tests/test_sandbox.py -q
+      - name: Build the sandbox image
+        run: python arad.py --headless sandbox build
+      - name: Sandboxed smoke test
+        run: python tests/sandbox_smoke.py
+
   package:
     name: build and install the package
     runs-on: ubuntu-latest
