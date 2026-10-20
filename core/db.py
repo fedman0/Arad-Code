@@ -405,6 +405,11 @@ class EvidenceStore:
         )
         self.conn.commit()
 
+    def delete_coverage(self, repo_path: str, kind: str, name: str) -> None:
+        self.conn.execute("DELETE FROM coverage WHERE repo_path=? AND kind=? AND name=?",
+                          (repo_path, kind, name))
+        self.conn.commit()
+
     def save_entry_point(self, repo_path: str, ep: EntryPoint, commit: str):
         # without the conflict clause a second p1 run duplicated every row, which
         # inflated peer cluster sizes and dragged conformity toward the cutoff

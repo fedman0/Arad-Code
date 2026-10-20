@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: understand-data-flows
 
 ## Goal

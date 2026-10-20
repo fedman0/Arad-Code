@@ -1,5 +1,6 @@
 ---
 order: 50
+tier: fast
 ---
 
 # SKILL: resolve-dependency-injection

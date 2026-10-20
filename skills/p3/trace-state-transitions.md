@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: trace-state-transitions
 
 ## Contract

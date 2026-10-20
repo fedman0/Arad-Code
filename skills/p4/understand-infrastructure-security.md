@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [web, multiservice]
+---
+
 # SKILL: understand-infrastructure-security
 
 ## Goal

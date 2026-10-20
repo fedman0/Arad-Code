@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [llm]
+---
+
 # SKILL: hunt-ai-llm-mcp-security
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns (p_mcp, p_shadow-ai, p_agent-skills)

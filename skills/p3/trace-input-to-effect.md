@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: trace-input-to-effect
 
 ## Contract

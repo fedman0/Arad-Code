@@ -1,5 +1,6 @@
 ---
 order: 60
+tier: fast
 ---
 
 # SKILL: map-middleware-and-filters

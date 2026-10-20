@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-auth-bypass-patterns
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived, per-library, all supported languages

@@ -21,6 +21,7 @@ class SkillInfo:
     order: int = DEFAULT_ORDER
     parallel: bool = False
     requires: tuple[str, ...] = ()
+    tier: str = "main"
 
 
 def split_frontmatter(text: str, source: str = "skill") -> tuple[dict, str]:
@@ -56,6 +57,13 @@ def _as_flag(value) -> bool:
     return bool(value)
 
 
+def _as_tier(value, source: str) -> str:
+    tier = str(value or "main").strip().lower()
+    if tier not in ("main", "fast"):
+        raise SkillFormatError(f"{source}: tier must be main or fast, not {value!r}")
+    return tier
+
+
 def _as_names(value) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -83,6 +91,7 @@ class SkillCatalog:
             order=_as_order(meta.get("order"), str(path)),
             parallel=_as_flag(meta.get("parallel", False)),
             requires=_as_names(meta.get("requires")),
+            tier=_as_tier(meta.get("tier"), str(path)),
         )
 
     def phase_skills(self, phase: str) -> list[SkillInfo]:

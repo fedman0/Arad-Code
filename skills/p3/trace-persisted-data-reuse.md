@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: trace-persisted-data-reuse
 
 ## Contract

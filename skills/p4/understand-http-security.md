@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [web]
+---
+
 # SKILL: understand-http-security
 
 ## Goal

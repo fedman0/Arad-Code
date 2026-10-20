@@ -136,7 +136,7 @@ _SHORTCUTS = (
 
 _HELP = """
 [bold]Commands[/bold]
-  [cyan]run[/cyan] <repo> [--phase N] [--resume] [--restart]
+  [cyan]run[/cyan] <repo> [--phase N] [--resume] [--restart] [--all-skills]
   [cyan]skill[/cyan] <name> <repo> \\[context…]
   [cyan]workflow[/cyan] <script.py> [--repo <path>]
   [cyan]deep-research[/cyan] <question> [--repo <path>]
@@ -361,6 +361,8 @@ class WorkflowPanel(Static):
             text = f"[yellow]■[/yellow] {_short(agent.label, max(8, room - 9))}  [yellow]stopped[/yellow]{found}"
         elif agent.state == "cached":
             text = f"[green]✓[/green] [dim]{_short(agent.label, max(8, room - 8))}  cached[/dim]{found}"
+        elif agent.state == "skipped":
+            text = f"[dim]– {_short(agent.label, max(8, room - 5))}  n/a[/dim]"
         elif agent.done:
             meta = _fmt_elapsed(agent.elapsed)
             model = _model_short(agent.model, 16)
@@ -1044,6 +1046,8 @@ class AradCodeApp(App):
             return "[yellow]■ stopped[/yellow]"
         if state == "cached":
             return "[green]✓[/green] [dim]cached (resumed)[/dim]"
+        if state == "skipped":
+            return "[dim]– not applicable to this project[/dim]"
         if state == "done":
             return f"[green]✓ done[/green]  [dim]{_fmt_elapsed(elapsed)}[/dim]"
         return "[yellow]● running…[/yellow]"
@@ -1060,6 +1064,8 @@ class AradCodeApp(App):
                 lines.append(f"    [yellow]■[/yellow] {lbl} [yellow]stopped[/yellow]")
             elif a.state == "cached":
                 lines.append(f"    [green]✓[/green] {lbl} [dim]cached[/dim]")
+            elif a.state == "skipped":
+                lines.append(f"    [dim]– {lbl} not applicable[/dim]")
             elif a.done:
                 lines.append(f"    [green]✓[/green] {lbl} [dim]{_fmt_elapsed(a.elapsed)}[/dim]")
             else:
@@ -1350,11 +1356,12 @@ class AradCodeApp(App):
     # ── run ───────────────────────────────────────────────────────────────────
 
     async def _cmd_run(self, args: list[str]):
-        usage = "[red]Usage:[/red] run <repo_path> [--phase N] [--resume] [--restart]"
+        usage = "[red]Usage:[/red] run <repo_path> [--phase N] [--resume] [--restart] [--all-skills]"
         positional: list[str] = []
         phase: Optional[str] = None
         resume = False
         restart = False
+        all_skills = False
         i = 0
         while i < len(args):
             a = args[i]
@@ -1371,6 +1378,8 @@ class AradCodeApp(App):
                 resume = True
             elif a == "--restart":
                 restart = True
+            elif a == "--all-skills":
+                all_skills = True
             elif a.startswith("-") and len(a) > 1:
                 self._log(f"[red]Unknown option:[/red] {_escape(a)}")
                 self._log(usage)
@@ -1484,6 +1493,10 @@ class AradCodeApp(App):
                 self._wf_model.add_agent(name, "run")
                 self._wf_model.finish_agent(name, state="cached")
                 self._log(f"  [dim]✓ {_pad(name, name_w)} cached[/dim]")
+            elif status == "not_applicable":
+                self._wf_model.add_agent(name, "run")
+                self._wf_model.finish_agent(name, state="skipped")
+                self._log(f"  [dim]– {_pad(name, name_w)} skipped: {_escape(str(result or ''))}[/dim]")
             elif status == "interrupted":
                 self._wf_model.add_agent(name, "run")
                 self._wf_model.finish_agent(name, state="stopped")
@@ -1492,12 +1505,13 @@ class AradCodeApp(App):
 
         try:
             try:
+                extra = {"skill_gating": False} if all_skills else {}
                 if phase:
                     await runner.run_phase(phase, repo, verbose=False, resume=resume,
-                                           on_progress=_on_progress)
+                                           on_progress=_on_progress, **extra)
                 else:
                     await runner.run_all(repo, verbose=False, resume=resume,
-                                         on_progress=_on_progress)
+                                         on_progress=_on_progress, **extra)
             except asyncio.CancelledError:
                 for name in interrupted:
                     self._log(f"  [yellow]■[/yellow] {_pad(name, name_w)} [yellow]stopped[/yellow]")

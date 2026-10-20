@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [iac]
+---
+
 # SKILL: hunt-iac-cicd-misconfig
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns (p_terraform, p_kubernetes, p_dockerfile, p_github-actions, p_trailofbits)

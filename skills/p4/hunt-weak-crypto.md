@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-weak-crypto
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

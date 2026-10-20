@@ -53,6 +53,10 @@ Skills live in `skills/`, one folder per phase. A full run goes through them in 
 
 Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it.
 
+`p1` and `p2` run one skill at a time because each builds on the one before. The `p3` and `p4` skills don't depend on each other, so up to three of them run at once (`--concurrency` changes that).
+
+Before a run starts, Arad Code takes a quick look at the repository without calling the model: file types, dependency manifests (`package.json`, `requirements.txt`, `go.mod`, `pom.xml` and the like) and a few telltale lines of code. Skills that can't apply are skipped. A command line tool with no HTML, no templates and no web framework doesn't get the XSS or open redirect hunts, a repo without Docker, Terraform or CI files doesn't get the IaC hunt, and so on. Each skip is printed with its reason and recorded in `coverage`. The check only skips when nothing points the other way, and when it can't finish looking (a huge repository), it skips nothing. `--all-skills` turns it off for one run, `skill_gating: false` for good.
+
 Each finding is a hypothesis with an actor, an entry point, an execution path, the invariant it breaks and the impact. Its status moves like this:
 
 ```
@@ -189,6 +193,11 @@ The prices above only show the shape. Copy the real numbers from your provider's
 | `token_budget` | none | Stop once this many tokens have been used |
 | `transcripts` | `true` | Save every conversation with the model as JSON lines |
 | `transcripts_dir` | empty | Where to save them. Empty means a `transcripts` folder next to `db_path` |
+| `fast_model` | empty | Cheaper model for the `p1` mapping skills. Empty means `model` (see [Using more than one model](#using-more-than-one-model)) |
+| `verify_model` | empty | Model for `verify`. Empty means `model` |
+| `concurrency` | `3` | How many `p3`/`p4` skills may run at the same time. `1` runs everything in order |
+| `context_char_limit` | `200000` | Once a skill's conversation grows past this many characters, older tool output is shortened. `0` keeps everything |
+| `skill_gating` | `true` | Skip skills that don't apply to the project's stack |
 
 ### Environment variables
 
@@ -200,6 +209,8 @@ These override the file, and command line flags override both:
 | `PENTEST_API_BASE` | `api_base` / `--api-base` |
 | `PENTEST_MODEL` | `model` / `--model` |
 | `PENTEST_REASONING_EFFORT` | `reasoning_effort` |
+| `PENTEST_FAST_MODEL` | `fast_model` / `--fast-model` |
+| `PENTEST_VERIFY_MODEL` | `verify_model` / `--verify-model` |
 
 Example with OpenRouter:
 
@@ -208,6 +219,21 @@ export PENTEST_API_BASE=https://openrouter.ai/api/v1
 export PENTEST_API_KEY=sk-or-...
 export PENTEST_MODEL=openai/gpt-5.5
 ```
+
+### Using more than one model
+
+Out of the box everything runs on the one model you set in `model`, and that's a fine way to use it. If you want to bring the cost down, two optional settings let you split the work:
+
+```yaml
+model: gpt-5.5
+fast_model: gpt-5.4-mini
+verify_model: gpt-5.4
+```
+
+- `fast_model` runs the `p1` skills (inventory, build, config, entry points, DI, middleware, deployment, services). That work is mostly reading files and writing down what's there, so a smaller model handles it well. Everything after `p1` still uses `model`.
+- `verify_model` is used by `verify`. Checking a finding with a different model than the one that reported it catches more mistakes than asking the same model twice.
+
+Which skills count as "fast" is set in each skill's header (`tier: fast`, see [Writing your own skills](#writing-your-own-skills)). Every model in use needs to be reachable through the same `api_base`, so on OpenRouter you can mix vendors freely. The usage table, `usage` command and TUI always show which model did what.
 
 ## Quick start
 
@@ -237,7 +263,7 @@ Commands typed into the UI:
 
 | Command | Description |
 |---|---|
-| `run <repo> [--phase N] [--resume] [--restart]` | Full scan, or one phase |
+| `run <repo> [--phase N] [--resume] [--restart] [--all-skills]` | Full scan, or one phase |
 | `skill <name> <repo> [context]` | One skill. Anything after the repo is passed to the skill as extra context |
 | `workflow <script.py> [--repo <path>]` | Run a workflow script (see [Workflow scripts](#workflow-scripts)) |
 | `deep-research <question> [--repo <path>]` | Open ended research: past bug classes, attack surface, grep leads, priority files |
@@ -276,9 +302,10 @@ Commands that call the model accept `--api-key`, `--api-base`, `--model` and `--
 
 ```
 pentest.py init REPO
-pentest.py run REPO [--phase P] [--resume] [--restart] [-N] [-v] [BUDGET OPTIONS]
-pentest.py skill SKILL REPO [--context TEXT] [-N] [BUDGET OPTIONS]
-pentest.py verify HYPOTHESIS_ID REPO [BUDGET OPTIONS]
+pentest.py run REPO [--phase P] [--resume] [--restart] [-N] [-v] [--concurrency N] [--all-skills]
+                     [--fast-model M] [BUDGET OPTIONS]
+pentest.py skill SKILL REPO [--context TEXT] [-N] [--fast-model M] [BUDGET OPTIONS]
+pentest.py verify HYPOTHESIS_ID REPO [--verify-model M] [BUDGET OPTIONS]
 pentest.py list-skills
 ```
 
@@ -286,6 +313,9 @@ pentest.py list-skills
 - `--restart` throws away saved progress and starts over.
 - `-N` / `--negative-evidence` makes the `p3` and `p4` skills also record *why* an entry point is safe: the exact guard line that protects it. Those anchors are re-checked on later runs, and if the guard disappears from the code the entry point is flagged for review again.
 - `-v` prints every tool call as it happens.
+- `--concurrency N` sets how many `p3`/`p4` skills run at once (default 3). Raise it if your API key has the rate limit for it; `1` runs one skill at a time.
+- `--all-skills` runs every skill, including the ones the stack check would skip.
+- `--fast-model` and `--verify-model` override `fast_model` and `verify_model` for one command.
 - `verify` sends one finding to an adversarial pass whose only job is to refute it, then updates its status. Your own triage decisions are never overwritten.
 - Budget options: `--budget USD`, `--token-budget N` and `--no-transcripts`, explained in [Cost, budgets and transcripts](#cost-budgets-and-transcripts).
 
@@ -368,6 +398,8 @@ Costs come from the `pricing` table in your config. On OpenRouter the provider r
 **Budgets.** `--budget 5` (dollars) or `--token-budget 2000000` stops the run before the next model call once the limit is reached. A call that's already in flight is allowed to finish, so the total can end up slightly over. Finished skills are kept, so after raising the limit `--resume` carries on from where it stopped. A run stopped this way exits with status 3. A dollar budget needs a price for every model in use; without one the command refuses to start rather than run unmetered. Both can also be set in the config as `budget_usd` and `token_budget`.
 
 **Transcripts.** Each skill's whole conversation with the model (the prompt, every tool call and its result, the final answer, and the usage) is saved as JSON lines under `transcripts/<repo>/<run id>/`, next to the evidence store. When a finding looks wrong, that file shows how the model got there. The files are only readable by you, but they do contain source code from the scanned repo and whatever the model found in it, secrets included. `--no-transcripts` or `transcripts: false` turns them off.
+
+**Long conversations.** A skill can make dozens of tool calls, and every call sends the whole conversation again, so cost grows quickly with length. Once a conversation passes `context_char_limit` characters, tool output older than the last six results is cut down to its first lines, with a note telling the model it can run the tool again for the rest. This happens in steps rather than on every call, so the provider's prompt cache keeps working. The evidence checks and the saved transcripts always use the full, untrimmed output.
 
 **Models that refuse a parameter.** Some newer models don't accept a custom `temperature`, or want `max_completion_tokens` instead of `max_tokens`. When the endpoint rejects one of those, the client retries without it (or under the other name) and remembers that for the rest of the run, so the same config works across models.
 
@@ -530,15 +562,25 @@ Things that keep a skill working:
 - `shell` runs one read-only command at a time with no pipes: `git log/show/blame/diff/ls-files/ls-tree/rev-parse/status/shortlog/describe/grep`, `find` (tests only, no `-exec` or `-delete`), `tree`, `wc`, `head`, `tail`, `file`, `stat`, `sha256sum`, `sha1sum`, `md5sum`, `jq`, `diff`, `strings`, `cut`. Paths have to stay inside the repo.
 - Valid `exposure` values are `internet`, `authenticated`, `internal`, `admin_only` and `unreachable`. Anything else gets reset to `unspecified`.
 
-A skill file can start with a short YAML header. For now it holds `order`, which decides where the skill runs inside its phase. Lower numbers go first, and a skill without a header counts as 100, so it runs after the numbered ones, in alphabetical order. The built-in `p1` and `p2` skills use 10, 20, 30 and so on, which leaves room to slot one in between:
+A skill file can start with a short YAML header:
 
 ```markdown
 ---
 order: 35
+tier: fast
+parallel: true
+requires: [web, multiservice]
 ---
 
 # SKILL: map-graphql-schema
 ```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `order` | `100` | Where the skill runs inside its phase. Lower goes first; equal numbers run in alphabetical order. The built-in `p1` and `p2` skills use 10, 20, 30 and so on, which leaves room in between |
+| `tier` | `main` | `fast` runs the skill on `fast_model` when one is set |
+| `parallel` | `false` | The skill doesn't depend on others in its phase and may run alongside them |
+| `requires` | none | Skip the skill unless the project shows at least one of these: `web`, `templates`, `iac`, `llm`, `messaging`, `multiservice`, `ldap`, `multitenant` |
 
 The header is stripped before the skill text goes to the model. A header that doesn't parse stops the run with the file name in the error, instead of being sent along as text.
 

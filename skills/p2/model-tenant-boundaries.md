@@ -1,5 +1,6 @@
 ---
 order: 40
+requires: [multitenant]
 ---
 
 # SKILL: model-tenant-boundaries

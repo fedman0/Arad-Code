@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-deserialization-xxe
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

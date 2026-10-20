@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [web]
+---
+
 # SKILL: hunt-open-redirect
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-path-traversal
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: trace-identity-propagation
 
 ## Contract

@@ -119,3 +119,33 @@ def test_token_budget_stops_a_run_with_exit_code_3(env, fake_api):
     assert r.returncode == 3, r.stdout + r.stderr
     assert "token budget reached" in r.stdout and "--resume" in r.stdout
     assert len(fake_api.requests) == 2
+
+
+def test_run_skips_what_does_not_apply(env, fake_api):
+    r = cli(env, "run", env["repo"], "--phase", "p4", "--config", env["cfg"], "--concurrency", "2")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "skipped: no Docker, IaC or CI files found" in r.stdout
+    skipped = r.stdout.count("skipped:")
+    assert skipped >= 5
+    assert len(fake_api.requests) == 26 - skipped
+    again = cli(env, "run", env["repo"], "--phase", "p4", "--config", env["cfg"], "--all-skills")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "skipped:" not in again.stdout
+    assert len(fake_api.requests) == 26 - skipped + 26
+
+
+def test_fast_model_is_used_for_mapping_skills(env, fake_api):
+    r = cli(env, "skill", "inventory-repository", env["repo"], "--config", env["cfg"],
+            "--fast-model", "small-model")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "with small-model" in r.stdout
+    assert fake_api.requests[-1]["model"] == "small-model"
+    other = cli(env, "skill", "hunt-ssrf", env["repo"], "--config", env["cfg"], "--fast-model", "small-model")
+    assert other.returncode == 0 and fake_api.requests[-1]["model"] == "test-model"
+
+
+def test_dollar_budget_checks_every_model_in_use(env):
+    r = cli(env, "run", env["repo"], "--config", env["cfg"], "--fast-model", "unpriced-small",
+            "--budget", "2")
+    assert r.returncode != 0
+    assert "needs prices for unpriced-small" in (r.stdout + r.stderr)

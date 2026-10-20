@@ -1,5 +1,6 @@
 ---
 order: 40
+tier: fast
 ---
 
 # SKILL: map-entry-points

@@ -578,9 +578,45 @@ async def t_restart_and_ctrl_c(c):
     c.check("restart app exited cleanly", app._exception is None, repr(app._exception))
 
 
+async def t_models_usage_and_skips(c):
+    hyp = make_hyp(model="gpt-5.5", verified_with="checker-model")
+    app, runner, db = new_app({
+        "models": {"p0-recon": "gpt-5.5", "p1-surface": "cheap-mini"},
+        "usage": {"p1-surface": {"calls": 2, "prompt_tokens": 1200, "completion_tokens": 300,
+                                 "cost": 0.0123, "unpriced_calls": 0}},
+        "na": {"p4-sqli": "no web server or front-end code found"},
+        "findings": {"p1-surface": [hyp]},
+    })
+    async with app.run_test(size=(160, 44)) as pilot:
+        await type_cmd(pilot, f"run '{c.repo}' --all-skills")
+        await wait_idle(pilot)
+        txt = log_text(app)
+        lines = "\n".join(tree_lines(app))
+        c.check("model and spend logged for a finished skill",
+                "cheap-mini" in txt and "1.5k tok" in txt and "$0.01" in txt, txt[-600:])
+        c.check("skipped skill logged with its reason",
+                "p4-sqli" in txt and "skipped: no web server or front-end code found" in txt, txt[-600:])
+        c.check("skipped skill shown as n/a in the tree", "– p4-sqli" in lines and "n/a" in lines, lines)
+        c.check("model shown next to a finished skill in the tree", "cheap-mini" in lines, lines)
+        c.check("--all-skills turns gating off", runner.calls and runner.calls[-1][-1] == {"skill_gating": False},
+                runner.calls)
+        node = app._wf_model.get_agent("p1-surface")
+        detail = app._agent_detail(node)
+        c.check("skill detail lists model and calls", "cheap-mini" in detail and "2 call(s)" in detail, detail)
+        finding = app._finding_detail(hyp)
+        c.check("finding detail names reporting and verifying models",
+                "gpt-5.5" in finding and "checker-model" in finding, finding)
+        from core.usage import Usage
+        app._on_usage("x@1", "m", Usage(calls=1, prompt_tokens=1000, cost=0.5))
+        await pilot.pause()
+        c.check("status bar shows the session spend", "$0.50" in status_text(app), status_text(app))
+    c.check("models app exited cleanly", app._exception is None, repr(app._exception))
+
+
 CASES = [t_markup_crashes, t_status_findings, t_bindings, t_query_status_and_tasks, t_error_marks_failed,
          t_cli, t_real_cli, t_workflow, t_repo_checks_and_parse, t_resume_count, t_restart_preloaded,
-         t_queue_and_done, t_headless, t_scroll_lock, t_tree_state, t_rtl, t_restart_and_ctrl_c]
+         t_queue_and_done, t_headless, t_scroll_lock, t_tree_state, t_rtl, t_restart_and_ctrl_c,
+         t_models_usage_and_skips]
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda f: f.__name__)

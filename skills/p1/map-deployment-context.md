@@ -1,5 +1,6 @@
 ---
 order: 70
+tier: fast
 ---
 
 # SKILL: map-deployment-context

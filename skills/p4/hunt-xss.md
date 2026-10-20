@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [web, templates]
+---
+
 # SKILL: hunt-xss
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

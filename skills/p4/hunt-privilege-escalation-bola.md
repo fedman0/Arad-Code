@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-privilege-escalation-bola
 
 ## Strategy — breadth first, bounded verification

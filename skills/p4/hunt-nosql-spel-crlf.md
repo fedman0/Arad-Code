@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-nosql-spel-crlf
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns (p_expressjs, p_golang, p_java, p_findsecbugs, p_kotlin)

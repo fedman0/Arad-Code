@@ -1,5 +1,6 @@
 ---
 order: 30
+tier: fast
 ---
 
 # SKILL: resolve-configuration

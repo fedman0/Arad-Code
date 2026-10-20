@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import itertools
 import json
 import re
@@ -31,6 +32,8 @@ from .reconcile import EvidenceReconciler
 from .skills import MAINTENANCE_PHASE, SkillCatalog
 from .transcript import new_run_id, open_transcript
 from .usage import Usage, UsageMeter, usage_scope
+from .context import ContextWindow
+from .stack import StackProfile, describe, detect_stack
 
 
 class SkillRunner(ToolExecutor, EvidenceReconciler):
@@ -41,6 +44,8 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         self.run_id = new_run_id()
         self._llm = LLMClient(cfg, meter=self.meter)
         self._scope_seq = itertools.count(1)
+        self._tier_clients: dict[str, LLMClient] = {}
+        self._stack_cache: dict[str, StackProfile] = {}
         self._db = db
         self._mcp = mcp
         self._mcp_manager = mcp_manager
@@ -61,6 +66,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
     def _emit_tool(self, event: str, data: dict) -> None:
         if self._on_tool_event:
+            data.setdefault("skill", usage_scope.get().rsplit("@", 1)[0])
             try:
                 self._on_tool_event(event, data)
             except Exception:
@@ -138,6 +144,23 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
     def _model_name(self, llm) -> str:
         return getattr(llm, "model", "") or self._cfg.model
 
+    def _llm_for(self, tier: str = "main"):
+        model = {"fast": self._cfg.fast_model, "verify": self._cfg.verify_model}.get(tier, "")
+        if not model or model == self._model_name(self._llm):
+            return self._llm
+        client = self._tier_clients.get(model)
+        if client is None:
+            client = LLMClient(self._cfg, model=model, meter=self.meter)
+            self._tier_clients[model] = client
+        return client
+
+    def _llm_for_skill(self, skill_name: str):
+        info = self._skills.find(skill_name)
+        return self._llm_for(info.tier if info else "main")
+
+    def _window(self) -> ContextWindow:
+        return ContextWindow(self._cfg.context_char_limit)
+
     def _begin_scope(self, name: str, repo_path: str, llm, system: str):
         key = f"{name}@{next(self._scope_seq)}"
         token = usage_scope.set(key)
@@ -160,9 +183,10 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         return total
 
     async def _turn(self, llm, transcript, messages: list[dict], tools: list[dict],
-                    system: str, tool_choice=None):
+                    system: str, tool_choice=None, window: Optional[ContextWindow] = None):
         transcript.sync(messages)
-        return await llm.complete_with_tools(messages, tools, system=system,
+        wire = window.view(messages) if window is not None else messages
+        return await llm.complete_with_tools(wire, tools, system=system,
                                              tool_choice=tool_choice)
 
     async def run_skill(
@@ -174,7 +198,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         verbose: bool = False,
         negative_evidence: bool = False,
     ) -> SkillResult:
-        llm = self._llm
+        llm = self._llm_for_skill(skill_name)
         system = HUNT_SYSTEM_PROMPT if skill_name.startswith("hunt-") else SYSTEM_PROMPT
         key, token, transcript = self._begin_scope(skill_name, repo_path, llm, system)
         status = "interrupted"
@@ -245,6 +269,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
         transcript.bind(messages)
+        window = self._window()
         findings: Optional[dict] = None
 
         finish_tool = next(t for t in TOOLS if t["function"]["name"] == "finish")
@@ -264,6 +289,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             content, tool_calls = await self._turn(
                 llm, transcript, messages, tools_to_use, active_system_prompt,
                 tool_choice={"type": "function", "function": {"name": "finish"}} if forced else None,
+                window=window,
             )
 
             assistant_msg: dict = {"role": "assistant"}
@@ -589,7 +615,8 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                               verbose: bool, resume: bool,
                               on_progress=None,
                               negative_evidence: bool = False,
-                              conditional: frozenset = frozenset()) -> list[SkillResult]:
+                              conditional: frozenset = frozenset(),
+                              skill_gating: Optional[bool] = None) -> list[SkillResult]:
         """Run skills, recording each completion so an interrupted scan can resume.
 
         A scan is many minutes of paid LLM calls; losing all of it to one Ctrl+C
@@ -605,19 +632,17 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             for name in keep:
                 mark_skill_done(repo_path, commit, name)
 
+        gating = self._cfg.skill_gating if skill_gating is None else skill_gating
+        stack = await self._stack(repo_path) if gating else None
+        concurrency = max(1, int(self._cfg.concurrency or 1))
         results: list[SkillResult] = []
         reported_skips: set[str] = set()
-        for name in skills:
-            if name in done:
-                if on_progress and name not in reported_skips:
-                    on_progress(name, "skipped", None)
-                reported_skips.add(name)
-                continue
-            if name in conditional and not self._has_blocking_questions(repo_path):
-                mark_skill_done(repo_path, commit, name)
-                continue
+        batch: list[str] = []
+
+        async def run_one(name: str, parallel: bool) -> SkillResult:
             if on_progress:
-                on_progress(name, "started", {"model": self._model_name(self._llm)})
+                on_progress(name, "started", {"model": self._model_name(self._llm_for_skill(name)),
+                                              "parallel": parallel})
             try:
                 result = await self.run_skill(name, repo_path, verbose=verbose,
                                              negative_evidence=negative_evidence)
@@ -625,11 +650,67 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 if on_progress:
                     on_progress(name, "interrupted", None)
                 raise
-            results.append(result)
             mark_skill_done(repo_path, commit, name)
+            self._db.delete_coverage(repo_path, "skill", name)
             if on_progress:
                 on_progress(name, "done", result)
+            return result
+
+        async def flush() -> None:
+            names = list(batch)
+            batch.clear()
+            if len(names) == 1:
+                results.append(await run_one(names[0], False))
+                return
+            if not names:
+                return
+            gate = asyncio.Semaphore(concurrency)
+
+            async def guarded(name: str) -> SkillResult:
+                async with gate:
+                    return await run_one(name, True)
+
+            tasks = [asyncio.ensure_future(guarded(n)) for n in names]
+            try:
+                results.extend(await asyncio.gather(*tasks))
+            except BaseException:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+        for name in skills:
+            if name in done:
+                if on_progress and name not in reported_skips:
+                    on_progress(name, "skipped", None)
+                reported_skips.add(name)
+                continue
+            info = self._skills.find(name)
+            if stack is not None and info is not None and info.requires \
+                    and not stack.has_any(info.requires):
+                reason = f"no {describe(info.requires)} found"
+                mark_skill_done(repo_path, commit, name)
+                self._db.upsert_coverage(repo_path, CoverageItem(
+                    kind="skill", name=name, status="not_applicable", exclusion_reason=reason),
+                    force=True)
+                if on_progress:
+                    on_progress(name, "not_applicable", reason)
+                continue
+            if info is not None and info.parallel and concurrency > 1:
+                batch.append(name)
+                continue
+            await flush()
+            if name in conditional and not self._has_blocking_questions(repo_path):
+                mark_skill_done(repo_path, commit, name)
+                continue
+            results.append(await run_one(name, False))
+        await flush()
         return results
+
+    async def _stack(self, repo_path: str) -> StackProfile:
+        if repo_path not in self._stack_cache:
+            self._stack_cache[repo_path] = await asyncio.to_thread(detect_stack, repo_path)
+        return self._stack_cache[repo_path]
 
     def _phase_skills(self, phase: str) -> list[str]:
         phase = phase.strip().lower()
@@ -662,25 +743,27 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
     async def run_phase(self, phase: str, repo_path: str, verbose: bool = False,
                         resume: bool = False, on_progress=None,
-                        negative_evidence: bool = False) -> list[SkillResult]:
+                        negative_evidence: bool = False,
+                        skill_gating: Optional[bool] = None) -> list[SkillResult]:
         results = await self._run_skill_list(
             self._phase_skills(phase), repo_path, verbose, resume, on_progress,
-            negative_evidence=negative_evidence)
+            negative_evidence=negative_evidence, skill_gating=skill_gating)
         self.reconcile(repo_path)
         return results
 
     async def run_all(self, repo_path: str, verbose: bool = False,
                       resume: bool = False, on_progress=None,
-                      negative_evidence: bool = False) -> list[SkillResult]:
+                      negative_evidence: bool = False,
+                      skill_gating: Optional[bool] = None) -> list[SkillResult]:
         results = await self._run_skill_list(
             self._all_skills(), repo_path, verbose, resume, on_progress,
             negative_evidence=negative_evidence,
-            conditional=self._maintenance_skills())
+            conditional=self._maintenance_skills(), skill_gating=skill_gating)
         self.reconcile(repo_path)
         return results
 
     async def verify_hypothesis(self, hyp_id: str, repo_path: str, verbose: bool = False) -> dict:
-        llm = self._llm
+        llm = self._llm_for("verify")
         key, token, transcript = self._begin_scope(f"verify:{hyp_id}", repo_path, llm, SYSTEM_PROMPT)
         status = "interrupted"
         try:
@@ -755,11 +838,12 @@ When done, call finish() with:
 
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
         transcript.bind(messages)
+        window = self._window()
         verdict: dict = {}
 
         for iteration in range(25):
             content, tool_calls = await self._turn(
-                llm, transcript, messages, VERIFY_TOOLS, SYSTEM_PROMPT
+                llm, transcript, messages, VERIFY_TOOLS, SYSTEM_PROMPT, window=window
             )
             assistant_msg: dict = {"role": "assistant"}
             if content:
@@ -892,6 +976,7 @@ When done, call finish() with:
 
         messages: list[dict] = [{"role": "user", "content": "\n".join(parts)}]
         transcript.bind(messages)
+        window = self._window()
 
         base_tools = [t for t in TOOLS[:-1] if t["function"]["name"] in _PROMPT_TOOL_NAMES]
 
@@ -924,7 +1009,7 @@ When done, call finish() with:
 
         for _iteration in range(max_iterations):
             content, tool_calls = await self._turn(
-                llm, transcript, messages, run_tools, system
+                llm, transcript, messages, run_tools, system, window=window
             )
 
             assistant_msg: dict = {"role": "assistant"}
@@ -1056,6 +1141,11 @@ When done, call finish() with:
         return h.id
 
     async def close(self) -> None:
+        for client in self._tier_clients.values():
+            try:
+                await client.aclose()
+            except Exception:
+                pass
         for model, u in self.meter.for_scope("").items():
             try:
                 self._db.save_usage(self.run_id, "", "chat", model, u)

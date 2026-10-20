@@ -47,7 +47,8 @@ class FakeLLM:
 
 
 class FakeRunner:
-    def __init__(self, db, skills=None, findings=None, delay=0.01, fail_on=None, block_on=None, llm=None):
+    def __init__(self, db, skills=None, findings=None, delay=0.01, fail_on=None, block_on=None, llm=None,
+                 models=None, usage=None, na=None):
         self.db = db
         self.skills = skills or ["p0-recon", "p1-surface", "p4-sqli"]
         self.findings = findings or {}
@@ -60,6 +61,9 @@ class FakeRunner:
         self.closed = 0
         self.reconciled = []
         self.done = set()
+        self.models = models or {}
+        self.usage = usage or {}
+        self.na = na or {}
 
     def set_event_handler(self, h):
         self.handler = h
@@ -72,7 +76,10 @@ class FakeRunner:
             if resume and name in self.done:
                 on_progress(name, "skipped", None)
                 continue
-            on_progress(name, "started", None)
+            if name in self.na:
+                on_progress(name, "not_applicable", self.na[name])
+                continue
+            on_progress(name, "started", {"model": self.models[name]} if name in self.models else None)
             try:
                 for tool in ("grep", "read_file", "mcp__codebase-memory-mcp__search_graph"):
                     if self.handler:
@@ -88,11 +95,12 @@ class FakeRunner:
             hyps = self.findings.get(name, [])
             for h in hyps:
                 self.db.save_hypothesis(repo, h)
-            on_progress(name, "done", SimpleNamespace(hypotheses=hyps))
+            on_progress(name, "done", SimpleNamespace(hypotheses=hyps, model=self.models.get(name, ""),
+                                                      usage=self.usage.get(name, {})))
         self.reconcile(repo)
 
-    async def run_all(self, repo, verbose=False, resume=False, on_progress=None):
-        self.calls.append(("run_all", repo, resume))
+    async def run_all(self, repo, verbose=False, resume=False, on_progress=None, **kw):
+        self.calls.append(("run_all", repo, resume) + ((kw,) if kw else ()))
         await self._run_list(self.skills, repo, resume, on_progress)
 
     async def run_phase(self, phase, repo, verbose=False, resume=False, on_progress=None):

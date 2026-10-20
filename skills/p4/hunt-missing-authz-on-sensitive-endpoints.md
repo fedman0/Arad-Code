@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [web, multiservice]
+---
+
 # SKILL: hunt-missing-authz-on-sensitive-endpoints
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

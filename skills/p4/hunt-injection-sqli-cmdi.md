@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-injection-sqli-cmdi
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

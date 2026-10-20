@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [messaging, multiservice]
+---
+
 # SKILL: trace-cross-service-messages
 
 ## Contract

@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: understand-business-logic
 
 ## Goal

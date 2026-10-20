@@ -1,5 +1,6 @@
 ---
 order: 80
+tier: fast
 ---
 
 # SKILL: map-service-boundaries

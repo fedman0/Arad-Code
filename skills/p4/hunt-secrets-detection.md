@@ -1,3 +1,7 @@
+---
+parallel: true
+---
+
 # SKILL: hunt-secrets-detection
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns (p_secrets, p_ai-best-practices, p_terraform)

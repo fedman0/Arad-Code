@@ -1,5 +1,6 @@
 ---
 order: 20
+tier: fast
 ---
 
 # SKILL: resolve-build-context

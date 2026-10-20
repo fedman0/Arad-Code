@@ -27,6 +27,11 @@ class Config:
     token_budget: Optional[int] = None
     transcripts: bool = True
     transcripts_dir: str = ""
+    fast_model: str = ""
+    verify_model: str = ""
+    concurrency: int = 3
+    context_char_limit: int = 200000
+    skill_gating: bool = True
 
     def resolved_db(self) -> Path:
         return Path(self.db_path).expanduser()
@@ -113,6 +118,8 @@ def _config_from_data(
     if not isinstance(pricing, dict):
         raise ValueError("pricing in the config file must be a mapping of model names")
     max_retries = _opt_number(data, "max_retries", int)
+    concurrency = _opt_number(data, "concurrency", int)
+    context_char_limit = _opt_number(data, "context_char_limit", int)
     return Config(
         model=model or env.get("PENTEST_MODEL") or _opt(data, "model", "gpt-5.5"),
         api_base=api_base or env.get("PENTEST_API_BASE") or _opt(data, "api_base", "https://api.openai.com/v1"),
@@ -133,6 +140,11 @@ def _config_from_data(
         token_budget=_opt_number(data, "token_budget", int),
         transcripts=_as_bool(_opt(data, "transcripts", True)),
         transcripts_dir=str(_opt(data, "transcripts_dir", "")),
+        fast_model=env.get("PENTEST_FAST_MODEL") or str(_opt(data, "fast_model", "")),
+        verify_model=env.get("PENTEST_VERIFY_MODEL") or str(_opt(data, "verify_model", "")),
+        concurrency=max(1, 3 if concurrency is None else concurrency),
+        context_char_limit=200000 if context_char_limit is None else context_char_limit,
+        skill_gating=_as_bool(_opt(data, "skill_gating", True)),
     )
 
 

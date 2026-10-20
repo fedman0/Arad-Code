@@ -1,3 +1,8 @@
+---
+parallel: true
+requires: [ldap, templates]
+---
+
 # SKILL: hunt-ldap-ssti
 
 ## ⚡ BREADTH SCAN — semgrep-PRO-derived patterns, 15+ languages

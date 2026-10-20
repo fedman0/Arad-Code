@@ -149,6 +149,9 @@ class LLMClient:
             provider_cost=cost,
         )
 
+    async def aclose(self) -> None:
+        await self._client.close()
+
     @staticmethod
     def _with_system(messages: list[dict], system: Optional[str]) -> list[dict]:
         all_messages = []

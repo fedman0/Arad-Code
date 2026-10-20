@@ -1,5 +1,6 @@
 ---
 order: 10
+tier: fast
 ---
 
 # SKILL: inventory-repository
