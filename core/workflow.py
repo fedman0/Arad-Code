@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import itertools
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -10,6 +11,7 @@ _VOTE_COUNT = 3
 _VOTE_THRESHOLD = 2
 _VOTE_RETRIES = 2
 _PARALLEL_CONCURRENCY = 10
+_AGENT_IDS = itertools.count(1)
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -49,6 +51,7 @@ class AgentRecord:
     started_at: float = field(default_factory=time.monotonic)
     ended_at: Optional[float] = None
     error: Optional[str] = None
+    uid: int = field(default_factory=lambda: next(_AGENT_IDS))
 
     def finish(self, error: Optional[str] = None):
         self.ended_at = time.monotonic()
@@ -63,6 +66,7 @@ class WorkflowContext:
         self._on_event: Optional[Callable[[str, Any], None]] = None
         self._runner = None
         self._repo_path: str = ""
+        self._used_labels: set[str] = set()
 
     def bind(self, runner, repo_path: str):
         self._runner = runner
@@ -73,7 +77,25 @@ class WorkflowContext:
 
     def _emit(self, event: str, data: Any = None):
         if self._on_event:
-            self._on_event(event, data)
+            try:
+                self._on_event(event, data)
+            except Exception:
+                pass
+
+    def _unique_label(self, label: str) -> str:
+        candidate = label
+        n = 1
+        while candidate in self._used_labels:
+            n += 1
+            candidate = f"{label} #{n}"
+        self._used_labels.add(candidate)
+        return candidate
+
+    def _close_phase(self):
+        p = self._current_phase
+        if p and not p.ended_at:
+            p.finish()
+            self._emit("phase_end", p)
 
     def _get_phase(self, name: Optional[str]) -> Optional[PhaseInfo]:
         if name:
@@ -84,9 +106,7 @@ class WorkflowContext:
         return self._current_phase
 
     async def phase(self, name: str, *, title: str = "", detail: str = "") -> PhaseInfo:
-        if self._current_phase and not self._current_phase.ended_at:
-            self._current_phase.finish()
-            self._emit("phase_end", self._current_phase)
+        self._close_phase()
         p = PhaseInfo(name=name, title=title or name, detail=detail)
         self._current_phase = p
         self._phases.append(p)
@@ -110,10 +130,16 @@ class WorkflowContext:
         if _runner is None:
             raise RuntimeError("agent() requires a runner — call ctx.bind(runner, repo_path) first")
 
-        rec = AgentRecord(label=label or prompt[:40], phase=phase)
+        rec = AgentRecord(label=self._unique_label(label or " ".join(prompt.split())[:40]), phase=phase)
         self._agents.append(rec)
 
-        p = self._get_phase(phase)
+        try:
+            p = self._get_phase(phase)
+        except ValueError as exc:
+            self._emit("agent_start", rec)
+            rec.finish(error=str(exc))
+            self._emit("agent_error", {"record": rec, "error": str(exc)})
+            return {"error": str(exc)}
         if p:
             p.agents_started += 1
 
@@ -126,17 +152,17 @@ class WorkflowContext:
                 extra_context=extra_context,
                 schema=schema,
             )
-            rec.finish()
-            if p:
-                p.agents_done += 1
-            self._emit("agent_end", {"record": rec, "result": result})
-            return result if isinstance(result, dict) else {}
         except Exception as exc:
             rec.finish(error=str(exc))
             if p:
                 p.agents_done += 1
             self._emit("agent_error", {"record": rec, "error": str(exc)})
             return {"error": str(exc)}
+        rec.finish()
+        if p:
+            p.agents_done += 1
+        self._emit("agent_end", {"record": rec, "result": result})
+        return result if isinstance(result, dict) else {}
 
     async def parallel(self, tasks: list, *, concurrency: int = _PARALLEL_CONCURRENCY) -> list:
         sem = asyncio.Semaphore(concurrency)
@@ -153,14 +179,17 @@ class WorkflowContext:
         raw = await asyncio.gather(*[_run(t) for t in tasks], return_exceptions=True)
         return [{"error": str(r)} if isinstance(r, BaseException) else r for r in raw]
 
-    async def pipeline(self, items: list, *fns) -> list:
+    async def pipeline(self, items: list, *fns, concurrency: int = _PARALLEL_CONCURRENCY) -> list:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _apply(fn, item):
+            async with sem:
+                r = fn(item)
+                return await r if inspect.isawaitable(r) else r
+
         results = list(items)
         for fn in fns:
-            coros = []
-            for item in results:
-                r = fn(item)
-                coros.append(r if inspect.isawaitable(r) else asyncio.sleep(0, result=r))
-            raw = await asyncio.gather(*coros, return_exceptions=True)
+            raw = await asyncio.gather(*[_apply(fn, item) for item in results], return_exceptions=True)
             next_results = []
             for item, r in zip(results, raw):
                 if isinstance(r, BaseException):
@@ -207,10 +236,11 @@ class WorkflowContext:
             for i in range(_VOTE_COUNT)
         ]
 
+        verify_phase = "Verify" if any(ph.name == "Verify" for ph in self._phases) else None
         votes = await self.parallel([
             lambda p=p, i=i: self.agent(
-                p, label=f"verify:{finding.get('id', '?')}:v{i+1}",
-                phase="Verify", schema=VERDICT_SCHEMA,
+                p, label=f"verify:{finding.get('id', '?')}:r{_round+1}:v{i+1}",
+                phase=verify_phase, schema=VERDICT_SCHEMA,
                 runner=_runner, repo_path=_repo,
             )
             for i, p in enumerate(vote_prompts)
@@ -230,6 +260,9 @@ class WorkflowContext:
             return {**finding, "confirmed": True, "votes": votes}
         if len(false_votes) >= _VOTE_THRESHOLD:
             return {**finding, "confirmed": False, "votes": votes}
+        if _round >= _VOTE_RETRIES:
+            return {**finding, "confirmed": None, "votes": votes,
+                    "verification_note": f"inconclusive after {_VOTE_RETRIES + 1} rounds"}
 
         self._emit("inconclusive_vote", {"finding": finding.get("id", "?"), "round": _round})
         return await self.verify_finding(
@@ -273,6 +306,8 @@ async def run_workflow_script(
         ctx.on_event(on_event)
 
     spec = importlib.util.spec_from_file_location("_workflow", script_path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Cannot load workflow script {script_path!r}: expected a Python file ending in .py")
     mod = importlib.util.module_from_spec(spec)
 
     mod.ctx = ctx
@@ -287,5 +322,10 @@ async def run_workflow_script(
     spec.loader.exec_module(mod)
 
     if hasattr(mod, "run") and callable(mod.run):
-        return await mod.run()
-    return {"phases": len(ctx.phases()), "agents": len(ctx.agents())}
+        result = mod.run()
+        if inspect.isawaitable(result):
+            result = await result
+    else:
+        result = {"phases": len(ctx.phases()), "agents": len(ctx.agents())}
+    ctx._close_phase()
+    return result
