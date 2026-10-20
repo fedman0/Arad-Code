@@ -196,8 +196,10 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         extra_context: str = "",
         max_iterations: int = 30,
         verbose: bool = False,
-        negative_evidence: bool = False,
+        negative_evidence: Optional[bool] = None,
     ) -> SkillResult:
+        if negative_evidence is None:
+            negative_evidence = bool(self._cfg.negative_evidence)
         llm = self._llm_for_skill(skill_name)
         system = HUNT_SYSTEM_PROMPT if skill_name.startswith("hunt-") else SYSTEM_PROMPT
         key, token, transcript = self._begin_scope(skill_name, repo_path, llm, system)
@@ -614,7 +616,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
     async def _run_skill_list(self, skills: list[str], repo_path: str,
                               verbose: bool, resume: bool,
                               on_progress=None,
-                              negative_evidence: bool = False,
+                              negative_evidence: Optional[bool] = None,
                               conditional: frozenset = frozenset(),
                               skill_gating: Optional[bool] = None) -> list[SkillResult]:
         """Run skills, recording each completion so an interrupted scan can resume.
@@ -743,7 +745,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
     async def run_phase(self, phase: str, repo_path: str, verbose: bool = False,
                         resume: bool = False, on_progress=None,
-                        negative_evidence: bool = False,
+                        negative_evidence: Optional[bool] = None,
                         skill_gating: Optional[bool] = None) -> list[SkillResult]:
         results = await self._run_skill_list(
             self._phase_skills(phase), repo_path, verbose, resume, on_progress,
@@ -753,7 +755,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
     async def run_all(self, repo_path: str, verbose: bool = False,
                       resume: bool = False, on_progress=None,
-                      negative_evidence: bool = False,
+                      negative_evidence: Optional[bool] = None,
                       skill_gating: Optional[bool] = None) -> list[SkillResult]:
         results = await self._run_skill_list(
             self._all_skills(), repo_path, verbose, resume, on_progress,

@@ -147,17 +147,22 @@ The fastest way is the interactive setup:
 python pentest.py --headless config-init
 ```
 
-It asks for the endpoint, key, model and the codebase-memory-mcp binary, keeps whatever else is already in the file, and writes `~/.pentest/config.yaml` with `0600` permissions.
+It asks for the endpoint, key, model and the codebase-memory-mcp binary, keeps whatever else is already in the file, and writes `~/.pentest/config.yaml` with `0600` permissions. The file it writes lists every setting, so you can open it and change the rest by hand.
 
 ### The config file
 
-Settings are read from the first file that exists:
+Everything Arad Code can be told on the command line or through an environment variable can also live in the config file: the endpoint and models, budgets, concurrency, `-N`, `-v`, `--headless`, the sandbox settings, all of it. Keep one file per setup and point Arad at it.
 
-1. the file passed with `--config` (it's an error if that file doesn't exist)
-2. `./config.yaml` in the directory you run from
-3. `~/.pentest/config.yaml`
+Settings are read from the first of these that applies:
 
-A complete example:
+1. `--config FILE`. Put it before the command and it counts for everything, the terminal UI included (`arad --config ~/audits/acme.yaml`); after a command it counts for that command only. The file has to exist.
+2. `PENTEST_CONFIG=FILE`, the same thing as an environment variable. Handy in a shell profile or a CI job.
+3. `config.yaml` next to `pentest.py`, in your Arad Code checkout.
+4. `~/.pentest/config.yaml`.
+
+A `config.yaml` in the directory you happen to be in is never read. When you audit someone else's code you usually run Arad from inside their repository, and a config file planted there could otherwise send your API key to another server or swap the code graph binary for its own.
+
+[`config.example.yaml`](config.example.yaml) lists every key with its default. A typical file:
 
 ```yaml
 model: gpt-5.5
@@ -219,6 +224,16 @@ The prices above only show the shape. Copy the real numbers from your provider's
 | `concurrency` | `3` | How many `p3`/`p4` skills may run at the same time. `1` runs everything in order |
 | `context_char_limit` | `200000` | Once a skill's conversation grows past this many characters, older tool output is shortened. `0` keeps everything |
 | `skill_gating` | `true` | Skip skills that don't apply to the project's stack |
+| `negative_evidence` | `false` | Same as passing `-N` to every `run` and `skill` (also applies to scans started in the UI) |
+| `verbose` | `false` | Same as passing `-v` to every `run` |
+| `headless` | `false` | Never open the terminal UI, as if every command had `--headless` |
+| `allow_dangerously_trust` | `false` | Run without the container sandbox (see [The sandbox](#the-sandbox)) |
+| `sandbox_runtime` | empty | `docker` or `podman`, or a path to either. Empty means whichever is installed, Docker first |
+| `sandbox_image` | empty | Use this image instead of building one |
+| `sandbox_network` | empty | Container network. Empty means the default bridge, or the host network when the model endpoint is on localhost |
+| `sandbox_memory` | `4g` | Memory limit for the container |
+| `sandbox_pids` | `1024` | Process limit for the container |
+| `sandbox_semgrep` | `true` | Include semgrep when the image is built |
 
 ### Environment variables
 
@@ -226,6 +241,7 @@ These override the file, and command line flags override both:
 
 | Variable | Same as |
 |---|---|
+| `PENTEST_CONFIG` | `--config` before the command |
 | `PENTEST_API_KEY` | `api_key` / `--api-key` |
 | `PENTEST_API_BASE` | `api_base` / `--api-base` |
 | `PENTEST_MODEL` | `model` / `--model` |
@@ -304,14 +320,14 @@ To run without the container, for example on a machine without Docker:
 python pentest.py --allow-dangerously-trust run ~/src/acme-shop
 ```
 
-`ARAD_ALLOW_DANGEROUSLY_TRUST=1`, or `allow_dangerously_trust: true` in `~/.pentest/config.yaml` (or the file you pass with `--config`), does the same every time. A `config.yaml` picked up from the current directory can't turn the sandbox off, since that directory may be the repository you're scanning. Only skip the sandbox for code you trust.
+`ARAD_ALLOW_DANGEROUSLY_TRUST=1`, or `allow_dangerously_trust: true` in your config file, does the same every time. A `config.yaml` sitting in the repository you scan is never read, so it can't turn the sandbox off. Only skip the sandbox for code you trust.
 
 Good to know:
 
 - The terminal UI only sees the directory you start it in. Start it inside the project you want to scan. Your home directory itself is never shared. `sarif` typed inside the UI can't write into that read-only directory, so run it headless.
 - Extra MCP servers from `~/.claude.json` aren't available inside the container.
 - The image has its own codebase-memory-mcp with its own index under `~/.cache/pentest/sandbox`, so run `init` again the first time you scan a repo in the sandbox.
-- `ARAD_SANDBOX_IMAGE`, `ARAD_SANDBOX_RUNTIME`, `ARAD_SANDBOX_NETWORK`, `ARAD_SANDBOX_MEMORY` (default `4g`) and `ARAD_SANDBOX_PIDS` (default `1024`) change the defaults.
+- The `sandbox_*` keys in the config file change the defaults (runtime, image, network, memory, process limit, semgrep). The environment variables `ARAD_SANDBOX_RUNTIME`, `ARAD_SANDBOX_IMAGE`, `ARAD_SANDBOX_NETWORK`, `ARAD_SANDBOX_MEMORY`, `ARAD_SANDBOX_PIDS` and `ARAD_SANDBOX_SEMGREP` override them for one shell.
 
 ## The terminal UI
 
@@ -654,7 +670,7 @@ The header is stripped before the skill text goes to the model. A header that do
 
 | What | Where |
 |---|---|
-| Config | `~/.pentest/config.yaml` |
+| Config | `--config`, `PENTEST_CONFIG`, `config.yaml` next to `pentest.py`, or `~/.pentest/config.yaml` |
 | Evidence store | `~/.pentest/evidence.db` (`db_path`) |
 | Resume state and profile cache | `$XDG_CACHE_HOME/pentest`, usually `~/.cache/pentest` |
 | Model conversations | `transcripts/` next to the evidence store (`transcripts_dir`) |

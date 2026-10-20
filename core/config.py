@@ -3,7 +3,34 @@ import os
 import yaml
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
+
+APP_DIR = Path(__file__).resolve().parent.parent
+USER_CONFIG = "~/.pentest/config.yaml"
+CONFIG_ENV = "PENTEST_CONFIG"
+
+
+def app_config_path() -> Path:
+    return APP_DIR / "config.yaml"
+
+
+def find_config_file(config_file: Optional[str] = None,
+                     env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    env = os.environ if env is None else env
+    if config_file:
+        p = Path(config_file).expanduser()
+        if not p.exists():
+            raise ValueError(f"config file not found: {config_file}")
+        return p
+    if env.get(CONFIG_ENV):
+        p = Path(env[CONFIG_ENV]).expanduser()
+        if not p.exists():
+            raise ValueError(f"config file not found: {env[CONFIG_ENV]} (from {CONFIG_ENV})")
+        return p
+    for p in (app_config_path(), Path(USER_CONFIG).expanduser()):
+        if p.exists():
+            return p
+    return None
 
 
 @dataclass
@@ -32,6 +59,16 @@ class Config:
     concurrency: int = 3
     context_char_limit: int = 200000
     skill_gating: bool = True
+    negative_evidence: bool = False
+    verbose: bool = False
+    headless: bool = False
+    allow_dangerously_trust: bool = False
+    sandbox_runtime: str = ""
+    sandbox_image: str = ""
+    sandbox_network: str = ""
+    sandbox_memory: str = ""
+    sandbox_pids: str = ""
+    sandbox_semgrep: bool = True
 
     def resolved_db(self) -> Path:
         return Path(self.db_path).expanduser()
@@ -145,10 +182,20 @@ def _config_from_data(
         concurrency=max(1, 3 if concurrency is None else concurrency),
         context_char_limit=200000 if context_char_limit is None else context_char_limit,
         skill_gating=_as_bool(_opt(data, "skill_gating", True)),
+        negative_evidence=_as_bool(_opt(data, "negative_evidence", False)),
+        verbose=_as_bool(_opt(data, "verbose", False)),
+        headless=_as_bool(_opt(data, "headless", False)),
+        allow_dangerously_trust=_as_bool(_opt(data, "allow_dangerously_trust", False)),
+        sandbox_runtime=str(_opt(data, "sandbox_runtime", "")),
+        sandbox_image=str(_opt(data, "sandbox_image", "")),
+        sandbox_network=str(_opt(data, "sandbox_network", "")),
+        sandbox_memory=str(_opt(data, "sandbox_memory", "")),
+        sandbox_pids=str(_opt(data, "sandbox_pids", "")),
+        sandbox_semgrep=_as_bool(_opt(data, "sandbox_semgrep", True)),
     )
 
 
-def read_config_file(path: str = "~/.pentest/config.yaml") -> Config:
+def read_config_file(path: str = USER_CONFIG) -> Config:
     p = Path(path).expanduser()
     data = _read_config_data(p) if p.exists() else {}
     return _config_from_data(data)
@@ -160,23 +207,8 @@ def load_config(
     model: Optional[str] = None,
     config_file: Optional[str] = None,
 ) -> Config:
-    data: dict = {}
-
-    if config_file is not None and not Path(config_file).expanduser().exists():
-        raise ValueError(f"config file not found: {config_file}")
-
-    candidates = [
-        config_file,
-        "./config.yaml",
-        "~/.pentest/config.yaml",
-    ]
-    for path in candidates:
-        if path is None:
-            continue
-        p = Path(path).expanduser()
-        if p.exists():
-            data = _read_config_data(p)
-            break
+    path = find_config_file(config_file)
+    data = _read_config_data(path) if path is not None else {}
 
     cfg = _config_from_data(data, api_base=api_base, api_key=api_key, model=model,
                             env=os.environ)
@@ -187,7 +219,7 @@ def load_config(
     return cfg
 
 
-def save_config(cfg: Config, path: str = "~/.pentest/config.yaml"):
+def save_config(cfg: Config, path: str = USER_CONFIG):
     import yaml
     p = Path(path).expanduser()
     if not p.parent.exists():

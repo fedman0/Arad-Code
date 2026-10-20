@@ -1,9 +1,39 @@
 model: gpt-5.5
 api_base: https://api.openai.com/v1
 api_key: sk-...
+fast_model: ""
+verify_model: ""
+reasoning_effort: ""
+max_tokens: 8192
+temperature: 0.0
+max_retries: 4
 
 mcp_server: codebase-memory-mcp
 mcp_args: []
+mcp_allow: {}
 
 db_path: ~/.pentest/evidence.db
 skills_dir: ""  # leave empty to use ./skills relative to project root
+profile_path: ""
+trust_repo_profile: false
+
+concurrency: 3
+skill_gating: true
+context_char_limit: 200000
+negative_evidence: false
+verbose: false
+headless: false
+
+pricing: {}
+budget_usd: null
+token_budget: null
+transcripts: true
+transcripts_dir: ""
+
+allow_dangerously_trust: false
+sandbox_runtime: ""
+sandbox_image: ""
+sandbox_network: ""
+sandbox_memory: ""
+sandbox_pids: ""
+sandbox_semgrep: true

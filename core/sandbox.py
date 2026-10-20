@@ -21,6 +21,15 @@ RUNTIME_ENV = "ARAD_SANDBOX_RUNTIME"
 NETWORK_ENV = "ARAD_SANDBOX_NETWORK"
 MEMORY_ENV = "ARAD_SANDBOX_MEMORY"
 PIDS_ENV = "ARAD_SANDBOX_PIDS"
+SEMGREP_ENV = "ARAD_SANDBOX_SEMGREP"
+CONFIG_SETTINGS = (
+    (RUNTIME_ENV, "sandbox_runtime"),
+    (IMAGE_ENV, "sandbox_image"),
+    (NETWORK_ENV, "sandbox_network"),
+    (MEMORY_ENV, "sandbox_memory"),
+    (PIDS_ENV, "sandbox_pids"),
+    (SEMGREP_ENV, "sandbox_semgrep"),
+)
 IMAGE_NAME = "arad-code-sandbox"
 DEFAULT_MEMORY = "4g"
 DEFAULT_PIDS = "1024"
@@ -36,6 +45,7 @@ PROXY_NAMES = (
 )
 NEVER_PASS = frozenset({INSIDE_ENV, TRUST_ENV, "XDG_CACHE_HOME", "HOME", "CBM_CACHE_DIR"})
 USER_CONFIG = "~/.pentest/config.yaml"
+CONFIG_ENV = "PENTEST_CONFIG"
 APP_ENTRIES = ("core", "pentest.py", "arad.py", "skills", "arad_skills")
 _TRUE = frozenset({"1", "true", "yes", "on"})
 
@@ -155,43 +165,49 @@ def expand(raw: str, home: Path, cwd: Optional[Path] = None) -> Path:
     return p
 
 
-def user_config_path(args: Sequence[str], home: Path, cwd: Optional[Path] = None) -> Path:
-    explicit = option_value(args, "--config")
-    return expand(explicit or USER_CONFIG, home, cwd)
-
-
 def trust_reason(flag: bool, args: Sequence[str], environ: Mapping[str, str],
                  cwd: Optional[Path] = None) -> str:
     if flag:
         return TRUST_FLAG
     if is_truthy(environ.get(TRUST_ENV, "")):
         return TRUST_ENV
-    path = user_config_path(args, home_of(environ), cwd)
-    if path.is_file() and is_truthy(_read_yaml(path).get(TRUST_KEY)):
+    path = effective_config_file(args, home_of(environ), cwd or Path.cwd(), environ)
+    if path is not None and path.is_file() and is_truthy(_read_yaml(path).get(TRUST_KEY)):
         return f"{TRUST_KEY} in {path}"
     return ""
 
 
 def effective_config_file(args: Sequence[str], home: Path, cwd: Path,
-                          untrusted: Sequence[Path] = ()) -> Optional[Path]:
-    explicit = option_value(args, "--config")
+                          environ: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    from . import config as _config
+    environ = os.environ if environ is None else environ
+    explicit = option_value(args, "--config") or environ.get(CONFIG_ENV, "")
     if explicit:
         p = expand(explicit, home, cwd)
         return p.resolve() if p.exists() else None
-    for p in (cwd / "config.yaml", expand(USER_CONFIG, home, cwd)):
-        if not p.exists():
-            continue
-        p = p.resolve()
-        if any(_inside(p, u) for u in untrusted):
-            continue
-        return p
+    for p in (_config.app_config_path(), expand(USER_CONFIG, home, cwd)):
+        if p.exists():
+            return p.resolve()
     return None
 
 
+def with_config_settings(args: Sequence[str], environ: Mapping[str, str],
+                         cwd: Optional[Path] = None) -> dict:
+    merged = dict(environ)
+    path = effective_config_file(args, home_of(environ), cwd or Path.cwd(), environ)
+    data = _read_yaml(path) if path is not None else {}
+    for env_name, key in CONFIG_SETTINGS:
+        value = data.get(key)
+        if merged.get(env_name) or value is None or value == "":
+            continue
+        merged[env_name] = ("1" if is_truthy(value) else "0") if isinstance(value, bool) else str(value)
+    return merged
+
+
 def effective_config(args: Sequence[str], environ: Mapping[str, str], home: Path, cwd: Path,
-                     api_base: Optional[str] = None, untrusted: Sequence[Path] = ()):
+                     api_base: Optional[str] = None):
     from .config import _config_from_data
-    path = effective_config_file(args, home, cwd, untrusted)
+    path = effective_config_file(args, home, cwd, environ)
     data = _read_yaml(path) if path else {}
     try:
         return _config_from_data(data, api_base=api_base, env=dict(environ)), path
@@ -415,12 +431,10 @@ def make_plan(args: Sequence[str], *, cli=None, tui: bool = False,
     root = (root or app_root()).resolve()
     plan = Plan(workdir=str(cwd))
 
-    scanned: list[Path] = []
     for path in requested_paths(cli, args, cwd):
         if _is_unsafe_root(path, home):
             raise SandboxError(f"refusing to expose {path} to the sandbox; "
                                "point arad at a project directory instead")
-        scanned.append(path)
         _add(plan.mounts, Mount(str(path), str(path), True))
 
     if tui:
@@ -428,12 +442,10 @@ def make_plan(args: Sequence[str], *, cli=None, tui: bool = False,
             plan.notes.append(f"the current directory {cwd} is not shared with the sandbox; "
                               "start arad inside the project you want to scan")
         else:
-            scanned.append(cwd)
             _add(plan.mounts, Mount(str(cwd), str(cwd), True))
 
     api_override = option_value(args, "--api-base")
-    cfg, cfg_path = effective_config(args, environ, home, cwd, api_base=api_override,
-                                     untrusted=scanned)
+    cfg, cfg_path = effective_config(args, environ, home, cwd, api_base=api_override)
 
     for entry in APP_ENTRIES:
         p = root / entry
@@ -574,8 +586,9 @@ def ensure_image(runtime: str, environ: Optional[Mapping[str, str]] = None,
     if image_exists(runtime, tag):
         return tag
     if environ.get(IMAGE_ENV, "").strip():
-        raise SandboxError(f"sandbox image {tag} (from {IMAGE_ENV}) is not available locally")
-    build_image(runtime, tag, log=log)
+        raise SandboxError(f"sandbox image {tag} (from {IMAGE_ENV} or sandbox_image) "
+                           "is not available locally")
+    build_image(runtime, tag, semgrep=is_truthy(environ.get(SEMGREP_ENV, "1")), log=log)
     return tag
 
 
@@ -608,6 +621,7 @@ def run_sandboxed(args: Sequence[str], *, cli=None, tui: bool = False,
                   log: Callable[[str], None] = lambda s: print(s, file=sys.stderr)) -> int:
     environ = os.environ if environ is None else environ
     rest = [a for a in args if a != "--headless"]
+    environ = with_config_settings(rest, environ)
     plan = make_plan(rest, cli=cli, tui=tui, environ=environ)
     runtime = require_runtime(environ)
     image = ensure_image(runtime, environ, log=log)
@@ -650,7 +664,7 @@ def gate(args: Sequence[str], *, cli=None, tui_cmds=frozenset(),
 
 
 def status(args: Sequence[str] = (), environ: Optional[Mapping[str, str]] = None) -> list[tuple[str, str]]:
-    environ = os.environ if environ is None else environ
+    environ = with_config_settings(args, os.environ if environ is None else environ)
     rows: list[tuple[str, str]] = []
     reason = trust_reason(False, args, environ)
     rows.append(("mode", f"disabled by {reason}" if reason else "enabled"))
