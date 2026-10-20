@@ -513,6 +513,184 @@ check("a different commit invalidates", completed_skills(rp, "c2") == set())
 check("non-git repo is never resumable", completed_skills(rp, "") == set())
 clear_run_state(rp)
 
+print("\n[engine fixes]")
+import asyncio as _asyncio
+import json as _json
+import subprocess as _subprocess
+from types import SimpleNamespace as _NS
+
+
+class _FakeMCP:
+    async def find_project_for_repo(self, repo):
+        return None
+
+    async def search_graph(self, **kw):
+        return "graph"
+
+    async def trace_path(self, **kw):
+        return _json.dumps(kw)
+
+    async def search_code(self, pattern, limit=50, project=None, regex=False):
+        return _json.dumps({"regex": regex})
+
+    async def get_architecture(self, aspects=None, project=None):
+        return "arch"
+
+    async def close(self):
+        pass
+
+
+def _call(i, name, args):
+    return _NS(id=f"c{i}", function=_NS(name=name, arguments=_json.dumps(args)))
+
+
+class _ScriptedLLM:
+    def __init__(self, turns):
+        self.turns = list(turns)
+        self.messages = []
+
+    async def complete_with_tools(self, messages, tools, system=None, tool_choice=None):
+        self.messages = [dict(m) for m in messages]
+        if not self.turns:
+            return None, [_call(99, "finish", {"findings": {"hypotheses": [], "coverage": [],
+                                                            "open_questions": []}})]
+        turn = self.turns.pop(0)
+        return (turn, None) if isinstance(turn, str) else (None, turn)
+
+
+def _engine_repo():
+    d = Path(tempfile.mkdtemp())
+    (d / "app").mkdir()
+    (d / "app" / "views.py").write_text(
+        "def search(request):\n"
+        "    name = request.GET['name']\n"
+        "    cursor.execute(\"SELECT * FROM users WHERE name = '%s'\" % name)\n"
+        "def other(request):\n"
+        "    cursor.execute(\"SELECT * FROM users WHERE name = '%s'\" % name)\n")
+    return d
+
+
+def _hyp(**kw):
+    d = dict(actor="attacker", capability="sqli", entry_point="app/views.py:search",
+             security_boundary="HTTP", violated_invariant="sql built from input — search() name",
+             observable_impact="read users", severity=9, confidence=7, reachability="proven",
+             input_control="full", guard_coverage="no_paths", exposure="internet", cwe="CWE-89",
+             proof_obligations=[])
+    d.update(kw)
+    return d
+
+
+def _ev(idx, **kw):
+    d = dict(kind="code", description="concat", file_path="app/views.py", line_start=3, line_end=3,
+             snippet="x", hypothesis_index=idx, anchor_text="cursor.execute(\"SELECT * FROM users",
+             analysis_quality={"method": "structural", "confidence": "high"})
+    d.update(kw)
+    return d
+
+
+_er = _engine_repo()
+_es = EvidenceStore(Path(tempfile.mkdtemp()) / "eng.db")
+_erunner = SkillRunner(Config(api_key="d", db_path=str(Path(tempfile.mkdtemp()) / "x.db")), _es, _FakeMCP())
+_erunner._llm = _ScriptedLLM([
+    [_call(1, "search_graph", {"name_pattern": "search"}),
+     _call(2, "trace_path", {"function_name": "search", "mode": "called_by"}),
+     _call(3, "grep", {"pattern": "--pre=sh"})],
+    "thinking out loud without a tool call",
+    [_call(4, "finish", {"findings": {
+        "hypotheses": [_hyp(exposure="network", violated_invariant="first"),
+                       _hyp(status="human_confirmed", id="deadbeef", violated_invariant="second"),
+                       _hyp(severity=12, violated_invariant="third")],
+        "evidence": [_ev(0), _ev(1), _ev(2, line_start=1, line_end=1,
+                                       anchor_text="cursor.execute(\"SELECT")],
+        "coverage": None, "open_questions": None, "entry_points_found": None,
+    }})],
+])
+_res = _asyncio.run(_erunner.run_skill("hunt-injection-sqli-cmdi", str(_er)))
+_tool_out = {m.get("tool_call_id"): m.get("content") for m in _erunner._llm.messages if m.get("role") == "tool"}
+check("called_by maps to inbound callers", '"direction": "inbound"' in _tool_out.get("c2", ""), _tool_out.get("c2"))
+check("grep pattern starting with '-' is not an option", "grep error" not in _tool_out.get("c3", "x"), _tool_out.get("c3"))
+check("text-only reply does not end the skill",
+      any("Continue the skill" in str(m.get("content")) for m in _erunner._llm.messages))
+check("invalid enum value does not drop the hypothesis", len(_res.hypotheses) == 3,
+      [h.violated_invariant for h in _res.hypotheses])
+_h0, _h1, _h2 = _res.hypotheses
+check("invalid exposure falls back to unspecified", _h0.exposure == "unspecified", _h0.exposure)
+check("model cannot mark its own finding human_confirmed", _h1.status != "human_confirmed", _h1.status)
+check("model cannot choose a hypothesis id", _h1.id != "deadbeef")
+check("out-of-range severity is clamped", _h2.severity == 10, _h2.severity)
+_by_h = {}
+for _e in _res.evidence:
+    _by_h.setdefault(_e.hypothesis_id, []).append(_e)
+check("evidence stays attached to its own hypothesis",
+      all(len(_by_h.get(h.id, [])) == 1 for h in _res.hypotheses), {k: len(v) for k, v in _by_h.items()})
+check("anchor that appears twice nearby is flagged ambiguous", _by_h[_h2.id][0].stale,
+      _by_h[_h2.id][0].analysis_quality.limitations)
+check("null open_questions does not become the string 'None'", "None" not in _res.open_questions,
+      _res.open_questions)
+
+_erunner._llm = _ScriptedLLM([[_call(1, "search_graph", {"name_pattern": "search"}),
+                               _call(2, "finish", {"findings": {
+                                   "hypotheses": [_hyp(exposure="network", violated_invariant="first")],
+                                   "evidence": [_ev(0, file_path=str(_er / "app" / "views.py"))],
+                                   "coverage": [], "open_questions": []}})]])
+_res2 = _asyncio.run(_erunner.run_skill("hunt-injection-sqli-cmdi", str(_er)))
+check("rescan merges onto the existing hypothesis id", _res2.hypotheses[0].id == _h0.id)
+_merged_ev = _es.get_all_evidence_for_hypothesis(_h0.id)
+check("rescan evidence follows the merged id", len(_merged_ev) >= 2, len(_merged_ev))
+check("absolute evidence paths are stored repo-relative",
+      all(not e.file_path.startswith("/") for e in _merged_ev), [e.file_path for e in _merged_ev])
+check("no orphaned evidence after a rescan",
+      all(_es.get_hypothesis(str(_er), e.hypothesis_id) for e in _es.list_all_evidence_for_repo(str(_er))))
+
+_es.save_negative_evidence(str(_er), NegativeEvidence(
+    entry_point="app/views.py:search", safe_from="CWE-89", because="x", anchor_file="app/views.py",
+    anchor_line=3, anchor_text="cursor.execute(\"SELECT * FROM users"))
+try:
+    _rec = _erunner.reconcile(str(_er))
+    check("reconcile survives an NE/finding contradiction", True)
+    check("contradiction is recorded", _rec["contradictions_found"] >= 1, _rec)
+    check("contradicted NE is marked disputed", any(n.disputed for n in _es.list_negative_evidence(str(_er))))
+except Exception as _ex:
+    check("reconcile survives an NE/finding contradiction", False, repr(_ex))
+
+_pstore = EvidenceStore(Path(tempfile.mkdtemp()) / "p.db")
+_old = mk(entry_point="/prio", observable_impact="prio-impact", severity=8, confidence=7)
+_old.status = "refuted"
+_pstore.save_hypothesis("/r", _old)
+_again = mk(entry_point="/prio", observable_impact="prio-impact", severity=8, confidence=7)
+_pstore.save_hypothesis("/r", _again)
+check("priority is recomputed after a merge keeps a refuted status",
+      _again.status == "refuted" and _pstore.get_hypothesis("/r", _again.id).priority == 0)
+
+_order = _erunner._all_skills()
+_p1 = [n for n in _order if n in ("inventory-repository", "resolve-build-context",
+                                  "map-entry-points", "resolve-dependency-injection")]
+check("p1 skills run in their declared order",
+      _p1 == ["inventory-repository", "resolve-build-context", "map-entry-points",
+              "resolve-dependency-injection"], _p1)
+check("phase number without the p prefix is accepted", _erunner._phase_skills("4") == _erunner._phase_skills("p4"))
+
+from core.code_analysis import run_shell
+_sr = Path(tempfile.mkdtemp())
+(_sr / "a.txt").write_text("hello\n")
+check("shell allows a read-only command", run_shell(str(_sr), "head -n1 a.txt").strip() == "hello")
+check("shell refuses paths outside the repository", "outside" in run_shell(str(_sr), "head /etc/hostname"))
+check("shell refuses find actions", "not allowed" in run_shell(str(_sr), "find . -delete"))
+check("shell refuses git options that write files", "not allowed" in run_shell(str(_sr), "git log --output=x"))
+check("shell refuses pipes", "not allowed" in run_shell(str(_sr), "head a.txt | wc"))
+
+from core.profile import ProjectProfile
+_pp = ProjectProfile(exposure_overrides={"/admin": "admin_only", "internal/*": "unreachable"})
+check("exposure override respects path segments", _pp.exposure_for("POST /administrator-signup") is None)
+check("relative override pattern matches whole segments only",
+      _pp.exposure_for("GET /v1/notinternal/export") is None
+      and _pp.exposure_for("GET /v1/internal/export -> h") == "unreachable")
+
+from core.config import _config_from_data
+check("trust_repo_profile 'false' stays false",
+      _config_from_data({"trust_repo_profile": "false"}).trust_repo_profile is False)
+
+
 def test_all_regressions():
     assert not FAILS, f"{len(FAILS)} FAILURES: {FAILS}"
 
