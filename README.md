@@ -29,6 +29,7 @@ Every finding goes through an evidence gate before it's allowed out. The engine 
 - [The terminal UI](#the-terminal-ui)
 - [CLI reference](#cli-reference)
 - [Reading the results](#reading-the-results)
+- [Cost, budgets and transcripts](#cost-budgets-and-transcripts)
 - [Project profile (.llmsast.yaml)](#project-profile-llmsastyaml)
 - [Workflow scripts](#workflow-scripts)
 - [Extra MCP servers](#extra-mcp-servers)
@@ -134,7 +135,7 @@ Settings are read from the first file that exists:
 A complete example:
 
 ```yaml
-model: gpt-4o
+model: gpt-5.5
 api_base: https://api.openai.com/v1
 api_key: sk-your-key
 
@@ -153,11 +154,23 @@ trust_repo_profile: false
 
 mcp_allow:
   github: [get_file_contents]
+
+max_retries: 4
+budget_usd: 5
+transcripts: true
+
+pricing:
+  gpt-5.5:
+    input: 1.25
+    cached_input: 0.125
+    output: 10
 ```
+
+The prices above only show the shape. Copy the real numbers from your provider's price list; they're in US dollars per million tokens.
 
 | Key | Default | What it does |
 |---|---|---|
-| `model` | `gpt-4o` | Model name sent to the endpoint |
+| `model` | `gpt-5.5` | Model name sent to the endpoint |
 | `api_base` | `https://api.openai.com/v1` | Base URL of the OpenAI compatible API |
 | `api_key` | none | Required for anything that talks to the model |
 | `mcp_server` | `codebase-memory-mcp` | Binary started for the code graph (looked up on `PATH`) |
@@ -170,6 +183,12 @@ mcp_allow:
 | `profile_path` | empty | Path to a project profile kept outside the target repo (see below) |
 | `trust_repo_profile` | `false` | Allow a `.llmsast.yaml` committed inside the target repo to be loaded |
 | `mcp_allow` | `{}` | Per server list of non read-only MCP tools you explicitly allow (see [Extra MCP servers](#extra-mcp-servers)) |
+| `max_retries` | `4` | How many times a rate limited or failed request is retried before the skill gives up |
+| `pricing` | `{}` | Price per million tokens for each model: `input`, `output` and optionally `cached_input`. Used to show costs and to enforce `budget_usd` |
+| `budget_usd` | none | Stop once spend reaches this many dollars (see [Cost, budgets and transcripts](#cost-budgets-and-transcripts)) |
+| `token_budget` | none | Stop once this many tokens have been used |
+| `transcripts` | `true` | Save every conversation with the model as JSON lines |
+| `transcripts_dir` | empty | Where to save them. Empty means a `transcripts` folder next to `db_path` |
 
 ### Environment variables
 
@@ -187,7 +206,7 @@ Example with OpenRouter:
 ```bash
 export PENTEST_API_BASE=https://openrouter.ai/api/v1
 export PENTEST_API_KEY=sk-or-...
-export PENTEST_MODEL=openai/gpt-4o
+export PENTEST_MODEL=openai/gpt-5.5
 ```
 
 ## Quick start
@@ -225,6 +244,7 @@ Commands typed into the UI:
 | `report`, `peers`, `coverage`, `sarif`, `doctor`, `calibrate`, `reconcile`, `verify`, `init`, `list-skills` | Passed straight to the CLI, run in your current directory |
 | `query <repo> "<expression>"` | Query the evidence store (quote the expression) |
 | `headless` | Leave the UI and continue in the plain CLI |
+| `usage <repo>` | Tokens and cost of recent runs, passed to the CLI like `report` |
 | `help`, `clear`, `exit` | |
 
 `triage`, `config-init` and `query` without an expression ask questions interactively, so run those from the plain CLI.
@@ -242,6 +262,8 @@ Start a line with `>` to ask the model about the current or last run while it's 
 | `↑` `↓` | Command history |
 | `Ctrl+Q` | Quit |
 
+The workflow tree shows which model ran each skill, and the line logged when a skill finishes has its model, token count and cost. The status bar keeps a running total for the session. Opening a skill in the tree shows its calls and tokens in detail, and opening a finding shows the model that reported it and, once you've run `verify`, the model that checked it.
+
 While a command runs, new commands are queued and start one after another. `help`, `clear`, `exit` and `>` questions run immediately. Persian and other right-to-left text in model answers is shaped and reordered so it reads correctly in the terminal.
 
 ## CLI reference
@@ -254,9 +276,9 @@ Commands that call the model accept `--api-key`, `--api-base`, `--model` and `--
 
 ```
 pentest.py init REPO
-pentest.py run REPO [--phase P] [--resume] [--restart] [-N] [-v]
-pentest.py skill SKILL REPO [--context TEXT] [-N]
-pentest.py verify HYPOTHESIS_ID REPO
+pentest.py run REPO [--phase P] [--resume] [--restart] [-N] [-v] [BUDGET OPTIONS]
+pentest.py skill SKILL REPO [--context TEXT] [-N] [BUDGET OPTIONS]
+pentest.py verify HYPOTHESIS_ID REPO [BUDGET OPTIONS]
 pentest.py list-skills
 ```
 
@@ -265,6 +287,7 @@ pentest.py list-skills
 - `-N` / `--negative-evidence` makes the `p3` and `p4` skills also record *why* an entry point is safe: the exact guard line that protects it. Those anchors are re-checked on later runs, and if the guard disappears from the code the entry point is flagged for review again.
 - `-v` prints every tool call as it happens.
 - `verify` sends one finding to an adversarial pass whose only job is to refute it, then updates its status. Your own triage decisions are never overwritten.
+- Budget options: `--budget USD`, `--token-budget N` and `--no-transcripts`, explained in [Cost, budgets and transcripts](#cost-budgets-and-transcripts).
 
 ### Results
 
@@ -278,6 +301,7 @@ pentest.py calibrate [REPO] [--min-samples N]
 pentest.py peers REPO [--save/--no-save]
 pentest.py reconcile REPO
 pentest.py doctor REPO
+pentest.py usage REPO [--run ID] [--limit N]
 pentest.py config-init [--path FILE]
 ```
 
@@ -292,6 +316,7 @@ pentest.py config-init [--path FILE]
 | `peers` | Finds routes missing a protection that nearly all their siblings have. Needs `p1` to have run |
 | `reconcile` | Re-checks every evidence anchor against the current code and recomputes statuses, no model calls |
 | `doctor` | Explains why nothing (or little) is being exported |
+| `usage` | Tokens, cost and models of recent runs; `--run ID` breaks one run down by step |
 
 ### Query language
 
@@ -326,6 +351,25 @@ Join filters with `and`.
 Severity is an integer from 0 to 10: 9 and 10 are critical, 7 and 8 high, 4 to 6 medium, 1 to 3 low, 0 informational. Confidence is capped by how the evidence was gathered: 4 for grep or plain file reads, 7 for structural tools (AST, symbol search), 10 only when a call chain was actually traced.
 
 When a finding you expected isn't in the report, `doctor` and `query REPO "why <id>"` will usually tell you which obligation, open question or stale anchor is holding it back.
+
+## Cost, budgets and transcripts
+
+Every call to the model is metered: input tokens, how many of those the provider served from its prompt cache, output and reasoning tokens, time and cost. `run`, `skill` and `verify` end with a table that breaks this down by step and model, and the numbers are kept in the evidence store:
+
+```bash
+python pentest.py --headless usage ~/src/acme-shop
+python pentest.py --headless usage ~/src/acme-shop --run 20261020-143502-9f3a1c
+```
+
+The first lists recent runs, the second shows one run step by step.
+
+Costs come from the `pricing` table in your config. On OpenRouter the provider reports what each call cost, so you don't need the table there. A model with no known price shows `?` instead of a dollar amount; its token counts are still exact.
+
+**Budgets.** `--budget 5` (dollars) or `--token-budget 2000000` stops the run before the next model call once the limit is reached. A call that's already in flight is allowed to finish, so the total can end up slightly over. Finished skills are kept, so after raising the limit `--resume` carries on from where it stopped. A run stopped this way exits with status 3. A dollar budget needs a price for every model in use; without one the command refuses to start rather than run unmetered. Both can also be set in the config as `budget_usd` and `token_budget`.
+
+**Transcripts.** Each skill's whole conversation with the model (the prompt, every tool call and its result, the final answer, and the usage) is saved as JSON lines under `transcripts/<repo>/<run id>/`, next to the evidence store. When a finding looks wrong, that file shows how the model got there. The files are only readable by you, but they do contain source code from the scanned repo and whatever the model found in it, secrets included. `--no-transcripts` or `transcripts: false` turns them off.
+
+**Models that refuse a parameter.** Some newer models don't accept a custom `temperature`, or want `max_completion_tokens` instead of `max_tokens`. When the endpoint rejects one of those, the client retries without it (or under the other name) and remembers that for the rest of the run, so the same config works across models.
 
 ## Project profile (.llmsast.yaml)
 
@@ -505,6 +549,7 @@ The header is stripped before the skill text goes to the model. A header that do
 | Config | `~/.pentest/config.yaml` |
 | Evidence store | `~/.pentest/evidence.db` (`db_path`) |
 | Resume state and profile cache | `$XDG_CACHE_HOME/pentest`, usually `~/.cache/pentest` |
+| Model conversations | `transcripts/` next to the evidence store (`transcripts_dir`) |
 | tree-sitter grammars | `~/.cache/tree-sitter-language-pack` |
 | Code graph | managed by codebase-memory-mcp |
 

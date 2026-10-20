@@ -22,6 +22,19 @@ from textual.widgets import Footer, Header, Input, RichLog, Static, Tree
 from .rtl import has_rtl as _has_rtl, render as _rtl_render, rtl_markup as _rtlm
 
 from .version import VERSION
+from .usage import Usage, format_cost, format_tokens
+
+def _model_short(model: str, limit: int = 18) -> str:
+    name = (model or "").rsplit("/", 1)[-1]
+    return name if len(name) <= limit else name[:limit - 1] + "…"
+
+
+def _usage_text(usage) -> str:
+    if not usage or not usage.get("calls"):
+        return ""
+    u = Usage.from_dict(usage)
+    return f"{format_tokens(u.total_tokens)} tok · {format_cost(u)}"
+
 
 _SEV_ICON = {
     "critical": "[bright_red]■[/bright_red]",
@@ -44,7 +57,7 @@ _STATUS_STYLE = {
 
 _IMMEDIATE_VERBS = {"help", "clear", "cls", "exit", "quit", "headless"}
 _CLI_VERBS = {"report", "peers", "triage", "coverage", "calibrate", "query", "doctor",
-              "sarif", "init", "reconcile", "verify", "list-skills", "config-init"}
+              "sarif", "init", "reconcile", "verify", "list-skills", "config-init", "usage"}
 
 
 def _sev_label(sev) -> str:
@@ -128,7 +141,7 @@ _HELP = """
   [cyan]workflow[/cyan] <script.py> [--repo <path>]
   [cyan]deep-research[/cyan] <question> [--repo <path>]
   [cyan]report[/cyan] <repo>  ·  peers  ·  coverage  ·  sarif  ·  doctor  ·  calibrate
-  reconcile  ·  verify  ·  init  ·  list-skills  ·  query <repo> "<expression>"
+  reconcile  ·  verify  ·  init  ·  list-skills  ·  usage <repo>  ·  query <repo> "<expression>"
       [dim]passed to pentest.py, run in the current directory[/dim]
   triage  ·  config-init  ·  query <repo>
       [dim]interactive — run these in headless mode[/dim]
@@ -183,6 +196,8 @@ class _AgentNode:
         self.error: Optional[str] = None
         self.started_at = time.monotonic()
         self.findings: list = []
+        self.model = ""
+        self.usage: dict = {}
 
 
 class WorkflowModel:
@@ -347,11 +362,19 @@ class WorkflowPanel(Static):
         elif agent.state == "cached":
             text = f"[green]✓[/green] [dim]{_short(agent.label, max(8, room - 8))}  cached[/dim]{found}"
         elif agent.done:
-            took = _fmt_elapsed(agent.elapsed)
-            text = (f"[green]✓[/green] {_short(agent.label, max(8, room - len(took) - 2))}  "
-                    f"[dim]{took}[/dim]{found}")
+            meta = _fmt_elapsed(agent.elapsed)
+            model = _model_short(agent.model, 16)
+            if model and room - len(meta) - len(model) - 5 >= min(len(agent.label), 16):
+                meta = f"{meta} · {model}"
+            text = (f"[green]✓[/green] {_short(agent.label, max(8, room - len(meta) - 2))}  "
+                    f"[dim]{_escape(meta)}[/dim]{found}")
         else:
-            text = f"[yellow]→[/yellow] {_short(agent.label, max(8, room))}{found}"
+            model = _model_short(agent.model, 16)
+            if model and room - len(model) - 2 >= min(len(agent.label), 16):
+                text = (f"[yellow]→[/yellow] {_short(agent.label, max(8, room - len(model) - 2))}  "
+                        f"[dim]{_escape(model)}[/dim]{found}")
+            else:
+                text = f"[yellow]→[/yellow] {_short(agent.label, max(8, room))}{found}"
         return Text.from_markup(text)
 
     def _finding_label(self, hyp) -> Text:
@@ -417,6 +440,7 @@ class StatusBar(Static):
     elapsed: reactive[float] = reactive(0.0)
     findings: reactive[int] = reactive(0)
     tool: reactive[str] = reactive("")
+    spend: reactive[str] = reactive("")
 
     def render(self) -> Text:
         if self.op:
@@ -428,6 +452,8 @@ class StatusBar(Static):
             parts.append(f"[dim]→ {_short(self.tool, 40)}[/dim]")
         if self.findings:
             parts.append(f"[cyan]{self.findings} finding{'' if self.findings == 1 else 's'}[/cyan]")
+        if self.spend:
+            parts.append(f"[dim]{_escape(self.spend)}[/dim]")
         return Text.from_markup("   ".join(parts))
 
 
@@ -599,6 +625,8 @@ class AradCodeApp(App):
         self._wf_open_key = None
         self._wf_last_click_time: float = 0.0
         self._finding_count: int = 0
+        self._session_usage = Usage()
+        self._current_model: str = ""
         self._last_repo: str = ""
         self._last_db = None
         self._scroll_locked: bool = False
@@ -905,6 +933,9 @@ class AradCodeApp(App):
                 buf.append(token)
             response = "".join(buf)
             self._log_chat(f"[cyan]{_escape(response)}[/cyan]")
+            answered_by = getattr(runner._llm, "model", "")
+            if answered_by:
+                self._log_chat(f"[dim]— {_escape(answered_by)}[/dim]")
             self._log_chat("")
         except Exception as exc:
             self._log_chat(f"[red]Query error:[/red] {_escape(str(exc) or type(exc).__name__)}")
@@ -1039,6 +1070,13 @@ class AradCodeApp(App):
         kind = "Agent" if isinstance(agent.key, tuple) else "Skill"
         lines = [f"\n[bold magenta]{kind}[/bold magenta] [bold]{_short(agent.label)}[/bold]  "
                  f"{self._state_text(agent.state, agent.elapsed, agent.error)}"]
+        if agent.model:
+            lines.append(f"  [dim]model[/dim]     {_escape(agent.model)}")
+        if agent.usage and agent.usage.get("calls"):
+            u = Usage.from_dict(agent.usage)
+            lines.append(f"  [dim]usage[/dim]     {u.calls} call(s) · {format_tokens(u.prompt_tokens)} in "
+                         f"({format_tokens(u.cached_tokens)} cached) · "
+                         f"{format_tokens(u.completion_tokens)} out · {format_cost(u)}")
         if agent.findings:
             lines.append(f"  [dim]findings[/dim]  {len(agent.findings)}")
             for i, h in enumerate(agent.findings, 1):
@@ -1073,6 +1111,9 @@ class AradCodeApp(App):
             ("capability", g("capability")),
             ("entry point", g("entry_point")),
             ("impact", g("observable_impact")),
+            ("skill", g("skill_source")),
+            ("model", g("model")),
+            ("verified with", g("verified_with")),
         )
         for label, value in rows:
             if value:
@@ -1122,7 +1163,8 @@ class AradCodeApp(App):
         elif event == "agent_start":
             rec: AgentRecord = data
             self._log(f"  [yellow]→[/yellow] {_short(rec.label, 80)}")
-            self._wf_model.add_agent(rec.label, rec.phase, key=self._rec_key(rec))
+            node = self._wf_model.add_agent(rec.label, rec.phase, key=self._rec_key(rec))
+            node.model = self._current_model
         elif event == "agent_end":
             rec: AgentRecord = data["record"]
             elapsed = (rec.ended_at or time.monotonic()) - rec.started_at
@@ -1292,7 +1334,18 @@ class AradCodeApp(App):
         mcp_manager = MCPManager.from_claude_config(mcp_allow=cfg.mcp_allow)
         runner = SkillRunner(cfg, db, mcp, mcp_manager=mcp_manager)
         runner.set_event_handler(self._on_tool_event)
+        runner.meter.on_record(self._on_usage)
+        self._current_model = cfg.model
         return cfg, db, mcp, runner
+
+    def _on_usage(self, scope: str, model: str, usage: Usage) -> None:
+        self._session_usage.add(usage)
+        total = self._session_usage
+        try:
+            self.query_one("#status", StatusBar).spend = (
+                f"{format_cost(total)} · {format_tokens(total.total_tokens)} tok")
+        except NoMatches:
+            pass
 
     # ── run ───────────────────────────────────────────────────────────────────
 
@@ -1399,8 +1452,11 @@ class AradCodeApp(App):
                     if dropped:
                         self._add_finding(-dropped)
                 else:
-                    self._wf_model.add_agent(name, "run")
-                self._set_op_label(f"run · {name}")
+                    node = self._wf_model.add_agent(name, "run")
+                model = result.get("model", "") if isinstance(result, dict) else ""
+                if node is not None and model:
+                    node.model = model
+                self._set_op_label(f"run · {name}" + (f" · {_model_short(model)}" if model else ""))
             elif status == "done":
                 hyps = list(getattr(result, "hypotheses", None) or []) if result else []
                 h_count = len(hyps)
@@ -1409,12 +1465,19 @@ class AradCodeApp(App):
                 if hyps:
                     self._wf_model.add_findings(name, hyps)
                 node = self._wf_model.get_agent(name)
+                if node is not None:
+                    node.model = getattr(result, "model", "") or node.model
+                    node.usage = getattr(result, "usage", None) or {}
                 took = _fmt_elapsed(node.elapsed if node else 0.0)
                 if h_count:
                     suffix = f"[cyan]{h_count} finding{'' if h_count == 1 else 's'}[/cyan]"
                 else:
                     suffix = "[dim]no findings[/dim]"
-                self._log(f"  [green]✓[/green] {_pad(name, name_w)} {suffix}  [dim]{took}[/dim]")
+                spent = ""
+                if node is not None and node.model:
+                    spent = " · ".join(x for x in (node.model, _usage_text(node.usage)) if x)
+                    spent = f"  [dim]{_escape(spent)}[/dim]"
+                self._log(f"  [green]✓[/green] {_pad(name, name_w)} {suffix}  [dim]{took}[/dim]{spent}")
                 if h_count:
                     self._add_finding(h_count)
             elif status == "skipped":
@@ -1446,8 +1509,13 @@ class AradCodeApp(App):
                 raise
             self._wf_model.finish_phase("run")
             self._rebuild_panel()
+            spent = ""
+            meter = getattr(runner, "meter", None)
+            if meter is not None and meter.total.calls:
+                spent = (f" · {format_tokens(meter.total.total_tokens)} tok · "
+                         f"{format_cost(meter.total)}")
             self._log(f"\n[green]✓ Scan complete[/green]  [dim]{self._finding_count} finding(s) · "
-                      f"{_fmt_elapsed(time.monotonic() - started)}[/dim]")
+                      f"{_fmt_elapsed(time.monotonic() - started)}{_escape(spent)}[/dim]")
         finally:
             await runner.close()
             self._set_tool("")
@@ -1478,20 +1546,25 @@ class AradCodeApp(App):
         self._log(f"[bold]Running skill[/bold] [cyan]{_escape(skill_name)}[/cyan] on {_escape(repo)}")
         self._wf_model.reset()
         self._wf_model.add_phase("skill", skill_name)
-        self._wf_model.add_agent(skill_name, "skill")
+        node = self._wf_model.add_agent(skill_name, "skill")
+        node.model = getattr(getattr(runner, "_llm", None), "model", "") or ""
         self._rebuild_panel()
 
         try:
             result = await runner.run_skill(skill_name, repo, extra)
             h_count = len(result.hypotheses)
             conf = sum(1 for h in result.hypotheses if h.status in ("evidence_supported", "reproduced"))
+            node.model = getattr(result, "model", "") or node.model
+            node.usage = getattr(result, "usage", None) or {}
             self._wf_model.finish_agent(skill_name)
             if result.hypotheses:
                 self._wf_model.add_findings(skill_name, result.hypotheses)
             self._wf_model.finish_phase("skill")
             self._rebuild_panel()
             noun = "hypothesis" if h_count == 1 else "hypotheses"
-            self._log(f"\n[green]✓ Done.[/green] {h_count} {noun} [dim]({conf} confirmed)[/dim]")
+            spent = " · ".join(x for x in (node.model, _usage_text(node.usage)) if x)
+            self._log(f"\n[green]✓ Done.[/green] {h_count} {noun} [dim]({conf} confirmed)"
+                      f"{'  ' + _escape(spent) if spent else ''}[/dim]")
             self._add_finding(h_count)
             for h in result.hypotheses[:15]:
                 self._log("  " + self._finding_line(h, 70))

@@ -6,7 +6,7 @@ from .models import Hypothesis
 _ENGINE_OWNED_HYPOTHESIS_FIELDS = (
     "id", "created_at", "status", "priority", "rejected_by", "rejected_at_commit",
     "rejection_reason", "rejection_condition", "rejection_controlling_evidence_ids",
-    "validation",
+    "validation", "model", "verified_with",
 )
 
 

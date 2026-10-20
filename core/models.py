@@ -193,6 +193,8 @@ class Hypothesis(BaseModel):
     priority: int = 0
 
     skill_source: str = ""
+    model: str = ""
+    verified_with: str = ""
     rejection_reason: Optional[str] = None
     rejection_controlling_evidence_ids: list[str] = Field(default_factory=list)
     rejection_condition: str = ""
@@ -351,6 +353,8 @@ class SkillResult(BaseModel):
     ignored_returns: list[ReturnValueContract] = Field(default_factory=list)
     coverage_gaps: list[str] = Field(default_factory=list)
     analysis_quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
+    model: str = ""
+    usage: dict = Field(default_factory=dict)
 
 
 FINDINGS_SCHEMA = {

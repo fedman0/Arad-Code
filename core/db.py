@@ -10,6 +10,7 @@ from .models import (
     FunctionSummary, OpenQuestion, ConflictRecord, ReturnValueContract,
     NegativeEvidence, utc_now_iso,
 )
+from .usage import Usage
 
 
 class SchemaVersionError(RuntimeError):
@@ -214,8 +215,32 @@ def _migrate_baseline(conn: sqlite3.Connection) -> None:
 
 
 
+def _migrate_usage(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS llm_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        repo_path TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        model TEXT NOT NULL,
+        calls INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        unpriced_calls INTEGER NOT NULL DEFAULT 0,
+        seconds REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_repo ON llm_usage(repo_path, created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_run ON llm_usage(run_id);
+    """)
+
+
 _MIGRATIONS = (
     _migrate_baseline,
+    _migrate_usage,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -242,6 +267,55 @@ class EvidenceStore:
             _MIGRATIONS[version - 1](self.conn)
             self.conn.execute(f"PRAGMA user_version={version}")
             self.conn.commit()
+
+    def save_usage(self, run_id: str, repo_path: str, scope: str, model: str, usage: Usage) -> None:
+        if not usage.calls:
+            return
+        self.conn.execute(
+            "INSERT INTO llm_usage (run_id, repo_path, scope, model, calls, prompt_tokens, "
+            "cached_tokens, completion_tokens, reasoning_tokens, cost_usd, unpriced_calls, "
+            "seconds, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (run_id, repo_path, scope, model, usage.calls, usage.prompt_tokens,
+             usage.cached_tokens, usage.completion_tokens, usage.reasoning_tokens,
+             usage.cost, usage.unpriced_calls, usage.seconds, utc_now_iso()),
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def _usage_from_row(r) -> Usage:
+        return Usage(calls=r["calls"], prompt_tokens=r["prompt_tokens"],
+                     cached_tokens=r["cached_tokens"], completion_tokens=r["completion_tokens"],
+                     reasoning_tokens=r["reasoning_tokens"], cost=r["cost_usd"],
+                     unpriced_calls=r["unpriced_calls"], seconds=r["seconds"])
+
+    def list_usage(self, repo_path: str, run_id: Optional[str] = None) -> list[dict]:
+        sql = ("SELECT run_id, scope, model, SUM(calls) calls, SUM(prompt_tokens) prompt_tokens, "
+               "SUM(cached_tokens) cached_tokens, SUM(completion_tokens) completion_tokens, "
+               "SUM(reasoning_tokens) reasoning_tokens, SUM(cost_usd) cost_usd, "
+               "SUM(unpriced_calls) unpriced_calls, SUM(seconds) seconds, MIN(created_at) created_at "
+               "FROM llm_usage WHERE repo_path=?")
+        args: list = [repo_path]
+        if run_id:
+            sql += " AND run_id=?"
+            args.append(run_id)
+        sql += " GROUP BY run_id, scope, model ORDER BY MIN(id)"
+        return [{"run_id": r["run_id"], "scope": r["scope"], "model": r["model"],
+                 "created_at": r["created_at"], "usage": self._usage_from_row(r)}
+                for r in self.conn.execute(sql, args)]
+
+    def list_runs(self, repo_path: str, limit: int = 10) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT run_id, MIN(created_at) created_at, SUM(calls) calls, "
+            "SUM(prompt_tokens) prompt_tokens, SUM(cached_tokens) cached_tokens, "
+            "SUM(completion_tokens) completion_tokens, SUM(reasoning_tokens) reasoning_tokens, "
+            "SUM(cost_usd) cost_usd, SUM(unpriced_calls) unpriced_calls, SUM(seconds) seconds, "
+            "GROUP_CONCAT(DISTINCT model) models "
+            "FROM llm_usage WHERE repo_path=? GROUP BY run_id ORDER BY MAX(id) DESC LIMIT ?",
+            (repo_path, limit),
+        ).fetchall()
+        return [{"run_id": r["run_id"], "created_at": r["created_at"],
+                 "models": sorted(set((r["models"] or "").split(","))),
+                 "usage": self._usage_from_row(r)} for r in rows]
 
     def upsert_repo(self, path: str, commit: str, languages: list[str], notes: str = ""):
         self.conn.execute(

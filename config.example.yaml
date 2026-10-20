@@ -1,4 +1,4 @@
-model: gpt-4o
+model: gpt-5.5
 api_base: https://api.openai.com/v1
 api_key: sk-...
 

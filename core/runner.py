@@ -1,4 +1,5 @@
 from __future__ import annotations
+import itertools
 import json
 import re
 import subprocess
@@ -28,13 +29,18 @@ from .intake import (
 from .tool_exec import ToolExecutor
 from .reconcile import EvidenceReconciler
 from .skills import MAINTENANCE_PHASE, SkillCatalog
+from .transcript import new_run_id, open_transcript
+from .usage import Usage, UsageMeter, usage_scope
 
 
 class SkillRunner(ToolExecutor, EvidenceReconciler):
     def __init__(self, cfg: Config, db: EvidenceStore, mcp: CodebaseMemoryClient,
                  mcp_manager=None):
         self._cfg = cfg
-        self._llm = LLMClient(cfg)
+        self.meter = UsageMeter(cfg.pricing, cfg.budget_usd, cfg.token_budget)
+        self.run_id = new_run_id()
+        self._llm = LLMClient(cfg, meter=self.meter)
+        self._scope_seq = itertools.count(1)
         self._db = db
         self._mcp = mcp
         self._mcp_manager = mcp_manager
@@ -129,6 +135,36 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
         return "\n\n".join(parts)
 
+    def _model_name(self, llm) -> str:
+        return getattr(llm, "model", "") or self._cfg.model
+
+    def _begin_scope(self, name: str, repo_path: str, llm, system: str):
+        key = f"{name}@{next(self._scope_seq)}"
+        token = usage_scope.set(key)
+        transcript = open_transcript(self._cfg.resolved_transcripts(), self.run_id, repo_path, name,
+                                     {"model": self._model_name(llm), "system": system})
+        return key, token, transcript
+
+    def _end_scope(self, key: str, token, transcript, name: str, repo_path: str,
+                   status: str) -> Usage:
+        usage_scope.reset(token)
+        per_model = self.meter.for_scope(key)
+        total = Usage()
+        for model, u in per_model.items():
+            total.add(u)
+            try:
+                self._db.save_usage(self.run_id, repo_path, name, model, u)
+            except Exception:
+                pass
+        transcript.close(status=status, models=sorted(per_model), usage=total.to_dict())
+        return total
+
+    async def _turn(self, llm, transcript, messages: list[dict], tools: list[dict],
+                    system: str, tool_choice=None):
+        transcript.sync(messages)
+        return await llm.complete_with_tools(messages, tools, system=system,
+                                             tool_choice=tool_choice)
+
     async def run_skill(
         self,
         skill_name: str,
@@ -137,6 +173,32 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         max_iterations: int = 30,
         verbose: bool = False,
         negative_evidence: bool = False,
+    ) -> SkillResult:
+        llm = self._llm
+        system = HUNT_SYSTEM_PROMPT if skill_name.startswith("hunt-") else SYSTEM_PROMPT
+        key, token, transcript = self._begin_scope(skill_name, repo_path, llm, system)
+        status = "interrupted"
+        try:
+            result = await self._run_skill_inner(
+                skill_name, repo_path, extra_context, max_iterations, verbose,
+                negative_evidence, llm, transcript)
+            status = "done"
+        finally:
+            usage = self._end_scope(key, token, transcript, skill_name, repo_path, status)
+        result.model = self._model_name(llm)
+        result.usage = usage.to_dict()
+        return result
+
+    async def _run_skill_inner(
+        self,
+        skill_name: str,
+        repo_path: str,
+        extra_context: str,
+        max_iterations: int,
+        verbose: bool,
+        negative_evidence: bool,
+        llm,
+        transcript,
     ) -> SkillResult:
         skill_text = self._load_skill(skill_name)
         commit = self._get_commit(repo_path)
@@ -182,6 +244,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         initial_msg = start_instruction
 
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
+        transcript.bind(messages)
         findings: Optional[dict] = None
 
         finish_tool = next(t for t in TOOLS if t["function"]["name"] == "finish")
@@ -198,8 +261,8 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                     ),
                 })
             tools_to_use = [finish_tool] if forced else TOOLS
-            content, tool_calls = await self._llm.complete_with_tools(
-                messages, tools_to_use, system=active_system_prompt,
+            content, tool_calls = await self._turn(
+                llm, transcript, messages, tools_to_use, active_system_prompt,
                 tool_choice={"type": "function", "function": {"name": "finish"}} if forced else None,
             )
 
@@ -299,6 +362,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 continue
             h_data, demotion = _prepare_model_hypothesis(h_data, commit)
             h_data["skill_source"] = skill_name
+            h_data["model"] = self._model_name(llm)
             h, error = _validate_model_hypothesis(h_data)
             if h is None:
                 validation_errors.append(
@@ -553,7 +617,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 mark_skill_done(repo_path, commit, name)
                 continue
             if on_progress:
-                on_progress(name, "started", None)
+                on_progress(name, "started", {"model": self._model_name(self._llm)})
             try:
                 result = await self.run_skill(name, repo_path, verbose=verbose,
                                              negative_evidence=negative_evidence)
@@ -615,8 +679,19 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         self.reconcile(repo_path)
         return results
 
-    async def verify_hypothesis(self, hyp_id: str, repo_path: str,
-                                 verbose: bool = False) -> dict:
+    async def verify_hypothesis(self, hyp_id: str, repo_path: str, verbose: bool = False) -> dict:
+        llm = self._llm
+        key, token, transcript = self._begin_scope(f"verify:{hyp_id}", repo_path, llm, SYSTEM_PROMPT)
+        status = "interrupted"
+        try:
+            verdict = await self._verify_inner(hyp_id, repo_path, verbose, llm, transcript)
+            status = "done"
+        finally:
+            self._end_scope(key, token, transcript, f"verify:{hyp_id}", repo_path, status)
+        return verdict
+
+    async def _verify_inner(self, hyp_id: str, repo_path: str, verbose: bool,
+                            llm, transcript) -> dict:
         hypotheses = self._db.list_hypotheses(repo_path)
         hyp = next((h for h in hypotheses if h.id == hyp_id), None)
         if not hyp:
@@ -679,11 +754,12 @@ When done, call finish() with:
         }]
 
         messages: list[dict] = [{"role": "user", "content": initial_msg}]
+        transcript.bind(messages)
         verdict: dict = {}
 
         for iteration in range(25):
-            content, tool_calls = await self._llm.complete_with_tools(
-                messages, VERIFY_TOOLS, system=SYSTEM_PROMPT
+            content, tool_calls = await self._turn(
+                llm, transcript, messages, VERIFY_TOOLS, SYSTEM_PROMPT
             )
             assistant_msg: dict = {"role": "assistant"}
             if content:
@@ -762,6 +838,8 @@ When done, call finish() with:
             reason = verdict.get("refutation_reason")
             if reason:
                 hyp.rejection_reason = str(reason)
+        hyp.verified_with = self._model_name(llm)
+        verdict["model"] = hyp.verified_with
         self._db.save_hypothesis(repo_path, hyp)
         self.reconcile(repo_path)
 
@@ -775,6 +853,29 @@ When done, call finish() with:
         schema: Optional[dict] = None,
         system_override: Optional[str] = None,
         max_iterations: int = 20,
+    ) -> Any:
+        llm = self._llm
+        system = system_override or SYSTEM_PROMPT
+        key, token, transcript = self._begin_scope("prompt", repo_path, llm, system)
+        status = "interrupted"
+        try:
+            result = await self._run_prompt_inner(prompt, repo_path, extra_context, schema,
+                                                  system, max_iterations, llm, transcript)
+            status = "done"
+        finally:
+            self._end_scope(key, token, transcript, "prompt", repo_path, status)
+        return result
+
+    async def _run_prompt_inner(
+        self,
+        prompt: str,
+        repo_path: str,
+        extra_context: str,
+        schema: Optional[dict],
+        system: str,
+        max_iterations: int,
+        llm,
+        transcript,
     ) -> Any:
         commit = self._get_commit(repo_path) if repo_path else ""
 
@@ -790,6 +891,7 @@ When done, call finish() with:
             )
 
         messages: list[dict] = [{"role": "user", "content": "\n".join(parts)}]
+        transcript.bind(messages)
 
         base_tools = [t for t in TOOLS[:-1] if t["function"]["name"] in _PROMPT_TOOL_NAMES]
 
@@ -818,12 +920,11 @@ When done, call finish() with:
         advertised_mcp = {
             t.get("function", {}).get("name", "") for t in mcp_tools if isinstance(t, dict)
         }
-        system = system_override or SYSTEM_PROMPT
         result: Any = None
 
         for _iteration in range(max_iterations):
-            content, tool_calls = await self._llm.complete_with_tools(
-                messages, run_tools, system=system
+            content, tool_calls = await self._turn(
+                llm, transcript, messages, run_tools, system
             )
 
             assistant_msg: dict = {"role": "assistant"}
@@ -916,6 +1017,7 @@ When done, call finish() with:
         """
         commit = self._get_commit(repo_path) or self._db.get_commit(repo_path) or ""
         h_data, demotion = _prepare_model_hypothesis(h_data, commit)
+        h_data["model"] = self._model_name(self._llm)
         h, error = _validate_model_hypothesis(h_data)
         if h is None:
             raise ValueError(f"invalid workflow finding: {error}")
@@ -954,6 +1056,11 @@ When done, call finish() with:
         return h.id
 
     async def close(self) -> None:
+        for model, u in self.meter.for_scope("").items():
+            try:
+                self._db.save_usage(self.run_id, "", "chat", model, u)
+            except Exception:
+                pass
         await self._mcp.close()
         if self._mcp_manager:
             await self._mcp_manager.close()

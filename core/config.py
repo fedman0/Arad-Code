@@ -8,7 +8,7 @@ from typing import Optional
 
 @dataclass
 class Config:
-    model: str = "gpt-4o"
+    model: str = "gpt-5.5"
     api_base: str = "https://api.openai.com/v1"
     api_key: str = ""
     mcp_server: str = "codebase-memory-mcp"
@@ -21,9 +21,24 @@ class Config:
     profile_path: str = ""
     trust_repo_profile: bool = False
     mcp_allow: dict = field(default_factory=dict)
+    max_retries: int = 4
+    pricing: dict = field(default_factory=dict)
+    budget_usd: Optional[float] = None
+    token_budget: Optional[int] = None
+    transcripts: bool = True
+    transcripts_dir: str = ""
 
     def resolved_db(self) -> Path:
         return Path(self.db_path).expanduser()
+
+    def resolved_transcripts(self) -> Optional[Path]:
+        if not self.transcripts:
+            return None
+        if self.transcripts_dir:
+            return Path(self.transcripts_dir).expanduser()
+        if self.db_path in ("", ":memory:"):
+            return None
+        return self.resolved_db().parent / "transcripts"
 
     def resolved_skills(self) -> Path:
         if self.skills_dir:
@@ -65,6 +80,21 @@ def _as_bool(value) -> bool:
     return False
 
 
+def _opt_number(data: dict, key: str, kind):
+    value = data.get(key)
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{key} in the config file must be a number")
+    try:
+        number = kind(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} in the config file must be a number") from None
+    if number < 0:
+        raise ValueError(f"{key} in the config file must not be negative")
+    return number
+
+
 def _config_from_data(
     data: dict,
     api_base: Optional[str] = None,
@@ -79,8 +109,12 @@ def _config_from_data(
     mcp_allow = _opt(data, "mcp_allow", {})
     if not isinstance(mcp_allow, dict):
         raise ValueError("mcp_allow in the config file must be a mapping")
+    pricing = _opt(data, "pricing", {})
+    if not isinstance(pricing, dict):
+        raise ValueError("pricing in the config file must be a mapping of model names")
+    max_retries = _opt_number(data, "max_retries", int)
     return Config(
-        model=model or env.get("PENTEST_MODEL") or _opt(data, "model", "gpt-4o"),
+        model=model or env.get("PENTEST_MODEL") or _opt(data, "model", "gpt-5.5"),
         api_base=api_base or env.get("PENTEST_API_BASE") or _opt(data, "api_base", "https://api.openai.com/v1"),
         api_key=api_key or env.get("PENTEST_API_KEY") or _opt(data, "api_key", ""),
         mcp_server=_opt(data, "mcp_server", "codebase-memory-mcp"),
@@ -93,6 +127,12 @@ def _config_from_data(
         profile_path=_opt(data, "profile_path", ""),
         trust_repo_profile=_as_bool(_opt(data, "trust_repo_profile", False)),
         mcp_allow=mcp_allow,
+        max_retries=4 if max_retries is None else max_retries,
+        pricing=pricing,
+        budget_usd=_opt_number(data, "budget_usd", float),
+        token_budget=_opt_number(data, "token_budget", int),
+        transcripts=_as_bool(_opt(data, "transcripts", True)),
+        transcripts_dir=str(_opt(data, "transcripts_dir", "")),
     )
 
 
