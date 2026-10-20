@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arad-code"
+dynamic = ["version", "dependencies"]
+description = "LLM agent that audits source code for security vulnerabilities and backs every finding with evidence"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Mohammad Hossein Abedini", email = "mhmd.abedinii@gmail.com" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Environment :: Console",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+arad = "arad:main"
+
+[project.urls]
+Homepage = "https://github.com/fedman0/Arad-Code"
+Issues = "https://github.com/fedman0/Arad-Code/issues"
+
+[tool.setuptools]
+py-modules = ["pentest", "arad"]
+packages = [
+    "core",
+    "arad_skills",
+    "arad_skills.p0",
+    "arad_skills.p1",
+    "arad_skills.p2",
+    "arad_skills.p3",
+    "arad_skills.p4",
+    "arad_skills.p5",
+]
+
+[tool.setuptools.package-dir]
+arad_skills = "skills"
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]
+
+[tool.setuptools.dynamic]
+version = { attr = "core.version.VERSION" }
+dependencies = { file = ["requirements.txt"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

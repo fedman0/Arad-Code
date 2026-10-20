@@ -14,3 +14,5 @@ report.md
 report_*.md
 *.report.md
 .codebase-memory/
+.pytest_cache/
+.claude/

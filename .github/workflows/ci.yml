@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: macos-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install ripgrep
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install ripgrep
+          else
+            sudo apt-get update -q
+            sudo apt-get install -y -q ripgrep
+          fi
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt "pytest>=8.0"
+      - name: Run tests
+        run: python -m pytest -q -ra
+
+  min-deps:
+    name: test (oldest supported dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ripgrep
+      - name: Pin every dependency to its lowest allowed version
+        run: |
+          grep -v '^\s*#' requirements.txt | grep . | sed -E 's/>=([^,]+).*/==\1/' > requirements-min.txt
+          cat requirements-min.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-min.txt "pytest>=8.0"
+      - name: Run tests
+        run: python -m pytest -q -ra
+
+  package:
+    name: build and install the package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Build wheel
+        run: python -m pip wheel . --no-deps -w dist
+      - name: Install into a clean virtualenv
+        run: |
+          python -m venv /tmp/arad-venv
+          /tmp/arad-venv/bin/pip install dist/*.whl
+      - name: Smoke test the installed command
+        working-directory: /tmp
+        run: |
+          /tmp/arad-venv/bin/arad --version
+          /tmp/arad-venv/bin/arad list-skills | tee skills.txt
+          test "$(grep -c 'hunt-' skills.txt)" -gt 10

@@ -28,7 +28,10 @@ class Config:
     def resolved_skills(self) -> Path:
         if self.skills_dir:
             return Path(self.skills_dir).expanduser()
-        return Path(__file__).parent.parent / "skills"
+        source_tree = Path(__file__).parent.parent / "skills"
+        if source_tree.is_dir():
+            return source_tree
+        return Path(__file__).parent.parent / "arad_skills"
 
 
 def _read_config_data(p: Path) -> dict:

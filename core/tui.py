@@ -21,7 +21,7 @@ from textual.widgets import Footer, Header, Input, RichLog, Static, Tree
 
 from .rtl import has_rtl as _has_rtl, render as _rtl_render, rtl_markup as _rtlm
 
-VERSION = "2.3.1"
+from .version import VERSION
 
 _SEV_ICON = {
     "critical": "[bright_red]■[/bright_red]",
