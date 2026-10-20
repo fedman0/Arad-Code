@@ -79,15 +79,9 @@ class ProjectProfile:
     def exposure_for(self, entry_path: str) -> Optional[str]:
         # entry_point is formatted "GET /admin/users -> handler.qn", so an
         # anchored pattern like "/admin/*" never matched and the feature was dead
-        haystack = entry_path or ""
+        route = _route_of(entry_path)
         for pattern, exposure in self.exposure_overrides.items():
-            candidates = {pattern}
-            if not pattern.startswith("*"):
-                candidates.add(f"*{pattern}")
-            if not pattern.endswith("*"):
-                candidates.add(f"{pattern}*")
-                candidates.add(f"*{pattern}*")
-            if any(fnmatch.fnmatch(haystack, c) for c in candidates):
+            if _route_matches(pattern, route):
                 return exposure
         return None
 
@@ -192,11 +186,43 @@ def _jsonable(value):
     return value
 
 
+def _route_of(entry: str) -> str:
+    head = (entry or "").split("->", 1)[0].strip()
+    tokens = head.split()
+    if len(tokens) >= 2 and tokens[0].isalpha() and tokens[0].isupper():
+        return tokens[1]
+    return tokens[0] if tokens else ""
+
+
+def _route_matches(pattern: str, route: str) -> bool:
+    pattern = pattern.strip()
+    if not pattern or not route:
+        return False
+    if any(ch in pattern for ch in "*?["):
+        candidates = [pattern]
+    else:
+        candidates = [pattern, pattern.rstrip("/") + "/*"]
+    starts = [route]
+    if not pattern.startswith(("/", "*")):
+        starts += [route[i + 1:] for i, ch in enumerate(route) if ch == "/"]
+    return any(fnmatch.fnmatchcase(s, c) for s in starts for c in candidates)
+
+
+def _str_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value if v is not None]
+    if isinstance(value, dict):
+        return []
+    return [str(value)]
+
+
 def _parse_expires(raw) -> Optional[date]:
-    if isinstance(raw, date):
-        return raw
     if isinstance(raw, datetime):
         return raw.date()
+    if isinstance(raw, date):
+        return raw
     if isinstance(raw, str):
         try:
             return datetime.strptime(raw.strip(), "%Y-%m-%d").date()
@@ -239,7 +265,7 @@ def load_profile(repo_path: str | Path, today: Optional[date] = None, *,
         try:
             with open(path) as f:
                 data = yaml.safe_load(f) or {}
-        except (yaml.YAMLError, OSError):
+        except (yaml.YAMLError, OSError, ValueError):
             return ProjectProfile(source_path=path, trusted=True)
         if use_cache and isinstance(data, dict):
             from .cache import write_profile_cache
@@ -249,20 +275,21 @@ def load_profile(repo_path: str | Path, today: Optional[date] = None, *,
 
     profile = ProjectProfile(source_path=path, trusted=True)
 
-    for raw in data.get("sanitizers") or []:
+    sanitizers = data.get("sanitizers") or []
+    for raw in sanitizers if isinstance(sanitizers, list) else []:
         if isinstance(raw, dict) and raw.get("qn"):
             profile.sanitizers.append(Sanitizer(
                 qn=str(raw["qn"]),
-                neutralizes=[str(n) for n in (raw.get("neutralizes") or [])],
+                neutralizes=_str_list(raw.get("neutralizes")),
                 complete=bool(raw.get("complete", False)),
             ))
 
     markers = data.get("auth_markers") or {}
     if isinstance(markers, dict):
-        profile.auth_decorators = [str(d) for d in (markers.get("decorators") or [])]
-        profile.auth_middleware = [str(m) for m in (markers.get("middleware") or [])]
+        profile.auth_decorators = _str_list(markers.get("decorators"))
+        profile.auth_middleware = _str_list(markers.get("middleware"))
 
-    profile.trusted_sources = [str(t) for t in (data.get("trusted_sources") or [])]
+    profile.trusted_sources = _str_list(data.get("trusted_sources"))
 
     overrides = data.get("exposure_overrides") or {}
     if isinstance(overrides, dict):
@@ -271,7 +298,10 @@ def load_profile(repo_path: str | Path, today: Optional[date] = None, *,
                 profile.exposure_overrides[str(pattern)] = str(exposure)
 
     today = today or date.today()
-    for raw in data.get("suppress") or []:
+    suppress = data.get("suppress") or []
+    if isinstance(suppress, dict):
+        suppress = [suppress]
+    for raw in suppress if isinstance(suppress, list) else []:
         if not isinstance(raw, dict):
             continue
         rule = str(raw.get("rule") or "").strip()

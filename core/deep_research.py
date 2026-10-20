@@ -137,49 +137,87 @@ async def deep_research(
         system_override=DEEP_RESEARCH_SYSTEM,
     )
 
-    return result if isinstance(result, dict) else {"summary": str(result), "cves": [], "attack_surfaces": [], "grep_patterns": []}
+    if isinstance(result, dict):
+        return result
+    summary = str(result).strip() if result is not None else ""
+    return {"summary": summary or "No result was returned.", "cves": [],
+            "attack_surfaces": [], "grep_patterns": []}
+
+
+def _items(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _field(item, key: str, default: str = "") -> str:
+    if isinstance(item, dict):
+        value = item.get(key)
+        return default if value in (None, "") else str(value)
+    return str(item) if key in ("description", "pattern", "feature") else default
 
 
 def format_research_output(result: dict) -> str:
+    from rich.markup import escape
+
+    if not isinstance(result, dict):
+        result = {"summary": str(result)}
     lines = []
 
     if result.get("summary"):
-        lines.append(f"## Summary\n{result['summary']}\n")
+        lines.append(f"[bold]Summary[/bold]\n{escape(str(result['summary']))}\n")
 
-    cves = result.get("cves") or []
+    cves = _items(result.get("cves"))
     if cves:
-        lines.append(f"## Known CVEs ({len(cves)})")
+        lines.append(f"[bold]Known CVEs[/bold] ({len(cves)})")
         for cve in cves:
-            lines.append(f"  [{cve.get('id', '?')}] {cve.get('description', '')}")
-            if cve.get("grep_pattern"):
-                lines.append(f"    grep: {cve['grep_pattern']}")
-            if cve.get("file_pattern"):
-                lines.append(f"    file: {cve['file_pattern']}")
+            lines.append(f"  [cyan]{escape('[' + _field(cve, 'id', '?') + ']')}[/cyan] "
+                         f"{escape(_field(cve, 'description'))}")
+            if _field(cve, "grep_pattern"):
+                lines.append(f"    [dim]grep:[/dim] {escape(_field(cve, 'grep_pattern'))}")
+            if _field(cve, "file_pattern"):
+                lines.append(f"    [dim]file:[/dim] {escape(_field(cve, 'file_pattern'))}")
         lines.append("")
 
-    surfaces = result.get("attack_surfaces") or []
+    surfaces = _items(result.get("attack_surfaces"))
     if surfaces:
-        lines.append(f"## Attack Surfaces ({len(surfaces)})")
-        for s in surfaces:
-            lines.append(f"  [{s.get('area', '?')}] {s.get('description', '')}")
-            patterns = s.get("grep_patterns") or []
-            for p in patterns[:3]:
-                lines.append(f"    grep: {p}")
+        lines.append(f"[bold]Attack Surfaces[/bold] ({len(surfaces)})")
+        for surface in surfaces:
+            lines.append(f"  [cyan]{escape('[' + _field(surface, 'area', '?') + ']')}[/cyan] "
+                         f"{escape(_field(surface, 'description'))}")
+            patterns = _items(surface.get("grep_patterns")) if isinstance(surface, dict) else []
+            for pattern in patterns[:3]:
+                lines.append(f"    [dim]grep:[/dim] {escape(str(pattern))}")
         lines.append("")
 
-    patterns = result.get("grep_patterns") or []
+    features = _items(result.get("recent_features"))
+    if features:
+        lines.append(f"[bold]Recent Features[/bold] ({len(features)})")
+        for feature in features:
+            files = _items(feature.get("files")) if isinstance(feature, dict) else []
+            suffix = f"  [dim]{escape(', '.join(str(f) for f in files[:3]))}[/dim]" if files else ""
+            lines.append(f"  {escape(_field(feature, 'feature'))}{suffix}")
+        lines.append("")
+
+    patterns = _items(result.get("grep_patterns"))
     if patterns:
-        lines.append(f"## Grep Patterns ({len(patterns)})")
-        for p in patterns:
-            lines.append(f"  [{p.get('bug_class', '?')}] {p.get('pattern', '')}")
-            if p.get("rationale"):
-                lines.append(f"    {p['rationale']}")
+        lines.append(f"[bold]Grep Patterns[/bold] ({len(patterns)})")
+        for pattern in patterns:
+            lines.append(f"  [cyan]{escape('[' + _field(pattern, 'bug_class', '?') + ']')}[/cyan] "
+                         f"{escape(_field(pattern, 'pattern'))}")
+            if _field(pattern, "rationale"):
+                lines.append(f"    [dim]{escape(_field(pattern, 'rationale'))}[/dim]")
         lines.append("")
 
-    priority = result.get("priority_files") or []
+    priority = _items(result.get("priority_files"))
     if priority:
-        lines.append(f"## Priority Files")
+        lines.append("[bold]Priority Files[/bold]")
         for f in priority[:10]:
-            lines.append(f"  {f}")
+            lines.append(f"  {escape(str(f))}")
+        lines.append("")
 
-    return "\n".join(lines)
+    directions = _items(result.get("research_directions"))
+    if directions:
+        lines.append("[bold]Research Directions[/bold]")
+        for d in directions[:10]:
+            lines.append(f"  • {escape(str(d))}")
+
+    return "\n".join(lines).rstrip() or "[dim]No research output.[/dim]"

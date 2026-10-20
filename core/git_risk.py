@@ -5,8 +5,8 @@ from collections import defaultdict
 from pathlib import Path
 
 _SECURITY_COMMIT = re.compile(
-    r"\b(cve-\d{4}-\d+|security|vulnerab|exploit|injection|xss|csrf|ssrf|rce|"
-    r"auth(?:z|entication|orization)?\s+bypass|sanitiz|escape|overflow|traversal)\b",
+    r"\b(cve-\d{4}-\d+|security|vulnerab\w*|exploit\w*|injection|xss|csrf|ssrf|rce|"
+    r"auth(?:z|entication|orization)?\s+bypass|sanitiz\w*|escap\w*|overflow|traversal)\b",
     re.IGNORECASE,
 )
 
@@ -70,6 +70,6 @@ def risk_for_file(scores: dict[str, float], file_path: str) -> float:
         return scores[file_path]
     suffix = Path(file_path).as_posix()
     for path, score in scores.items():
-        if path.endswith(suffix) or suffix.endswith(path):
+        if path.endswith("/" + suffix) or suffix.endswith("/" + path):
             return score
     return 0.0

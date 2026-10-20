@@ -5,6 +5,10 @@ import subprocess
 from typing import Any, Optional
 from .config import Config
 
+_STREAM_LIMIT = 64 * 1024 * 1024
+_CALL_TIMEOUT = 60
+_INDEX_TIMEOUT = 900
+
 
 class CodebaseMemoryClient:
 
@@ -17,41 +21,70 @@ class CodebaseMemoryClient:
         self._available: Optional[bool] = None
 
     async def _ensure_started(self):
-        if self._proc is not None:
+        if self._proc is not None or self._available is False:
             return
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 self._server,
-                *self._args,
+                *(self._args or []),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                limit=_STREAM_LIMIT,
             )
-            await self._send_raw({"jsonrpc": "2.0", "method": "initialize", "id": 0,
-                                   "params": {"protocolVersion": "2024-11-05",
-                                              "capabilities": {},
-                                              "clientInfo": {"name": "pentest", "version": "0.1"}}})
+        except (FileNotFoundError, OSError, TypeError):
+            self._proc = None
+            self._available = False
+            return
+        try:
+            resp = await self._send_raw({"jsonrpc": "2.0", "method": "initialize", "id": 0,
+                                         "params": {"protocolVersion": "2024-11-05",
+                                                    "capabilities": {},
+                                                    "clientInfo": {"name": "pentest", "version": "0.1"}}},
+                                        timeout=_CALL_TIMEOUT)
+            if resp is None or "error" in resp:
+                raise OSError("initialize failed")
             await self._send_raw({"jsonrpc": "2.0", "method": "notifications/initialized",
                                    "params": {}})
             self._available = True
-        except (FileNotFoundError, OSError):
+        except (asyncio.TimeoutError, OSError, ValueError, ConnectionError):
             self._available = False
+            await self._terminate()
 
-    async def _send_raw(self, payload: dict) -> Optional[dict]:
+    async def _terminate(self):
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        try:
+            proc.kill()
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except (ProcessLookupError, asyncio.TimeoutError, OSError):
+            pass
+
+    async def _read_response(self, req_id: int) -> Optional[dict]:
+        while True:
+            resp_line = await self._proc.stdout.readline()
+            if not resp_line:
+                raise ConnectionError("codebase-memory-mcp closed its output")
+            try:
+                msg = json.loads(resp_line.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(msg, dict) and msg.get("id") == req_id and (
+                    "result" in msg or "error" in msg):
+                return msg
+
+    async def _send_raw(self, payload: dict, timeout: float = _CALL_TIMEOUT) -> Optional[dict]:
         if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
             return None
         line = json.dumps(payload) + "\n"
         self._proc.stdin.write(line.encode())
         await self._proc.stdin.drain()
         if "id" in payload:
-            resp_line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=30)
-            try:
-                return json.loads(resp_line.decode())
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                return None
+            return await asyncio.wait_for(self._read_response(payload["id"]), timeout=timeout)
         return None
 
-    async def _call(self, tool: str, args: dict) -> Any:
+    async def _call(self, tool: str, args: dict, timeout: float = _CALL_TIMEOUT) -> Any:
         async with self._lock:
             await self._ensure_started()
             if not self._available:
@@ -64,7 +97,7 @@ class CodebaseMemoryClient:
                 "params": {"name": tool, "arguments": args},
             }
             try:
-                resp = await self._send_raw(req)
+                resp = await self._send_raw(req, timeout=timeout)
                 if resp and "result" in resp:
                     content = resp["result"].get("content", [])
                     texts = [c["text"] for c in content if c.get("type") == "text"]
@@ -73,6 +106,10 @@ class CodebaseMemoryClient:
                         return json.loads(raw)
                     except json.JSONDecodeError:
                         return raw
+            except (ConnectionError, BrokenPipeError, OSError):
+                self._available = None
+                await self._terminate()
+                return None
             except (asyncio.TimeoutError, Exception):
                 return None
 
@@ -94,7 +131,7 @@ class CodebaseMemoryClient:
         return None
 
     async def index_repository(self, repo_path: str) -> Optional[dict]:
-        return await self._call("index_repository", {"repo_path": repo_path})
+        return await self._call("index_repository", {"repo_path": repo_path}, timeout=_INDEX_TIMEOUT)
 
     async def _call_raw_text(self, tool: str, args: dict) -> str:
         result = await self._call(tool, args)
@@ -129,8 +166,11 @@ class CodebaseMemoryClient:
         mode: str = "calls",
         depth: int = 5,
         project: Optional[str] = None,
+        direction: Optional[str] = None,
     ) -> str:
         args: dict = {"function_name": function_name, "mode": mode, "depth": depth}
+        if direction:
+            args["direction"] = direction
         if project:
             args["project"] = project
         return await self._call_raw_text("trace_path", args)
@@ -141,8 +181,11 @@ class CodebaseMemoryClient:
             args["project"] = project
         return await self._call_raw_text("get_code_snippet", args)
 
-    async def search_code(self, pattern: str, limit: int = 50, project: Optional[str] = None) -> str:
+    async def search_code(self, pattern: str, limit: int = 50, project: Optional[str] = None,
+                          regex: bool = False) -> str:
         args: dict = {"pattern": pattern, "limit": limit}
+        if regex:
+            args["regex"] = True
         if project:
             args["project"] = project
         return await self._call_raw_text("search_code", args)
@@ -159,9 +202,13 @@ class CodebaseMemoryClient:
         return await self._call("query_graph", {"query": query})
 
     async def close(self):
-        if self._proc and self._proc.stdin:
-            try:
-                self._proc.stdin.close()
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except Exception:
-                self._proc.kill()
+        proc = self._proc
+        if proc is None:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+            await asyncio.wait_for(proc.wait(), timeout=5)
+            self._proc = None
+        except Exception:
+            await self._terminate()

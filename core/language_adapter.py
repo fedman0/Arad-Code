@@ -117,6 +117,12 @@ class TreeSitterAdapter:
                                         limitations=[f"parse error: {ex}"]),
                 error=str(ex),
             )
+        if data.get("error"):
+            return AnalysisResult(
+                quality=AnalysisQuality(method="textual", confidence="speculative",
+                                        limitations=[str(data["error"])]),
+                error=str(data["error"]),
+            )
         q = data.get("_quality", {})
         used_ast = q.get("used_ast", False)
         method = "structural" if used_ast else "textual"
@@ -189,6 +195,10 @@ class TextualAdapter:
         except Exception as ex:
             return AnalysisResult(error=str(ex),
                                    quality=AnalysisQuality(method="textual", confidence="speculative"))
+        if data.get("error"):
+            return AnalysisResult(error=str(data["error"]),
+                                   quality=AnalysisQuality(method="textual", confidence="speculative",
+                                                           limitations=[str(data["error"])]))
         return AnalysisResult(
             items=data.get("symbols", []),
             quality=AnalysisQuality(
