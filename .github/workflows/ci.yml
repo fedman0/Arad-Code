@@ -47,7 +47,22 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt "pytest>=8.0"
       - name: Run tests
-        run: python -m pytest -q -ra
+        run: python -m pytest -q -ra --junitxml=junit.xml
+      - name: Show failed tests
+        if: failure()
+        shell: python
+        run: |
+          import os
+          import xml.etree.ElementTree as ET
+          if os.path.exists("junit.xml"):
+              for case in ET.parse("junit.xml").getroot().iter("testcase"):
+                  for tag in ("failure", "error"):
+                      node = case.find(tag)
+                      if node is None:
+                          continue
+                      text = ((node.get("message") or "") + "\n" + (node.text or "")).strip()[-6000:]
+                      text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                      print(f"::error title={case.get('classname')}::{case.get('name')}%0A{text}")
 
   min-deps:
     name: test (oldest supported dependencies)
@@ -69,7 +84,22 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-min.txt "pytest>=8.0"
       - name: Run tests
-        run: python -m pytest -q -ra
+        run: python -m pytest -q -ra --junitxml=junit.xml
+      - name: Show failed tests
+        if: failure()
+        shell: python
+        run: |
+          import os
+          import xml.etree.ElementTree as ET
+          if os.path.exists("junit.xml"):
+              for case in ET.parse("junit.xml").getroot().iter("testcase"):
+                  for tag in ("failure", "error"):
+                      node = case.find(tag)
+                      if node is None:
+                          continue
+                      text = ((node.get("message") or "") + "\n" + (node.text or "")).strip()[-6000:]
+                      text = text.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                      print(f"::error title={case.get('classname')}::{case.get('name')}%0A{text}")
 
   package:
     name: build and install the package

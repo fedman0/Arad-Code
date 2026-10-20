@@ -16,3 +16,4 @@ report_*.md
 .codebase-memory/
 .pytest_cache/
 .claude/
+junit.xml
