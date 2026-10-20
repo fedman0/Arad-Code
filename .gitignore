@@ -13,3 +13,4 @@ config.yaml
 report.md
 report_*.md
 *.report.md
+.codebase-memory/

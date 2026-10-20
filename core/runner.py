@@ -105,19 +105,19 @@ This is a pattern-detection sweep. Your goal is to find as many vulnerability pa
 4. **grep** — search for a literal string pattern when search_graph isn't enough
 
 ## For each check in the skill:
-1. Use 1–2 tool calls to find the relevant code.
+1. Use 1–2 turns to find the relevant code. Batch independent tool calls (for example all the grep patterns of one step) into a single turn.
 2. Read the code. Look for the exact pattern the skill describes.
 3. If the pattern is present → add the finding to your list immediately and move to the next check.
 4. If the pattern is absent → move to the next check.
-5. Never spend more than 3 tool calls on a single check.
+5. Never spend more than 3 turns on a single check.
 
 ## Submitting findings:
 - Cite: file path + line number + the exact code you observed.
-- Set confidence 7–9 (you are confirming patterns, not writing exploits).
+- Set confidence 7 unless the skill's Submit line gives a lower value (structural evidence caps confidence at 7).
 - You do NOT need to trace full call chains, read ORM models, or read DB schemas for this skill.
 - Submit as soon as you confirm a pattern. Do not wait until you have "enough" evidence.
 
-## Call finish() when you have worked through all checks or used 20+ iterations."""
+## Call finish() when you have worked through all checks or used about 20 turns."""
 
 TOOLS = [
     {
@@ -140,13 +140,18 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "trace_path",
-            "description": "Trace call chains from a function. mode='calls' finds what it calls, mode='called_by' finds callers, mode='data_flow' follows data.",
+            "description": (
+                "Trace call chains from a function. mode='calls' follows call edges, "
+                "mode='data_flow' follows values, mode='cross_service' follows HTTP/async routes. "
+                "direction='inbound' returns callers, 'outbound' returns callees, 'both' returns both."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["function_name"],
                 "properties": {
                     "function_name": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["calls", "called_by", "data_flow"], "default": "calls"},
+                    "mode": {"type": "string", "enum": ["calls", "data_flow", "cross_service"], "default": "calls"},
+                    "direction": {"type": "string", "enum": ["inbound", "outbound", "both"], "default": "both"},
                     "depth": {"type": "integer", "default": 5},
                 },
             },
@@ -170,13 +175,14 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_code",
-            "description": "Graph-augmented code search. Finds references and usages across the codebase.",
+            "description": "Graph-augmented code search. Finds references and usages across the codebase. The pattern is literal unless regex=true.",
             "parameters": {
                 "type": "object",
                 "required": ["pattern"],
                 "properties": {
                     "pattern": {"type": "string"},
                     "limit": {"type": "integer", "default": 50},
+                    "regex": {"type": "boolean", "default": False},
                 },
             },
         },
@@ -201,7 +207,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search for a literal string or regex pattern in the repository source files.",
+            "description": (
+                "Search the repository with a ripgrep (Rust) regex. Hidden files such as .github/ and .env "
+                "are included; .git and gitignored files are not. No lookaround or backreferences. "
+                "Set multiline=true to let the pattern match across lines (\\n)."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["pattern"],
@@ -209,7 +219,8 @@ TOOLS = [
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "description": "Subdirectory to search in (relative to repo root)"},
                     "file_glob": {"type": "string", "description": "File pattern e.g. '*.cs' or '*.ts'"},
-                    "max_matches": {"type": "integer", "default": 100},
+                    "max_matches": {"type": "integer", "default": 100, "description": "Maximum matches per file"},
+                    "multiline": {"type": "boolean", "default": False},
                 },
             },
         },
@@ -275,12 +286,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_semgrep",
-            "description": "Run a targeted semgrep pattern for taint analysis or AST-aware pattern matching. Use for: user-input → SQL, user-input → shell, unsafe deserialization patterns. Prefer a specific pattern over a broad scan.",
+            "description": "Run a targeted semgrep pattern for taint analysis or AST-aware pattern matching. Use for: user-input → SQL, user-input → shell, unsafe deserialization patterns. Prefer a specific pattern over a broad scan. A pattern requires a language.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Semgrep pattern e.g. 'context.Database.ExecuteSqlRaw($\"...{...}...\")'"},
-                    "language": {"type": "string", "description": "e.g. csharp, python, javascript"},
+                    "language": {"type": "string", "description": "Required with pattern, e.g. csharp, python, javascript"},
                     "rules": {"type": "string", "description": "Semgrep rule config e.g. 'p/default' or path to rule file"},
                 },
             },
@@ -291,13 +302,15 @@ TOOLS = [
         "function": {
             "name": "shell",
             "description": (
-                "Run a read-only shell command with the repo as cwd. "
-                "Whitelisted binaries: find, tree, git (log/blame/diff/show/grep), "
-                "wc, head, tail, sort, uniq, cut, awk, sed, tr, jq, yq, "
-                "file, strings, xxd, hexdump, base64, diff, stat, md5sum, sha256sum, openssl, xargs. "
+                "Run one read-only command with the repo as cwd (no pipes, redirection or "
+                "command substitution; paths must stay inside the repository). "
+                "Allowed commands: git (log, show, blame, diff, ls-files, ls-tree, rev-parse, "
+                "status, shortlog, describe, grep), find (name/path/type/size/time tests only, "
+                "no -exec or -delete), tree, wc, head, tail, file, stat, sha256sum, sha1sum, "
+                "md5sum, jq, diff, strings, cut. "
                 "Examples: 'git log --oneline -20', 'git blame src/auth/handler.go', "
                 "'find . -name \"*.cs\" -newer go.mod', 'git diff HEAD~1 -- src/Payment.cs', "
-                "'jq .scripts package.json', 'strings bin/server | grep -i password'."
+                "'jq .scripts package.json'."
             ),
             "parameters": {
                 "type": "object",
@@ -639,6 +652,7 @@ def _synthesize_evidence_from_tools(
     tool_index: "list[tuple[str, dict]]",
     run_tools: "frozenset[str]",
     commit: str = "",
+    repo_path: str = "",
 ) -> "list[Evidence]":
     """Create structural evidence records from tool calls that analysed relevant files.
 
@@ -662,7 +676,7 @@ def _synthesize_evidence_from_tools(
     # Build set of basenames to look for in tool args
     targets: set[str] = {ep_base}
     for step in (h.execution_path or []):
-        m = _re.search(r'([\w/-]+\.py)', step)
+        m = _re.search(r'([\w./-]+\.[A-Za-z]\w*)', step)
         if m:
             targets.add(_P(m.group(1)).stem.lower())
 
@@ -687,13 +701,30 @@ def _synthesize_evidence_from_tools(
     if not best_method:
         return []
 
+    file_match = _re.match(r'^\s*([\w./-]+\.[A-Za-z]\w*)(?::.*)?$', ep_raw)
+    file_path = file_match.group(1) if file_match else ""
+    if not file_path:
+        arg_path = best_args.get("file_path") or best_args.get("path")
+        file_path = arg_path if isinstance(arg_path, str) else ""
+    if not file_path:
+        return []
+    if repo_path:
+        repo = _P(repo_path).resolve()
+        try:
+            resolved = (repo / file_path).resolve()
+            resolved.relative_to(repo)
+        except (ValueError, OSError):
+            return []
+        if not resolved.is_file():
+            return []
+
     id_args = {k: v for k, v in best_args.items() if k in _IDENTITY_ARG_KEYS and isinstance(v, str)}
     desc = f"auto:{best_name}({', '.join(f'{k}={v[:40]}' for k, v in id_args.items())})"
     return [Evidence(
         hypothesis_id=h.id,
         kind="trace" if best_name in _SEMANTIC_TOOLS else "code",
         description=desc,
-        file_path=ep_raw or h.entry_point or "unknown",
+        file_path=file_path,
         line_start=0,
         line_end=0,
         snippet="",
@@ -786,6 +817,97 @@ def _gate_hypothesis_status(
 
 _QUALITY_CONF_CAP = {"textual": 4, "inferred": 3, "structural": 7, "semantic": 10}
 _MIN_ANCHOR_LEN = 12
+_READ_FILE_MAX_LINES = 800
+
+_ENGINE_OWNED_HYPOTHESIS_FIELDS = (
+    "id", "created_at", "status", "priority", "rejected_by", "rejected_at_commit",
+    "rejection_reason", "rejection_condition", "rejection_controlling_evidence_ids",
+    "validation",
+)
+_MODEL_DEMOTION_STATUSES = frozenset({"refuted", "rejected", "blocked"})
+_EXPOSURE_VALUES = frozenset({"internet", "authenticated", "internal", "admin_only", "unreachable"})
+
+
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _without_id(data: Any) -> Any:
+    if isinstance(data, dict) and "id" in data:
+        data = {k: v for k, v in data.items() if k != "id"}
+    return data
+
+
+def _prepare_model_hypothesis(h_data: dict, commit: str) -> tuple[dict, Optional[str]]:
+    data = dict(h_data)
+    claimed = data.get("status")
+    for key in _ENGINE_OWNED_HYPOTHESIS_FIELDS:
+        data.pop(key, None)
+    data["commit"] = commit
+    demotion = claimed if claimed in _MODEL_DEMOTION_STATUSES else None
+    return data, demotion
+
+
+_HYPOTHESIS_ENUM_DEFAULTS = {
+    "reachability": "unknown",
+    "input_control": "unknown",
+    "guard_analysis": "incomplete",
+    "runtime_assumptions": "env_dependent",
+    "impact_basis": "inferred",
+    "guard_coverage": "unknown",
+    "temporal_validity": "unknown",
+    "exposure": "unspecified",
+}
+
+
+def _coerce_model_hypothesis(data: dict) -> list[str]:
+    from typing import get_args
+    notes: list[str] = []
+    for field, default in _HYPOTHESIS_ENUM_DEFAULTS.items():
+        if field not in data:
+            continue
+        allowed = get_args(Hypothesis.model_fields[field].annotation)
+        if data[field] not in allowed:
+            notes.append(f"engine: {field}={data[field]!r} is not a recognised value; using {default!r}")
+            data[field] = default
+    for field in ("severity", "confidence"):
+        if field not in data:
+            continue
+        try:
+            value = int(round(float(data[field])))
+        except (TypeError, ValueError):
+            notes.append(f"engine: {field}={data[field]!r} is not a number; using the default")
+            data.pop(field)
+            continue
+        if not 0 <= value <= 10:
+            notes.append(f"engine: {field}={value} clamped to 0-10")
+        data[field] = max(0, min(10, value))
+    return notes
+
+
+def _validate_model_hypothesis(data: dict) -> tuple[Optional["Hypothesis"], str]:
+    try:
+        return Hypothesis.model_validate(data), ""
+    except Exception:
+        pass
+    repaired = dict(data)
+    notes = _coerce_model_hypothesis(repaired)
+    try:
+        h = Hypothesis.model_validate(repaired)
+    except Exception as ex:
+        return None, str(ex).splitlines()[0][:160]
+    h.uncertainty.extend(notes)
+    return h, ""
+
+
+def _apply_model_demotion(h: "Hypothesis", demotion: Optional[str], commit: str) -> None:
+    if not demotion:
+        return
+    h.status = demotion
+    if demotion in ("rejected", "refuted"):
+        h.rejected_at_commit = commit
+    if demotion == "rejected":
+        h.rejected_by = "model"
 
 _NE_INSTRUCTION = """# Negative Evidence (proof of absence)
 
@@ -794,7 +916,7 @@ For every entry point that has NO finding, record why it is safe using the
 - `entry_point`: the route/handler you checked (e.g. "POST /orders/{id}/cancel")
 - `safe_from`: the CWE or bug class (e.g. "CWE-639")
 - `because`: one-line human reason (≤120 chars)
-- `anchor_file`, `anchor_line`, `anchor_text`: the exact line of code (≥10 chars)
+- `anchor_file`, `anchor_line`, `anchor_text`: the exact line of code (≥12 chars)
   that constitutes the guard — the same text must be present in the file.
 
 Only emit NE for entry points you actually read code for. An empty array is
@@ -815,16 +937,17 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
 |-------|-------------|
 | actor | "unauthenticated attacker", "authenticated user", or "network attacker" |
 | capability | One sentence: what the actor can do |
-| entry_point | "file/path.py:ClassName" — file and class/function where you found the pattern |
+| entry_point | "file/path.py:ClassName.method" — file plus the class and method/function where you found the pattern |
 | security_boundary | "HTTP request boundary" |
-| violated_invariant | Copy the exact text from the skill's → Submit instruction |
+| violated_invariant | The skill's → Submit invariant text, then " — " and the specific function, variable and input source you observed |
 | observable_impact | What the attacker gains (one sentence) |
 | severity | From skill instruction |
-| confidence | **7** — always use 7 for hunt findings (you used structural tools) |
+| confidence | **7** by default; use the lower value when the skill's Submit line gives one (e.g. 5 for an uncertain input origin) |
 | reachability | **"proven"** — you READ the code and observed the exact pattern |
 | input_control | **"full"** — the attacker controls the relevant HTTP input |
 | guard_coverage | **"no_paths"** — you observed no guard covering this path |
-| exposure | "internet" if no auth needed, "authenticated" if login required |
+| exposure | One of "internet" (no auth needed), "authenticated" (login required), "internal" (internal network/service only), "admin_only" |
+| cwe | The CWE id for the bug class, e.g. "CWE-89" |
 | proof_obligations | [] — empty array |
 
 ## Required evidence fields (ALL must be present)
@@ -837,8 +960,9 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
 | line_start | Line number (approximate is fine) |
 | line_end | Same as line_start or +2 |
 | snippet | The exact lines containing the pattern (>= 12 characters) |
+| anchor_text | A distinctive substring (>= 12 characters) copied verbatim from those lines; the engine re-reads the file to check it |
 | hypothesis_index | **0-based index**: 0 = first hypothesis in your list, 1 = second, etc. |
-| analysis_quality | {"method": "structural", "confidence": "high"} |
+| analysis_quality | {"method": "structural", "confidence": "high"} when you used search_graph / get_code_snippet / parse_file_structure / find_all_usages; {"method": "textual"} when you only used grep / read_file |
 
 ## Example (one hypothesis + one evidence):
 
@@ -850,7 +974,7 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
       "capability": "add Client header to gain admin access",
       "entry_point": "app/auth/admin_check.py:is_admin",
       "security_boundary": "HTTP request boundary",
-      "violated_invariant": "privilege granted based on caller-controlled request header without cryptographic binding; any caller adds that header to bypass the check",
+      "violated_invariant": "privilege granted based on caller-controlled request header without cryptographic binding; any caller adds that header to bypass the check — is_admin() trusts request.headers['Client']",
       "observable_impact": "attacker gains full admin access without credentials",
       "severity": 10,
       "confidence": 7,
@@ -858,6 +982,7 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
       "input_control": "full",
       "guard_coverage": "no_paths",
       "exposure": "internet",
+      "cwe": "CWE-290",
       "proof_obligations": []
     }
   ],
@@ -869,6 +994,7 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
       "line_start": 12,
       "line_end": 14,
       "snippet": "if 'admin-client' in request.headers.get('Client', ''):\\n    return True",
+      "anchor_text": "request.headers.get('Client', '')",
       "hypothesis_index": 0,
       "analysis_quality": {"method": "structural", "confidence": "high"}
     }
@@ -903,6 +1029,10 @@ silently dropped. Before calling finish(), check each item below.
   Prefer parse_file_structure and find_all_usages over grep where you can.
 
 ## Every hypothesis
+- `cwe`: the CWE id of the bug class (e.g. "CWE-639"). It names the SARIF rule and
+  lets the engine match findings against proof-of-absence records.
+- `entry_point`: include the file and the handler function, e.g.
+  "app/views/orders.py:OrderView.delete" or "POST /orders/{id} -> OrderView.delete".
 - `reachability`, `input_control`, `guard_coverage`, `exposure`: all REQUIRED.
   Leaving one unset makes the engine add an unresolved obligation that blocks
   the finding from ever being reported.
@@ -1107,6 +1237,32 @@ def _apply_profile(h: "Hypothesis", evidence: "list[Evidence]",
             return
 
 
+_MAINTENANCE_PHASE = "p0"
+_SKILL_ORDER = {
+    "p1": [
+        "inventory-repository", "resolve-build-context", "resolve-configuration",
+        "map-entry-points", "resolve-dependency-injection", "map-middleware-and-filters",
+        "map-deployment-context", "map-service-boundaries",
+    ],
+    "p2": [
+        "model-identities", "model-authorization", "model-resource-ownership",
+        "model-tenant-boundaries", "extract-state-machines", "extract-business-invariants",
+        "map-trust-boundaries", "map-sensitive-data",
+    ],
+}
+
+
+def _ordered_skills(phase: str, names: list[str]) -> list[str]:
+    order = _SKILL_ORDER.get(phase, [])
+    rank = {name: i for i, name in enumerate(order)}
+    return sorted(names, key=lambda n: (rank.get(n, len(order)), n))
+
+
+_THREADED_TOOLS = frozenset({
+    "read_file", "grep", "list_dir", "parse_file_structure", "find_all_usages",
+    "run_semgrep", "shell",
+})
+
 _PROMPT_TOOL_NAMES = frozenset({
     "search_graph", "trace_path", "get_code_snippet", "search_code",
     "read_file", "grep", "get_architecture", "list_dir",
@@ -1217,6 +1373,7 @@ class SkillRunner:
                 ev.stale = True
                 verified.append(ev)
                 continue
+            ev.file_path = target.relative_to(Path(repo_path).resolve()).as_posix()
             try:
                 lines = target.read_text(errors="replace").splitlines()
                 total = len(lines)
@@ -1258,9 +1415,13 @@ class SkillRunner:
                     else:
                         lo = max(0, s - 10)
                         hi = min(total, e + 10)
-                        hits = [li for li in range(lo + 1, hi + 1)
-                                if anchor_norm in _norm("\n".join(lines[li - 1:hi]))
-                                and anchor_norm not in _norm("\n".join(lines[li:hi]))]
+                        hits = []
+                        for li in range(lo + 1, hi + 1):
+                            for j in range(li, hi + 1):
+                                if anchor_norm in _norm("\n".join(lines[li - 1:j])):
+                                    if anchor_norm not in _norm("\n".join(lines[li:j])):
+                                        hits.append(li)
+                                    break
                         if len(hits) == 1:
                             li = hits[0]
                             span = max(1, ev.line_end - ev.line_start + 1)
@@ -1327,6 +1488,7 @@ class SkillRunner:
             if target is None or not target.is_file():
                 ne.anchor_stale = True
                 continue
+            ne.anchor_file = target.relative_to(Path(repo_path).resolve()).as_posix()
             try:
                 lines = target.read_text(errors="replace").splitlines()
                 total = len(lines)
@@ -1366,21 +1528,35 @@ class SkillRunner:
         if not target.exists():
             return f"File not found: {file_path}"
         try:
-            lines = target.read_text(errors="replace").splitlines()
+            start_line = int(start_line) if start_line is not None else None
+            end_line = int(end_line) if end_line is not None else None
+        except (TypeError, ValueError):
+            return "start_line and end_line must be integers"
+        try:
+            all_lines = target.read_text(errors="replace").splitlines()
+            total = len(all_lines)
+            if start_line is None and end_line is not None:
+                start_line = 1
             if start_line is not None:
                 s = max(0, start_line - 1)
-                e = end_line if end_line is not None else min(s + 150, len(lines))
-                lines = lines[s:e]
-                offset = s
+                e = end_line if end_line is not None else s + 150
+                if s >= total:
+                    return f"start_line {start_line} is past the end of the file ({total} lines)"
+                if e <= s:
+                    return f"Empty range: end_line must be >= start_line (file has {total} lines)"
+                e = min(e, s + _READ_FILE_MAX_LINES, total)
             else:
-                lines = lines[:200]
-                offset = 0
-            return "\n".join(f"{offset + i + 1:4}: {l}" for i, l in enumerate(lines))
+                s, e = 0, min(200, total)
+            body = "\n".join(f"{s + i + 1:4}: {l}" for i, l in enumerate(all_lines[s:e]))
+            if e < total:
+                body += f"\n[showing lines {s + 1}-{e} of {total}; use start_line/end_line to read more]"
+            return body
         except Exception as ex:
             return f"Error: {ex}"
 
     def _grep(self, repo_path: str, pattern: str, path: Optional[str] = None,
-              file_glob: Optional[str] = None, max_matches: int = 100) -> str:
+              file_glob: Optional[str] = None, max_matches: int = 100,
+              multiline: bool = False) -> str:
         if path:
             safe = self._resolve_path(repo_path, path)
             if safe is None:
@@ -1389,61 +1565,48 @@ class SkillRunner:
         else:
             search_path = repo_path
         try:
-            cmd = ["rg", "--line-number", "--no-heading", f"-m{max_matches}"]
+            max_matches = max(1, int(max_matches))
+        except (TypeError, ValueError):
+            max_matches = 100
+        try:
+            cmd = ["rg", "--line-number", "--no-heading", "--hidden", "-g", "!.git",
+                   f"-m{max_matches}"]
             if file_glob:
                 cmd.extend(["-g", file_glob])
-            cmd.extend([pattern, search_path])
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if multiline:
+                cmd.append("-U")
+            cmd.extend(["-e", pattern, "--", search_path])
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                               timeout=20, stdin=subprocess.DEVNULL)
+            if r.returncode == 2 and not r.stdout:
+                return f"grep error: {r.stderr.strip()[:800]}"
             return r.stdout[:12000] or "No matches"
         except FileNotFoundError:
             try:
-                cmd = ["grep", "-rn", pattern, search_path]
+                cmd = ["grep", "-rnE", f"-m{max_matches}", "--exclude-dir=.git"]
+                if multiline:
+                    return "grep error: multiline search requires ripgrep (rg) to be installed"
                 if file_glob:
-                    cmd = ["grep", "-rn", "--include", file_glob, pattern, search_path]
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+                    cmd.extend(["--include", file_glob])
+                cmd.extend(["-e", pattern, "--", search_path])
+                r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                                   timeout=20, stdin=subprocess.DEVNULL)
+                if r.returncode == 2 and not r.stdout:
+                    return f"grep error: {r.stderr.strip()[:800]}"
                 return r.stdout[:12000] or "No matches"
             except Exception as ex:
                 return f"grep error: {ex}"
         except Exception as ex:
             return f"Error: {ex}"
 
-    async def _execute_tool(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
-        try:
-            return await self._execute_tool_inner(name, args, repo_path, skill_name)
-        except Exception as ex:
-            return f"Tool error ({name}): {ex}"
-
-    async def _execute_tool_inner(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
-        project = self._project_cache.get(repo_path)
-        if name == "search_graph":
-            filtered = {k: v for k, v in args.items()
-                        if k in ("name_pattern", "label", "qn_pattern", "limit")}
-            if project:
-                filtered["project"] = project
-            r = await self._mcp.search_graph(**filtered)
-            return r or "No results (codebase-memory-mcp may not be indexed)"
-        if name == "trace_path":
-            filtered = {k: v for k, v in args.items()
-                        if k in ("function_name", "mode", "depth")}
-            if project:
-                filtered["project"] = project
-            r = await self._mcp.trace_path(**filtered)
-            return r or "No results"
-        if name == "get_code_snippet":
-            r = await self._mcp.get_code_snippet(args["qualified_name"], project=project)
-            return r or "Symbol not found in graph index — try read_file instead"
-        if name == "search_code":
-            r = await self._mcp.search_code(args["pattern"], args.get("limit", 50), project=project)
-            return r or "No results"
-        if name == "get_architecture":
-            r = await self._mcp.get_architecture(args.get("aspects"), project=project)
-            return r or "No architecture data available"
+    def _execute_local_tool(self, name: str, args: dict, repo_path: str) -> str:
         if name == "read_file":
             return self._read_file(repo_path, args["file_path"],
                                    args.get("start_line"), args.get("end_line"))
         if name == "grep":
             return self._grep(repo_path, args["pattern"], args.get("path"),
-                              args.get("file_glob"), args.get("max_matches", 100))
+                              args.get("file_glob"), args.get("max_matches", 100),
+                              bool(args.get("multiline", False)))
         if name == "list_dir":
             return list_dir(repo_path, args.get("path", ""), args.get("max_entries", 80))
         if name == "parse_file_structure":
@@ -1451,13 +1614,12 @@ class SkillRunner:
             file_path = args["file_path"]
             adapter = get_adapter_for(file_path)
             result = adapter.enumerate_symbols(repo_path, file_path)
-            import json as _json
             out: dict = {"file": file_path, "symbols": result.items}
             if result.quality.limitations or result.quality.method != "structural":
                 out["analysis_quality"] = result.quality.model_dump()
             if result.error:
                 out["error"] = result.error
-            return _json.dumps(out, indent=2)
+            return json.dumps(out, indent=2)
         if name == "find_all_usages":
             from .language_adapter import get_default_adapter
             symbol_name = args["symbol_name"]
@@ -1481,6 +1643,45 @@ class SkillRunner:
                                args.get("language"), args.get("rules"))
         if name == "shell":
             return run_shell(repo_path, args["command"])
+        return "Unknown tool"
+
+    async def _execute_tool(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
+        try:
+            return await self._execute_tool_inner(name, args, repo_path, skill_name)
+        except Exception as ex:
+            return f"Tool error ({name}): {ex}"
+
+    async def _execute_tool_inner(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
+        project = self._project_cache.get(repo_path)
+        if name == "search_graph":
+            filtered = {k: v for k, v in args.items()
+                        if k in ("name_pattern", "label", "qn_pattern", "limit")}
+            if project:
+                filtered["project"] = project
+            r = await self._mcp.search_graph(**filtered)
+            return r or "No results (codebase-memory-mcp may not be indexed)"
+        if name == "trace_path":
+            filtered = {k: v for k, v in args.items()
+                        if k in ("function_name", "mode", "depth", "direction")}
+            if filtered.get("mode") == "called_by":
+                filtered["mode"] = "calls"
+                filtered.setdefault("direction", "inbound")
+            if project:
+                filtered["project"] = project
+            r = await self._mcp.trace_path(**filtered)
+            return r or "No results"
+        if name == "get_code_snippet":
+            r = await self._mcp.get_code_snippet(args["qualified_name"], project=project)
+            return r or "Symbol not found in graph index — try read_file instead"
+        if name == "search_code":
+            r = await self._mcp.search_code(args["pattern"], args.get("limit", 50), project=project,
+                                            regex=bool(args.get("regex", False)))
+            return r or "No results"
+        if name == "get_architecture":
+            r = await self._mcp.get_architecture(args.get("aspects"), project=project)
+            return r or "No architecture data available"
+        if name in _THREADED_TOOLS:
+            return await asyncio.to_thread(self._execute_local_tool, name, args, repo_path)
         if name == "save_threat_model":
             content = args.get("content", "")
             if len(content) < 400:
@@ -1570,7 +1771,8 @@ class SkillRunner:
                 return "No open questions from prior skills."
             lines = []
             for q in questions[:20]:
-                lines.append(f"[{q.id}] impact={q.impact} skill={q.raised_by_skill}\n  {q.question}")
+                affects = f" affects={','.join(q.affects_hypothesis_ids)}" if q.affects_hypothesis_ids else ""
+                lines.append(f"[{q.id}] impact={q.impact} skill={q.raised_by_skill}{affects}\n  {q.question}")
                 if q.resolution_hint:
                     lines.append(f"  hint: {q.resolution_hint}")
             return "\n".join(lines)
@@ -1621,7 +1823,7 @@ class SkillRunner:
             ev = self._db.get_evidence_for_hypothesis(h.id)
             parts = [
                 f"[{h.id}] status={h.status} sev={h.severity} conf={h.confidence} "
-                f"prio={h.priority} exposure={h.exposure}",
+                f"prio={h.priority} exposure={h.exposure} cwe={h.cwe or '-'}",
                 f"actor: {h.actor}",
                 f"capability: {h.capability}",
                 f"entry_point: {h.entry_point}",
@@ -1630,6 +1832,8 @@ class SkillRunner:
                 f"reachability={h.reachability} input_control={h.input_control} "
                 f"guard_coverage={h.guard_coverage}",
             ]
+            if h.preconditions:
+                parts.append("preconditions:\n" + "\n".join(f"  {p}" for p in h.preconditions))
             if h.execution_path:
                 parts.append("execution_path:\n" + "\n".join(f"  {s}" for s in h.execution_path))
             if h.counterevidence:
@@ -1643,6 +1847,8 @@ class SkillRunner:
                     f"({e.analysis_quality.method}) {e.description}" for e in ev))
             if h.composed_of:
                 parts.append(f"composed_of: {', '.join(h.composed_of)}")
+            if h.enables:
+                parts.append(f"enables: {', '.join(h.enables)}")
             return "\n".join(parts)
         if name == "resolve_open_question":
             qid = args.get("question_id", "")
@@ -1678,6 +1884,9 @@ class SkillRunner:
                 h.confidence = max(0, min(10, int(args["confidence"])))
                 changes.append(f"confidence {old}->{h.confidence}")
             if args.get("exposure"):
+                if args["exposure"] not in _EXPOSURE_VALUES:
+                    return (f"Invalid exposure {args['exposure']!r}; use one of: "
+                            f"{', '.join(sorted(_EXPOSURE_VALUES))}.")
                 old = h.exposure
                 h.exposure = args["exposure"]
                 changes.append(f"exposure {old}->{h.exposure}")
@@ -1741,22 +1950,24 @@ class SkillRunner:
             reason = args.get("reason", "")
             if not hyp_id or not reason:
                 return "hypothesis_id and reason are required."
-            condition = args.get("rejection_condition", "")
-            controlling_ids = args.get("rejection_controlling_evidence_ids", [])
-            hypotheses = self._db.list_hypotheses(repo_path)
-            for h in hypotheses:
-                if h.id == hyp_id:
-                    h.status = "rejected"
-                    h.rejected_by = "model"
-                    h.rejected_at_commit = self._get_commit(repo_path)
-                    h.rejection_reason = reason
-                    h.rejection_condition = condition
-                    h.rejection_controlling_evidence_ids = (
-                        controlling_ids if isinstance(controlling_ids, list) else []
-                    )
-                    self._db.save_hypothesis(repo_path, h)
-                    return f"Hypothesis {hyp_id} rejected. Reason and condition recorded."
-            return f"Hypothesis {hyp_id} not found."
+            condition = args.get("rejection_condition") or ""
+            controlling_ids = args.get("rejection_controlling_evidence_ids") or []
+            h = self._db.get_hypothesis(repo_path, str(hyp_id))
+            if h is None:
+                return f"Hypothesis {hyp_id} not found."
+            if h.status == "human_confirmed" or h.rejected_by == "human":
+                return (f"Hypothesis {hyp_id} carries a human triage decision "
+                        f"({h.status}); it was not changed.")
+            h.status = "rejected"
+            h.rejected_by = "model"
+            h.rejected_at_commit = self._get_commit(repo_path)
+            h.rejection_reason = str(reason)
+            h.rejection_condition = str(condition)
+            h.rejection_controlling_evidence_ids = (
+                [str(x) for x in controlling_ids] if isinstance(controlling_ids, list) else []
+            )
+            self._db.save_hypothesis(repo_path, h)
+            return f"Hypothesis {hyp_id} rejected. Reason and condition recorded."
         return "Unknown tool"
 
     def _build_initial_context(self, repo_path: str) -> str:
@@ -1895,10 +2106,25 @@ class SkillRunner:
                         start = content.find("{")
                         end = content.rfind("}") + 1
                         if start >= 0 and end > start:
-                            findings = json.loads(content[start:end])
+                            parsed = json.loads(content[start:end])
+                            if isinstance(parsed, dict) and isinstance(parsed.get("findings"), dict):
+                                findings = parsed["findings"]
+                            elif isinstance(parsed, dict) and "hypotheses" in parsed:
+                                findings = parsed
                     except Exception:
                         pass
-                break
+                if isinstance(findings, dict) or iteration + 1 >= max_iterations:
+                    break
+                if "content" not in assistant_msg:
+                    messages.append({"role": "assistant", "content": "(no response)"})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Continue the skill: call a tool to keep investigating, "
+                        "or call finish() with your structured findings."
+                    ),
+                })
+                continue
 
             finish_args: Optional[dict] = None
             tool_results: list[dict] = []
@@ -1950,43 +2176,40 @@ class SkillRunner:
 
         validation_errors: list[str] = []
         hypotheses = []
-        raw_hypotheses = findings.get("hypotheses", [])
-        if not isinstance(raw_hypotheses, list):
-            raw_hypotheses = []
-        for h_data in raw_hypotheses:
+        hypothesis_by_index: dict[int, Hypothesis] = {}
+        raw_hypotheses = _as_list(findings.get("hypotheses"))
+        for raw_idx, h_data in enumerate(raw_hypotheses):
             if not isinstance(h_data, dict):
+                validation_errors.append(f"hypothesis[{raw_idx}] is not an object")
                 continue
+            h_data, demotion = _prepare_model_hypothesis(h_data, commit)
             h_data["skill_source"] = skill_name
-            h_data["commit"] = commit
-            try:
-                h = Hypothesis.model_validate(h_data)
-            except Exception:
-                validation_errors.append(f"hypothesis validation error: {str(h_data.get('violated_invariant', ''))[:80]}")
+            h, error = _validate_model_hypothesis(h_data)
+            if h is None:
+                validation_errors.append(
+                    f"hypothesis[{raw_idx}] validation error: "
+                    f"{str(h_data.get('violated_invariant', ''))[:80]} ({error})")
                 continue
-            if h.status == "reproduced":
-                h.status = "evidence_supported"
-            unresolved_obs = [ob for ob in h.proof_obligations if ob.status == "unresolved"]
-            if unresolved_obs and h.status in ("evidence_supported", "reproduced"):
-                h.status = "initial"
-            h.priority = h.compute_priority()
+            _apply_model_demotion(h, demotion, commit)
             hypotheses.append(h)
+            hypothesis_by_index[raw_idx] = h
 
         coverage = []
-        for c in findings.get("coverage", []):
+        for c in _as_list(findings.get("coverage")):
             try:
                 coverage.append(CoverageItem.model_validate(c))
             except Exception:
                 pass
 
         entry_points: list[EntryPoint] = []
-        for i, ep_data in enumerate(findings.get("entry_points_found", [])):
+        for i, ep_data in enumerate(_as_list(findings.get("entry_points_found"))):
             try:
                 entry_points.append(EntryPoint.model_validate(ep_data))
             except Exception as ex:
                 validation_errors.append(f"entry_point[{i}] invalid: {ex}")
 
         guards: list[Guard] = []
-        for i, g_data in enumerate(findings.get("guards_found", [])):
+        for i, g_data in enumerate(_as_list(findings.get("guards_found"))):
             try:
                 guards.append(Guard.model_validate(g_data))
             except Exception as ex:
@@ -1995,27 +2218,37 @@ class SkillRunner:
         auto_conflicts: list[ConflictRecord] = []
 
         evidence_items: list[Evidence] = []
-        for i, e_data in enumerate(findings.get("evidence", [])):
+        for i, e_data in enumerate(_as_list(findings.get("evidence"))):
             try:
                 e_data = dict(e_data)
+                e_data.pop("id", None)
+                e_data.pop("stale", None)
                 # defaulting to 0 attached every unlabeled item to the first
                 # hypothesis, promoting it on other findings' evidence while the
                 # rest were left with none
                 if "hypothesis_index" in e_data:
                     hyp_idx = e_data.pop("hypothesis_index")
-                elif len(hypotheses) == 1:
+                elif len(raw_hypotheses) == 1:
                     hyp_idx = 0
                 else:
                     validation_errors.append(
-                        f"evidence[{i}]: hypothesis_index missing and {len(hypotheses)} "
+                        f"evidence[{i}]: hypothesis_index missing and {len(raw_hypotheses)} "
                         "hypotheses present; cannot attribute evidence"
                     )
                     continue
-                if not isinstance(hyp_idx, int) or not (0 <= hyp_idx < len(hypotheses)):
+                if isinstance(hyp_idx, str) and hyp_idx.strip().isdigit():
+                    hyp_idx = int(hyp_idx.strip())
+                if isinstance(hyp_idx, bool) or not isinstance(hyp_idx, int) \
+                        or not (0 <= hyp_idx < len(raw_hypotheses)):
                     validation_errors.append(f"evidence[{i}]: hypothesis_index {hyp_idx} out of range")
                     continue
-                e_data["hypothesis_id"] = hypotheses[hyp_idx].id
-                e_data.setdefault("commit", commit)
+                if hyp_idx not in hypothesis_by_index:
+                    validation_errors.append(
+                        f"evidence[{i}]: hypothesis_index {hyp_idx} refers to a hypothesis "
+                        "that failed validation")
+                    continue
+                e_data["hypothesis_id"] = hypothesis_by_index[hyp_idx].id
+                e_data["commit"] = commit
                 evidence_items.append(Evidence.model_validate(e_data))
             except Exception as ex:
                 validation_errors.append(f"evidence[{i}] invalid: {ex}")
@@ -2038,18 +2271,18 @@ class SkillRunner:
                 ev.analysis_quality.method = capped
 
         structured_questions: list[OpenQuestion] = []
-        for sq_data in findings.get("structured_questions", []):
+        for sq_data in _as_list(findings.get("structured_questions")):
             try:
-                sq = OpenQuestion.model_validate(sq_data)
+                sq = OpenQuestion.model_validate(_without_id(sq_data))
                 sq.raised_by_skill = skill_name
                 structured_questions.append(sq)
             except Exception as ex:
                 validation_errors.append(f"structured_question invalid: {ex}")
 
         fn_summaries: list[FunctionSummary] = []
-        for fs_data in findings.get("function_summaries", []):
+        for fs_data in _as_list(findings.get("function_summaries")):
             try:
-                fs = FunctionSummary.model_validate(fs_data)
+                fs = FunctionSummary.model_validate(_without_id(fs_data))
                 fs.created_by_skill = skill_name
                 fs.commit = commit
                 fn_summaries.append(fs)
@@ -2057,18 +2290,18 @@ class SkillRunner:
                 validation_errors.append(f"function_summary invalid: {ex}")
 
         ignored_returns: list[ReturnValueContract] = []
-        for rc_data in findings.get("ignored_returns", []):
+        for rc_data in _as_list(findings.get("ignored_returns")):
             try:
-                rc = ReturnValueContract.model_validate(rc_data)
+                rc = ReturnValueContract.model_validate(_without_id(rc_data))
                 rc.created_by_skill = skill_name
                 ignored_returns.append(rc)
             except Exception as ex:
                 validation_errors.append(f"ignored_return invalid: {ex}")
 
         llm_conflicts: list[ConflictRecord] = []
-        for i, c_data in enumerate(findings.get("conflicts", [])):
+        for i, c_data in enumerate(_as_list(findings.get("conflicts"))):
             try:
-                llm_conflicts.append(ConflictRecord.model_validate(c_data))
+                llm_conflicts.append(ConflictRecord.model_validate(_without_id(c_data)))
             except Exception as ex:
                 validation_errors.append(f"conflict[{i}] invalid: {ex}")
 
@@ -2094,7 +2327,8 @@ class SkillRunner:
         for h in hypotheses:
             ev_for_h = [e for e in evidence_items if e.hypothesis_id == h.id]
             if not ev_for_h:
-                synthetic = _synthesize_evidence_from_tools(h, tool_index, run_tools, commit)
+                synthetic = _synthesize_evidence_from_tools(h, tool_index, run_tools, commit,
+                                                            repo_path=repo_path)
                 evidence_items.extend(synthetic)
                 ev_for_h = synthetic
             ev_ids = {e.id for e in ev_for_h}
@@ -2116,13 +2350,19 @@ class SkillRunner:
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
             h.priority = h.compute_priority()
 
-        _raw_oq = findings.get("open_questions", [])
-        open_questions = (list(_raw_oq) if isinstance(_raw_oq, list) else [str(_raw_oq)]) + validation_errors
+        _raw_oq = findings.get("open_questions")
+        if isinstance(_raw_oq, list):
+            open_questions = list(_raw_oq)
+        elif isinstance(_raw_oq, str) and _raw_oq.strip():
+            open_questions = [_raw_oq]
+        else:
+            open_questions = []
+        open_questions += validation_errors
 
         if _ne_eligible:
             from .peer_analysis import _normalize_path as _norm_ep
             from .sarif import _normalise_cwe
-            ne_raw = findings.get("negative_evidence") or []
+            ne_raw = _as_list(findings.get("negative_evidence"))
             ne_items: list[NegativeEvidence] = []
             for idx, ne_data in enumerate(ne_raw):
                 try:
@@ -2169,7 +2409,8 @@ class SkillRunner:
     async def _run_skill_list(self, skills: list[str], repo_path: str,
                               verbose: bool, resume: bool,
                               on_progress=None,
-                              negative_evidence: bool = False) -> list[SkillResult]:
+                              negative_evidence: bool = False,
+                              conditional: frozenset = frozenset()) -> list[SkillResult]:
         """Run skills, recording each completion so an interrupted scan can resume.
 
         A scan is many minutes of paid LLM calls; losing all of it to one Ctrl+C
@@ -2186,17 +2427,22 @@ class SkillRunner:
                 mark_skill_done(repo_path, commit, name)
 
         results: list[SkillResult] = []
+        reported_skips: set[str] = set()
         for name in skills:
             if name in done:
-                if on_progress:
+                if on_progress and name not in reported_skips:
                     on_progress(name, "skipped", None)
+                reported_skips.add(name)
+                continue
+            if name in conditional and not self._has_blocking_questions(repo_path):
+                mark_skill_done(repo_path, commit, name)
                 continue
             if on_progress:
                 on_progress(name, "started", None)
             try:
                 result = await self.run_skill(name, repo_path, verbose=verbose,
                                              negative_evidence=negative_evidence)
-            except (KeyboardInterrupt, asyncio.CancelledError):
+            except BaseException:
                 if on_progress:
                     on_progress(name, "interrupted", None)
                 raise
@@ -2207,17 +2453,36 @@ class SkillRunner:
         return results
 
     def _phase_skills(self, phase: str) -> list[str]:
+        phase = phase.strip().lower()
+        if phase.isdigit():
+            phase = f"p{phase}"
         phase_dir = self._skills_dir / phase
         if not phase_dir.exists():
             raise FileNotFoundError(f"Phase dir not found: {phase_dir}")
-        return [sf.stem for sf in sorted(phase_dir.glob("*.md"))]
+        return _ordered_skills(phase, [sf.stem for sf in phase_dir.glob("*.md")])
 
     def _all_skills(self) -> list[str]:
+        phase_dirs = [d for d in sorted(self._skills_dir.iterdir()) if d.is_dir()]
+        maintenance = [d for d in phase_dirs if d.name == _MAINTENANCE_PHASE]
+        maintenance_skills = (self._phase_skills(_MAINTENANCE_PHASE) if maintenance else [])
         names: list[str] = []
-        for phase_dir in sorted(self._skills_dir.iterdir()):
-            if phase_dir.is_dir():
-                names.extend(sf.stem for sf in sorted(phase_dir.glob("*.md")))
+        for phase_dir in phase_dirs:
+            if phase_dir.name == _MAINTENANCE_PHASE:
+                continue
+            names.extend(maintenance_skills)
+            names.extend(self._phase_skills(phase_dir.name))
+        if not names:
+            names.extend(maintenance_skills)
         return names
+
+    def _maintenance_skills(self) -> frozenset:
+        if not (self._skills_dir / _MAINTENANCE_PHASE).is_dir():
+            return frozenset()
+        return frozenset(self._phase_skills(_MAINTENANCE_PHASE))
+
+    def _has_blocking_questions(self, repo_path: str) -> bool:
+        return any(q.impact == "blocks_finding"
+                   for q in self._db.list_open_questions(repo_path, status="open"))
 
     async def run_phase(self, phase: str, repo_path: str, verbose: bool = False,
                         resume: bool = False, on_progress=None,
@@ -2233,7 +2498,8 @@ class SkillRunner:
                       negative_evidence: bool = False) -> list[SkillResult]:
         results = await self._run_skill_list(
             self._all_skills(), repo_path, verbose, resume, on_progress,
-            negative_evidence=negative_evidence)
+            negative_evidence=negative_evidence,
+            conditional=self._maintenance_skills())
         self.reconcile(repo_path)
         return results
 
@@ -2341,7 +2607,15 @@ When done, call finish() with:
 
             messages.extend(tool_results)
             if finish_args is not None:
-                verdict = finish_args.get("verdict", finish_args)
+                if isinstance(finish_args, str):
+                    try:
+                        finish_args = json.loads(finish_args)
+                    except (json.JSONDecodeError, TypeError):
+                        finish_args = {}
+                if isinstance(finish_args, dict):
+                    verdict = finish_args.get("verdict", finish_args)
+                if not isinstance(verdict, dict):
+                    verdict = {}
                 break
 
         _REVIEW_STATUS_MAP = {
@@ -2351,8 +2625,10 @@ When done, call finish() with:
             "blocked": "blocked",
             "initial": "initial",
         }
-        suggested = verdict.get("suggested_status", hyp.status)
+        suggested = str(verdict.get("suggested_status") or hyp.status)
         new_status = _REVIEW_STATUS_MAP.get(suggested, hyp.status)
+        if hyp.status == "human_confirmed" or hyp.rejected_by == "human":
+            new_status = hyp.status
         if suggested == "reproduced":
             verdict["suggested_status"] = "evidence_supported"
             verdict.setdefault("notes", [])
@@ -2365,12 +2641,15 @@ When done, call finish() with:
         if new_status != hyp.status:
             hyp.status = new_status
 
-        all_db_conflicts = self._db.get_conflicts_for_hypothesis(hyp.id)
+        all_db_conflicts = self._db.get_conflicts_for_hypothesis(hyp.id, repo_path)
         all_db_evidence = self._db.get_evidence_for_hypothesis(hyp.id)
         db_open_questions = self._db.list_open_questions(repo_path, status="open")
         hyp.status = _gate_hypothesis_status(hyp, all_db_evidence, all_db_conflicts, db_open_questions)
         if hyp.status == "refuted":
             hyp.rejected_at_commit = self._get_commit(repo_path)
+            reason = verdict.get("refutation_reason")
+            if reason:
+                hyp.rejection_reason = str(reason)
         self._db.save_hypothesis(repo_path, hyp)
         self.reconcile(repo_path)
 
@@ -2424,6 +2703,9 @@ When done, call finish() with:
             },
         }
         run_tools = base_tools + mcp_tools + [finish_tool]
+        advertised_mcp = {
+            t.get("function", {}).get("name", "") for t in mcp_tools if isinstance(t, dict)
+        }
         system = system_override or SYSTEM_PROMPT
         result: Any = None
 
@@ -2479,7 +2761,9 @@ When done, call finish() with:
                     result_text = "Result recorded."
                 elif name.startswith("mcp__") and self._mcp_manager:
                     name_parts = name.split("__", 2)
-                    if len(name_parts) != 3:
+                    if name not in advertised_mcp:
+                        result_text = f"Tool {name} is not available in this session."
+                    elif len(name_parts) != 3:
                         result_text = f"Malformed MCP tool name (expected mcp__server__tool): {name}"
                     else:
                         _, mcp_name, tool_name = name_parts
@@ -2488,8 +2772,10 @@ When done, call finish() with:
                                            "rename the server in ~/.claude.json")
                         else:
                             result_text = await self._mcp_manager.call_tool(mcp_name, tool_name, args)
-                else:
+                elif name in _PROMPT_TOOL_NAMES:
                     result_text = await self._execute_tool(name, args, repo_path or ".")
+                else:
+                    result_text = f"Tool {name} is not available in this session."
 
                 tool_results.append({
                     "role": "tool",
@@ -2516,17 +2802,20 @@ When done, call finish() with:
         Applies quality caps, minimum obligations, gate, and persists to DB.
         Returns the (possibly merged) hypothesis id.
         """
-        commit = self._db.get_commit(repo_path) or ""
-        h_data = dict(h_data)
-        h_data.setdefault("commit", commit)
-        if h_data.get("status") == "reproduced":
-            h_data["status"] = "evidence_supported"
-        h = Hypothesis.model_validate(h_data)
+        commit = self._get_commit(repo_path) or self._db.get_commit(repo_path) or ""
+        h_data, demotion = _prepare_model_hypothesis(h_data, commit)
+        h, error = _validate_model_hypothesis(h_data)
+        if h is None:
+            raise ValueError(f"invalid workflow finding: {error}")
+        _apply_model_demotion(h, demotion, commit)
         evidence: list[Evidence] = []
         for e_raw in evidence_data or []:
             e_raw = dict(e_raw)
-            e_raw.setdefault("hypothesis_id", h.id)
-            e_raw.setdefault("commit", commit)
+            e_raw.pop("id", None)
+            e_raw.pop("stale", None)
+            e_raw.pop("hypothesis_index", None)
+            e_raw["hypothesis_id"] = h.id
+            e_raw["commit"] = commit
             evidence.append(Evidence.model_validate(e_raw))
         evidence, ev_conflicts = self._verify_evidence_items(repo_path, evidence)
         for e in evidence:
@@ -2539,12 +2828,14 @@ When done, call finish() with:
         all_open_questions = self._db.list_open_questions(repo_path, "open")
         _apply_quality_caps(h, evidence)
         _inject_minimum_obligations(h)
+        _apply_profile(h, evidence, self._profile(repo_path), commit=commit)
         db_conflicts = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
         all_conflicts = db_conflicts + ev_conflicts
         h.status = _gate_hypothesis_status(h, evidence, all_conflicts, all_open_questions)
         h.priority = h.compute_priority()
         self._db.save_hypothesis(repo_path, h)
         for e in evidence:
+            e.hypothesis_id = h.id
             self._db.save_evidence(repo_path, e)
         for c in ev_conflicts:
             self._db.save_conflict(repo_path, c)
@@ -2558,12 +2849,15 @@ When done, call finish() with:
         if target is None or not target.is_file():
             return False
         try:
+            anchor_norm = _norm(ev.anchor_text or "")
+            anchor_usable = len(anchor_norm) >= _MIN_ANCHOR_LEN
+            if not anchor_usable and ev.line_start < 1:
+                return None
             lines = target.read_text(errors="replace").splitlines()
             total = len(lines)
             if ev.line_start < 1 or ev.line_start > total:
                 return False
-            anchor_norm = _norm(ev.anchor_text or "")
-            if not anchor_norm or len(anchor_norm) < _MIN_ANCHOR_LEN:
+            if not anchor_usable:
                 return None
             s = ev.line_start - 1
             e = min(total, max(ev.line_end, ev.line_start))

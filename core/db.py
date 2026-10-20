@@ -19,6 +19,7 @@ class EvidenceStore:
         self.conn.row_factory = sqlite3.Row
         # two concurrent pentest invocations on one store lost updates
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
@@ -233,7 +234,6 @@ class EvidenceStore:
         return row["commit_sha"] if row else None
 
     def save_hypothesis(self, repo_path: str, h: Hypothesis):
-        h.priority = h.compute_priority()
         fp = h.fingerprint()
         existing = self.conn.execute(
             "SELECT id FROM hypotheses WHERE repo_path=? AND fingerprint=?",
@@ -259,6 +259,7 @@ class EvidenceStore:
                     h.rejected_at_commit = prior.rejected_at_commit
                 h.uncertainty = prior.uncertainty + [u for u in h.uncertainty
                                                      if u not in prior.uncertainty]
+        h.priority = h.compute_priority()
         self.conn.execute(
             """INSERT OR REPLACE INTO hypotheses
                (id, repo_path, data, created_at, status, severity, confidence, priority, skill_source, commit_sha, fingerprint)
@@ -363,6 +364,7 @@ class EvidenceStore:
                VALUES (?,?,'[]',?,?,?)
                ON CONFLICT(target) DO UPDATE SET
                  content=excluded.content,
+                 amendments='[]',
                  updated_at=excluded.updated_at,
                  created_by_skill=excluded.created_by_skill""",
             (repo_path, content, now, now, skill)
@@ -497,21 +499,9 @@ class EvidenceStore:
 
     def mark_negative_evidence_disputed(self, repo_path: str, ne_id: str) -> None:
         self.conn.execute(
-            "UPDATE negative_evidence SET anchor_stale=anchor_stale WHERE id=? AND repo_path=?",
+            "UPDATE negative_evidence SET disputed=1 WHERE id=? AND repo_path=?",
             (ne_id, repo_path),
         )
-        row = self.conn.execute(
-            "SELECT data FROM negative_evidence WHERE id=? AND repo_path=?",
-            (ne_id, repo_path),
-        ).fetchone()
-        if row:
-            import json as _json
-            d = _json.loads(row["data"])
-            d["disputed"] = True
-            self.conn.execute(
-                "UPDATE negative_evidence SET data=? WHERE id=? AND repo_path=?",
-                (_json.dumps(d), ne_id, repo_path),
-            )
         self.conn.commit()
 
     def list_conflicts(self, repo_path: str, status: str = "open") -> list[ConflictRecord]:
@@ -622,16 +612,21 @@ class EvidenceStore:
         )
         self.conn.commit()
 
-    def get_triage_decision(self, hypothesis: "Hypothesis | str") -> Optional[dict]:
+    def get_triage_decision(self, hypothesis: "Hypothesis | str",
+                            repo_path: Optional[str] = None) -> Optional[dict]:
         """Look up by fingerprint so a decision survives the next scan's new uuid."""
+        repo_clause = " AND repo_path=?" if repo_path else ""
+        repo_args: tuple = (repo_path,) if repo_path else ()
         if isinstance(hypothesis, str):
             row = self.conn.execute(
-                "SELECT * FROM triage_decisions WHERE hypothesis_id=?", (hypothesis,)
+                "SELECT * FROM triage_decisions WHERE hypothesis_id=?" + repo_clause,
+                (hypothesis, *repo_args)
             ).fetchone()
             return dict(row) if row else None
         row = self.conn.execute(
-            "SELECT * FROM triage_decisions WHERE fingerprint=? ORDER BY decided_at DESC LIMIT 1",
-            (hypothesis.fingerprint(),)
+            "SELECT * FROM triage_decisions WHERE fingerprint=?" + repo_clause
+            + " ORDER BY decided_at DESC LIMIT 1",
+            (hypothesis.fingerprint(), *repo_args)
         ).fetchone()
         return dict(row) if row else None
 
@@ -677,10 +672,23 @@ class EvidenceStore:
         return [dict(r) for r in rows]
 
     def save_skill_result(self, repo_path: str, result: SkillResult):
+        id_map: dict[str, str] = {}
         for h in result.hypotheses:
+            original_id = h.id
             self.save_hypothesis(repo_path, h)
+            if h.id != original_id:
+                id_map[original_id] = h.id
         for e in result.evidence:
+            if e.hypothesis_id in id_map:
+                e.hypothesis_id = id_map[e.hypothesis_id]
             self.save_evidence(repo_path, e)
+        if id_map:
+            for cf in result.conflicts:
+                for old_id, new_id in id_map.items():
+                    pattern = rf"\b{re.escape(old_id)}\b"
+                    cf.left = re.sub(pattern, new_id, cf.left)
+                    cf.right = re.sub(pattern, new_id, cf.right)
+                    cf.description = re.sub(pattern, new_id, cf.description)
         for c in result.coverage:
             self.upsert_coverage(repo_path, c)
         for ep in result.entry_points_found:
@@ -737,7 +745,8 @@ class EvidenceStore:
             id=r["id"], entry_point=r["entry_point"], safe_from=r["safe_from"],
             because=r["because"], anchor_file=r["anchor_file"],
             anchor_line=r["anchor_line"], anchor_text=r["anchor_text"],
-            anchor_stale=bool(r["anchor_stale"]), commit=r["commit_sha"] or "",
+            anchor_stale=bool(r["anchor_stale"]), disputed=bool(r["disputed"]),
+            commit=r["commit_sha"] or "",
         ) for r in rows]
 
     def mark_negative_evidence_stale(self, repo_path: str, ne_id: str) -> None:
