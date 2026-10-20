@@ -4,8 +4,8 @@
 
 **Trigger:** Phase 2, after extract-state-machines.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Entity schema, state machines, service list
-**Escalates to:** review-financial-operations, review-concurrency-and-retries
+**Preconditions:** Entity schema, state machines, service list (State Machines and Repository Inventory sections of the Threat Model in Known Context)
+**Escalates to:** understand-business-logic, trace-state-transitions
 
 ## Inputs
 - repo_path
@@ -35,6 +35,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: UI-only invariant bypassable via API, uniqueness race (application check without DB constraint), rate limit bypass via multiple pods without shared state.
+Set `cwe` on each hypothesis (e.g. CWE-602 client-side-only enforcement, CWE-362 uniqueness race, CWE-799 rate limit not enforced across instances).
+
+Persist the invariant list (rule, enforcement layer, weakest layer) with `amend_threat_model` as a short `## Business Invariants` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every identified invariant has a documented enforcement layer and the weakest layer is assessed.

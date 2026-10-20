@@ -11,7 +11,8 @@ and gaps in the middleware security model.
 
 ## Phase 1 — Read the complete URL/route configuration
 
-Use `sqz_list_dir` to find all routing configuration files. The file names vary by framework:
+Use `list_dir` (and `search_graph(label="Route")` when the graph is indexed) to find all routing configuration
+files. The file names vary by framework:
 - Python/Django: `urls.py`, `routers.py`
 - Java/Spring: classes with `@RequestMapping`, `@GetMapping` etc., or XML route config
 - .NET/ASP.NET: `Program.cs`, `Startup.cs`, controller attributes, `MapControllerRoute`
@@ -20,7 +21,8 @@ Use `sqz_list_dir` to find all routing configuration files. The file names vary 
 - Go/Gin: files with `router.GET/POST/Group`
 - PHP/Laravel: `routes/web.php`, `routes/api.php`
 
-Read each routing file completely. Do not skim.
+Read each routing file completely. Do not skim. (`read_file` returns at most 200 lines per call — page through
+longer files with `start_line`/`end_line`.)
 
 For every registered route, record:
 - Path pattern (including dynamic segments)
@@ -55,7 +57,8 @@ For endpoints with no authentication:
 
 ## Phase 3 — Read the complete middleware stack
 
-Find the `MIDDLEWARE` setting and read every middleware class it references.
+Find the middleware registration (Django `MIDDLEWARE`, ASP.NET Core `app.Use*`, Express `app.use`, Spring filter
+chain, etc.) and read every middleware class it references.
 Use `get_code_snippet` on each one.
 
 For each middleware:
@@ -108,8 +111,8 @@ Read the dependency list. Look specifically for:
 - Authentication and cryptography libraries — these are highest risk if outdated
 - Serialization libraries (especially Java XStream, Jackson, Ruby Marshal-related)
 - XML parsing libraries
-- Any library that is actively maintained — a last-updated date of several years ago
-  in a security-sensitive area is a finding
+- Security-sensitive libraries that are no longer actively maintained — a last release several
+  years ago in a security-sensitive area is a finding
 
 Do NOT attempt to enumerate all CVEs yourself. Instead: identify library name + version, and
 flag specific categories (auth, crypto, serialization, XML) where outdated versions are known
@@ -147,11 +150,13 @@ For authentication endpoints (login, OTP verification, API key validation, passw
 ## Phase 8 — CI/CD pipeline security
 
 Read CI/CD configuration files (`.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile`,
-`Circlefile`, `.circleci/config.yml`, `.drone.yml`):
+`.circleci/config.yml`, `.drone.yml`):
 
 - Are secrets passed to jobs triggered by pull requests from external forks?
-  GitHub: `pull_request_target` event with `secrets` access is dangerous —
-  an attacker's fork PR runs in the repo's context with access to secrets.
+  GitHub: a `pull_request_target` (or `workflow_run`) workflow runs with the base repository's
+  secrets and write token. It is exploitable when it checks out and runs the PR's code
+  (`actions/checkout` with `ref: ${{ github.event.pull_request.head.sha }}` or `head.ref`) or
+  interpolates PR-controlled fields (`github.event.pull_request.title`, `github.head_ref`) into `run:` steps.
 - Are deployment credentials embedded in workflow files instead of using the platform's
   secret management (GitHub Secrets, GitLab Variables, Vault)?
 - Are action/step versions pinned to a specific commit SHA?
@@ -175,6 +180,11 @@ A hypothesis for each:
 
 For each: specify the exact URL path, dependency, or CI config section, what it exposes, and
 under what conditions an attacker can reach it.
+
+Set `cwe` on each hypothesis (e.g. CWE-306 unauthenticated endpoint, CWE-489 debug endpoint reachable, CWE-200
+monitoring or documentation exposure, CWE-862 method-level authorization gap, CWE-693 bypassable security
+middleware, CWE-1395 vulnerable dependency, CWE-307 no brute-force limit, CWE-427 dependency confusion,
+CWE-829 fork PR code running with secrets).
 
 ## Forbidden
 

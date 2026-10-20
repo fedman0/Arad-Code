@@ -4,8 +4,8 @@
 
 **Trigger:** After model-authorization.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Identity model, authorization model, DB schema
-**Escalates to:** review-object-authorization, review-tenant-isolation
+**Preconditions:** Identity model and authorization model (Threat Model in Known Context), DB schema
+**Escalates to:** hunt-privilege-escalation-bola, model-tenant-boundaries
 
 ## Inputs
 - repo_path
@@ -35,6 +35,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: operation without ownership check, indirect chain not verified, global resource with user data.
+Set `cwe` on each hypothesis (e.g. CWE-639 missing or unverified ownership check, CWE-862 operation with no authorization at all).
+
+Persist the resource ownership model (per resource type: ownership type, ownership field, check location per operation) with `amend_threat_model` as a short `## Resource Ownership` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every resource type has a documented ownership model and every write/delete operation has a traced authorization check.

@@ -4,12 +4,12 @@
 
 **Trigger:** After model-identities.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Identity model, DI map, middleware map
-**Escalates to:** review-object-authorization, review-function-authorization
+**Preconditions:** Identity model, DI map, middleware map (Threat Model in Known Context)
+**Escalates to:** understand-authorization-and-access, hunt-privilege-escalation-bola
 
 ## Inputs
 - repo_path
-- identity model from model-identities
+- identity model (Identity Model section of the Threat Model)
 
 ## Procedure
 1. Find the authorization model: RBAC (role-based), ABAC (attribute-based), ACL, policy-based, object-level.
@@ -37,6 +37,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: missing object-level check, load-then-check with data leakage, policy aggregation granting excess privilege, stale claims exploitable.
+Set `cwe` on each hypothesis (e.g. CWE-639 missing object-level check, CWE-862 missing or late authorization, CWE-269 policy aggregation granting excess privilege, CWE-613 stale claims).
+
+Persist the authorization model (role → permission matrix, object-level check per resource type, check placement, claims source, admin bypass paths) with `amend_threat_model` as a short `## Authorization Model` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every resource type has a documented ownership check and every sensitive operation has a documented authorization gate.

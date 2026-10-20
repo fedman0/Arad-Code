@@ -2,7 +2,7 @@
 
 ## Contract
 
-**Trigger:** Before every phase, and after any phase that raised blocking questions.
+**Trigger:** Before each phase, whenever blocking open questions exist.
 **Phase:** 0 — Maintenance
 **Preconditions:** An evidence store with at least one prior skill run.
 **Produces:** Resolved open questions. Findings are NOT the goal of this skill.
@@ -60,7 +60,7 @@ has not actually been proven.
 Standard FINDINGS_SCHEMA. Normally an empty `hypotheses` list.
 
 Emit a hypothesis only if answering a question uncovers a genuine vulnerability that no
-existing hypothesis covers; then follow the full output contract for it.
+existing hypothesis covers; then follow the full output contract for it, including `cwe`.
 
 Record coverage as `{kind: "trust_boundary", name: "open_questions", status: ...}`:
 `no_issue_found` when everything resolvable was resolved, `needs_follow_up` when

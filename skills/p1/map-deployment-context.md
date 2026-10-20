@@ -4,7 +4,7 @@
 
 **Trigger:** After resolve-configuration.
 **Phase:** 1 — Project Understanding
-**Preconditions:** Config file list, service list
+**Preconditions:** Config file locations and service list (Repository Inventory and Configuration sections of the Threat Model in Known Context)
 **Escalates to:** map-service-boundaries
 
 ## Inputs
@@ -36,6 +36,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: service running as root with sensitive mounts, no network policy (default allow), auth bypass via direct pod IP, over-privileged service account.
+Set `cwe` on each hypothesis (e.g. CWE-250 root container, CWE-284 missing network policy, CWE-288 direct pod access bypassing ingress auth, CWE-269 over-privileged service account).
+
+Persist the deployment context (internet-facing services and ports, ingress auth, pod permissions, network policy, secret injection) with `amend_threat_model` as a short `## Deployment Context` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every internet-facing entry point has a confirmed auth layer and the cluster communication model is mapped.

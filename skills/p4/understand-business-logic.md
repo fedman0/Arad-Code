@@ -127,6 +127,10 @@ A hypothesis for each:
 Include the exact file:line of the missing check and the call chain from HTTP request to
 the consequential action.
 
+Set `cwe` on each hypothesis (e.g. CWE-639 actor ID taken from request input, CWE-862 missing precondition,
+CWE-841 out-of-sequence state transition, CWE-837 replayable or double-triggered operation, CWE-367
+check-then-act race, CWE-190 / CWE-191 overflow or underflow, CWE-1339 precision loss).
+
 ## Forbidden
 
 - Do not skip reading commented-out code — a commented-out security check IS a finding

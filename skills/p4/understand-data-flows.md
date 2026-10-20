@@ -31,7 +31,7 @@ Then read the entry-point code to find EVERY input vector — do not assume only
 - WebSocket messages
 - gRPC / Thrift / custom protocol payloads
 
-For each input vector: use `trace_path(mode=data_flow)` to follow the value into the codebase.
+For each input vector: use `trace_path(mode="data_flow", direction="outbound")` to follow the value into the codebase.
 
 ---
 
@@ -79,10 +79,10 @@ Find every place the application renders templates. Then check:
   - Dynamically constructed template names that derive from user input
   - Error pages or email templates generated from user-supplied format strings
 - This applies to every template engine in every language:
-  Python (Jinja2, Mako, Chameleon, string.Template), PHP (Twig, Blade, Smarty),
+  Python (Jinja2, Mako, Chameleon, `str.format` on a user-controlled format string), PHP (Twig, Blade, Smarty),
   Java (Freemarker, Velocity, Thymeleaf SpEL in templates), JavaScript/Node (EJS, Pug, Handlebars,
   Nunjucks, Lodash template), Ruby (ERB, Haml), Go (text/template if user controls template string),
-  .NET (Razor is safe but T4 can be misused).
+  .NET (Razor via RazorEngine/RazorLight when the template string is user-supplied; T4 can be misused).
 
 **XSS — Output encoding failure (any server-side HTML rendering):**
 
@@ -107,9 +107,12 @@ Applies primarily to Java/Spring but the pattern exists elsewhere:
 
 **Prototype Pollution (JavaScript / Node.js only):**
 
-- Does the application deep-merge user-supplied JSON objects into other objects?
-  (Object.assign with nested sources, lodash `merge`/`extend`/`defaultsDeep`, any recursive
-  copy/merge utility, `JSON.parse` result used as merge source)
+- Does the application deep-merge or path-set user-supplied JSON into other objects?
+  (lodash `merge`/`mergeWith`/`defaultsDeep`/`set`/`zipObjectDeep` in vulnerable versions, jQuery
+  `$.extend(true, …)`, any recursive copy/merge utility, `JSON.parse` result used as merge source)
+- `Object.assign` and object spread are shallow and do not pollute `Object.prototype`: a `__proto__`
+  key from `JSON.parse` changes only the target's own prototype (`Object.assign`) or becomes a plain
+  own property (spread).
 - Can a user send `{"__proto__": {"isAdmin": true}}` or
   `{"constructor": {"prototype": {"isAdmin": true}}}`?
 - If `Object.prototype` is polluted, every object in the process inherits the injected property.
@@ -134,7 +137,11 @@ Applies primarily to Java/Spring but the pattern exists elsewhere:
 
 *Log4Shell — Java log4j2 (CRITICAL):*
 - If this is a Java application: find which logging library is used (check dependency manifest).
-- For log4j2: what version? log4j2 < 2.17.0 is vulnerable to CVE-2021-44228 (Log4Shell).
+- For log4j2: what version? 2.0-beta9 through 2.14.1 is vulnerable to CVE-2021-44228 (Log4Shell), fixed in
+  2.15.0 (2.12.2 on Java 7, 2.3.1 on Java 6). 2.15.0 remains exploitable with non-default pattern layouts that
+  use Thread Context lookups (CVE-2021-45046, fixed in 2.16.0 / 2.12.2). CVE-2021-45105 (DoS, fixed in 2.17.0)
+  and CVE-2021-44832 (RCE only with attacker control of the logging configuration, fixed in 2.17.1) are
+  separate, lower-severity issues.
 - Any user-controlled string passed to a log4j2 logger containing `${jndi:ldap://...}` triggers
   an outbound JNDI lookup → remote class loading → RCE.
 - User data that is commonly logged: HTTP headers (User-Agent, X-Forwarded-For, custom headers),
@@ -149,7 +156,8 @@ The dangerous pattern: an API that deserializes bytes/strings into arbitrary obj
 - PHP: `unserialize()`
 - Ruby: `Marshal.load()`
 - .NET: `BinaryFormatter`, `NetDataContractSerializer`, `LosFormatter`
-- Node.js: `node-serialize`, `js-yaml` with `safeLoad` off, `serialize-javascript`
+- Node.js: `node-serialize` `unserialize()`, `js-yaml` 3.x `load()` (its full schema constructs `!!js/function`;
+  `safeLoad` and 4.x `load` are safe), `eval` / `new Function` used to revive serialized data
 - Generic: any "read object from JSON/XML/binary and reconstruct its type" API
 
 Find where the application deserializes data from: request bodies, headers, cookies,
@@ -158,10 +166,16 @@ cache entries, message queue payloads. Read whether the deserializer is the unsa
 **XML parsing — XXE and entity expansion DoS (any XML parser):**
 
 - Find where the application parses XML (uploads, API request bodies, configuration).
-- Does the parser have external entity processing enabled?
-- Safe: explicit disabling of external entities AND DTD processing, use of a hardened library.
-- Unsafe: default configuration of most XML parsers (libxml2, lxml, ElementTree in Python,
-  Java's DocumentBuilderFactory, .NET XmlReader with DtdProcessing.Parse, PHP's SimpleXML).
+- Does the parser have external entity processing enabled? Defaults differ by parser — read its construction.
+- Safe: explicit disabling of external entities AND DTD processing, use of a hardened library (e.g. defusedxml).
+- Unsafe by default: Java's JAXP factories (DocumentBuilderFactory, SAXParserFactory, XMLInputFactory,
+  TransformerFactory) unless hardened, lxml before 5.0 (`resolve_entities=True`, local-file XXE), .NET
+  XmlDocument / XmlTextReader on .NET Framework before 4.5.2.
+- Unsafe only when enabled: libxml2-based parsers (PHP SimpleXML/DOMDocument, Nokogiri, libxmljs) with entity
+  substitution or DTD loading flags (`LIBXML_NOENT`, `NOENT`, `noent: true`, `DTDLOAD`), lxml
+  `XMLParser(resolve_entities=True)`, .NET `DtdProcessing.Parse` with an `XmlUrlResolver`, Python
+  `xml.sax` / `pulldom` with `feature_external_ges` enabled. Python's `xml.etree` and `minidom` do not fetch
+  external entities.
 
 - *Billion Laughs — XML DoS (no external request needed):*
   An attacker defines a chain of expanding internal entities. No network access required.
@@ -174,7 +188,9 @@ cache entries, message queue payloads. Read whether the deserializer is the unsa
 - Is traversal prevented? Read the actual sanitization — `..` stripping is bypassable
   via URL encoding (`%2e%2e`), unicode normalization, null bytes on some systems.
 - For archive extraction: is the extracted filename validated to stay inside the target
-  directory? Zip Slip applies to any archive library in any language.
+  directory? Zip Slip applies to any archive library in any language (Python's `zipfile.extractall`
+  already strips `..` and absolute paths; `tarfile.extractall` does not unless `filter="data"` is
+  passed, which is the default only from Python 3.14).
 
 *File upload specifics:*
 - MIME type validation: is the actual file content inspected (magic bytes), or only the
@@ -250,7 +266,7 @@ A hypothesis for each:
 - EL/SpEL/OGNL injection: user data evaluated as an expression
 - Prototype pollution: user-controlled object merged into application objects
 - OS command injection via user data in a shell command string
-- Log4Shell: log4j2 < 2.17 present + user data logged
+- Log4Shell: log4j2 2.0-beta9–2.14.1 (or 2.15.0 with Thread Context lookups in a pattern layout) present + user data logged
 - Unsafe deserialization: attacker-controlled bytes/string to a language-native deserializer
 - XXE: XML parsed with external entity expansion or DTD processing enabled
 - Billion Laughs: XML parsed without DTD processing disabled entirely
@@ -262,12 +278,19 @@ A hypothesis for each:
 - Sensitive data (tokens, keys, OTPs, PII) in responses to unprivileged actors
 - Cross-user data access: query missing an owner/user filter
 
+Set `cwe` on each hypothesis (e.g. CWE-89 SQL, CWE-943 NoSQL, CWE-90 LDAP, CWE-643 XPath, CWE-564 HQL,
+CWE-1336 SSTI, CWE-79 XSS, CWE-917 EL injection and Log4Shell, CWE-1321 prototype pollution, CWE-78 OS
+command, CWE-95 eval, CWE-117 log injection, CWE-502 deserialization, CWE-611 XXE, CWE-776 Billion Laughs,
+CWE-22 path traversal and Zip Slip, CWE-434 file upload, CWE-915 mass assignment, CWE-1333 ReDoS, CWE-113
+response header injection, CWE-200 sensitive data in responses, CWE-639 cross-user access).
+
 ## Forbidden
 
 - Do not name a specific library as vulnerable without reading how the application uses it
 - Do not assume a query builder or ORM is safe without reading the actual query construction
 - Do not report mass assignment without reading the binding configuration
 - Do not skip debug/test code paths — they are often the source of data leaks
-- Do not assume XML parsing is safe — default settings in most parsers allow XXE
+- Do not assume XML parsing is safe or unsafe from the library name — read the parser construction and its
+  entity/DTD settings (several common parsers, e.g. Java's JAXP factories, allow XXE by default)
 - Do not report XSS for pure JSON APIs — only for HTML-rendering endpoints
 - Do not report ReDoS without identifying the specific backtracking-vulnerable pattern

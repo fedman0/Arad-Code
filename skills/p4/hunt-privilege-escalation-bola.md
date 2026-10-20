@@ -1,17 +1,17 @@
 # SKILL: hunt-privilege-escalation-bola
 
-## Strategy — map first, then trace gaps
+## Strategy — breadth first, bounded verification
 
-This skill has three phases:
+This is a hunt (breadth) skill with a budget of about 30 turns. Batch every grep of a step into ONE turn and keep verification short:
 
-**Phase 1 — Role Landscape (recon, no submitting yet)**
-Build a complete map: what roles exist, how they're assigned, how they're checked.
+**Phase 1 — Role Landscape (quick recon, no submitting yet)**
+One batched turn per step: note which roles, guard functions and assignment points exist. Do not try to build a complete map.
 
 **Phase 2 — Assignment Flow Analysis**
-For every role assignment path: can a lower-privileged caller reach it?
+For each role assignment candidate: can a lower-privileged caller reach it? Use at most 2 turns per candidate (read the handler; one inbound `trace_path` only if the guard is not visible in it).
 
 **Phase 3 — Object-Level Authorization (BOLA)**
-For every object fetch by caller-supplied ID: is ownership verified against the caller's identity?
+For each object fetch by caller-supplied ID: is ownership verified against the caller's identity? Same 2-turn limit per candidate — if it stays unclear, move on.
 
 ---
 
@@ -25,7 +25,7 @@ For each candidate:
 - Is the **caller's** role/identity verified (not just the target's)?
 - Is the check on every code path, or only on the happy path?
 
-**c.** `trace_path("function", mode="calls")` — follow who calls this function. Can an unauthenticated or low-privilege caller reach it through any route?
+**c.** `trace_path("function", mode="calls", direction="inbound")` — follow who calls this function. Can an unauthenticated or low-privilege caller reach it through any route?
 
 **d.** For object access: does the query filter include the caller's user ID?
 - `filter_by(id=id, user_id=current_user.id)` → **SKIP**
@@ -41,7 +41,7 @@ For each candidate:
 
 **Python (Django / Flask / FastAPI):**
 ```
-grep(pattern="ROLES\s*=\s*\{|PERMISSIONS\s*=\s*\{|class\s+Role\s*\(|class\s+Permission\s*\(|choices\s*=\s*\[.*admin.*\]|UserRole\.(ADMIN|MODERATOR|STAFF|SUPER)", max_matches=30)
+grep(pattern="ROLES\s*=\s*[\{\[\(]|PERMISSIONS\s*=\s*[\{\[\(]|class\s+\w*Role\w*\s*\(|class\s+\w*Permission\w*\s*\(|choices\s*=\s*\[.*admin.*\]|UserRole\.(ADMIN|MODERATOR|STAFF|SUPER)", max_matches=30)
 ```
 
 **JavaScript / TypeScript:**
@@ -56,17 +56,17 @@ grep(pattern="@RolesAllowed\s*\(\s*['\"]ADMIN['\"]|GrantedAuthority|hasRole\s*\(
 
 **Go:**
 ```
-grep(pattern="const\s+\(\s*\n.*Role|type\s+Role\s+(string|int)|RoleAdmin\s*=|RoleModerator\s*=", max_matches=20)
+grep(pattern="type\s+Role\s+(string|int)\b|^\s*Role[A-Z]\w*(\s+Role)?\s*=|^\s*[A-Z]\w*Role\s+Role\s*=", max_matches=20)
 ```
 
 **Ruby / Rails:**
 ```
-grep(pattern="enum\s+role\s*:|ROLES\s*=\s*\[|role\s*=\s*['\"]admin['\"]|has_role\?|can\?\s*:admin", max_matches=20)
+grep(pattern="enum\s+:?role\b|ROLES\s*=\s*(\[|%w)|role\s*=\s*['\"]admin['\"]|has_role\?|can\?\s*:admin", max_matches=20)
 ```
 
 **PHP / Laravel:**
 ```
-grep(pattern="Gate::define\s*\(|can\s*\(['\"]admin['\"]|\\\$user->hasRole\s*\(|Spatie.*Role|enum.*role.*admin", max_matches=20)
+grep(pattern="Gate::define\s*\(|can\s*\(['\"]admin['\"]|->hasRole\s*\(|Spatie.*Role|enum.*role.*admin", max_matches=20)
 ```
 
 → **Do not submit yet.** Record all roles found: typically `admin`, `moderator`, `staff`, `superuser`, `system`, `internal`, `service`, `god`. These are the escalation targets. Note which roles grant destructive privileges (delete_user, manage_billing, impersonate, etc.).
@@ -77,7 +77,7 @@ grep(pattern="Gate::define\s*\(|can\s*\(['\"]admin['\"]|\\\$user->hasRole\s*\(|S
 
 **Python:**
 ```
-grep(pattern="@require_role\s*\(|@admin_required|@staff_required|@permission_required\s*\(['\"].*admin|def\s+check_role\s*\(|def\s+require_admin\s*\(", max_matches=30)
+grep(pattern="@require_role\s*\(|@roles?_required|@admin_required|@staff_required|@staff_member_required|@superuser_required|@user_passes_test\s*\(|@permission_required\s*\(['\"].*admin|def\s+check_role\s*\(|def\s+require_admin\s*\(", max_matches=30)
 ```
 
 **JavaScript:**
@@ -87,7 +87,7 @@ grep(pattern="requireRole\s*\(|checkRole\s*\(|hasRole\s*\(|assertRole\s*\(|roleG
 
 **Java / Kotlin:**
 ```
-grep(pattern="@PreAuthorize\s*\(['\"]hasRole|@Secured\s*\(\s*['\"]ROLE_ADMIN|SecurityContextHolder.*getAuthentication\s*\(\s*\)\.getAuthorities", max_matches=20)
+grep(pattern="@PreAuthorize\s*\(\s*['\"]has(Any)?(Role|Authority)|@Secured\s*\(\s*\{?\s*['\"]ROLE_|SecurityContextHolder.*getAuthentication\s*\(\s*\)\.getAuthorities", max_matches=20)
 ```
 
 → **Do not submit yet.** For each check found: note the exact function name. These are the guards you'll verify are ACTUALLY called on the routes you trace in Phase 2.
@@ -100,32 +100,32 @@ These are the endpoints that SET or MODIFY a user's role. If any are reachable b
 
 **Python:**
 ```
-grep(pattern="\.role\s*=\s*|update_role\s*\(|set_role\s*\(|assign_role\s*\(|grant_role\s*\(|promote\s*\(|user\.update\s*\(.*role|serializer.*role", max_matches=25)
+grep(pattern="\.role\s*=[^=]|update_role\s*\(|set_role\s*\(|assign_role\s*\(|grant_role\s*\(|promote\s*\(|user\.update\s*\(.*role|serializer.*role", max_matches=25)
 ```
 
 **JavaScript:**
 ```
-grep(pattern="\.role\s*=\s*|updateRole\s*\(|setRole\s*\(|assignRole\s*\(|grantRole\s*\(|promote\s*\(|user\.update\s*\(.*role|body\.role", max_matches=25)
+grep(pattern="\.role\s*=[^=]|updateRole\s*\(|setRole\s*\(|assignRole\s*\(|grantRole\s*\(|promote\s*\(|user\.update\s*\(.*role|body\.role", max_matches=25)
 ```
 
 **Java / Kotlin:**
 ```
-grep(pattern="setRole\s*\(|addRole\s*\(|grantAuthority\s*\(|user\.setRoles\s*\(|\.roles\s*=\s*|roleRepository\.save", max_matches=25)
+grep(pattern="setRole\s*\(|addRole\s*\(|grantAuthority\s*\(|user\.setRoles\s*\(|\.roles\s*=[^=]|roleRepository\.save", max_matches=25)
 ```
 
 **Go:**
 ```
-grep(pattern="user\.Role\s*=\s*|SetRole\s*\(|UpdateRole\s*\(|db\.Model.*Update.*role", max_matches=20)
+grep(pattern="\w+\.Role\s*=[^=]|SetRole\s*\(|UpdateRole\s*\(|db\.Model.*Update.*role", max_matches=20)
 ```
 
 **Ruby:**
 ```
-grep(pattern="user\.update\s*\(\s*role:|user\.role\s*=\s*|assign_role\s*\(|params\s*\[.*:role\]", max_matches=20)
+grep(pattern="\.update\s*\(\s*role:|\.role\s*=[^=~]|assign_role\s*\(|params\s*\[.*:role\]", max_matches=20)
 ```
 
 **PHP:**
 ```
-grep(pattern="\\\$user->role\s*=|\\\$user->assignRole\s*\(|\\\$user->update\s*\(\s*\[.*role|syncRoles\s*\(", max_matches=20)
+grep(pattern="->role\s*=[^=]|->assignRole\s*\(|->update\s*\(\s*\[.*role|syncRoles\s*\(", max_matches=20)
 ```
 
 → **For each assignment point found:** immediately go to Phase 2 and trace the caller chain.
@@ -156,10 +156,10 @@ def update_user(user_id, data):
 
 **c.** If check exists: is it on the **caller** or the **target**? A check that verifies `target.role == admin` is NOT an authorization check — it verifies the target's current state, not the caller's privilege.
 
-**d.** `trace_path("handler_function", mode="calls")` — who calls this? Is there another route (e.g. admin bulk endpoint, webhook, internal API) that bypasses the check?
+**d.** `trace_path("handler_function", mode="calls", direction="inbound")` — who calls this? Is there another route (e.g. admin bulk endpoint, webhook, internal API) that bypasses the check?
 
 → Submit if: role assignment reachable without caller-role verification, or the check is on wrong subject.
-violated_invariant="[endpoint] assigns role=[role] without verifying caller has [required_role]; any authenticated user achieves vertical PE to [target_role]", severity=10, confidence=9, exposure="authenticated"
+violated_invariant="[endpoint] assigns role=[role] without verifying caller has [required_role]; any authenticated user achieves vertical PE to [target_role]", severity=10, confidence=9, exposure="authenticated", cwe="CWE-269"
 
 ---
 
@@ -169,24 +169,24 @@ When user updates their own profile, can they set their own `role` field?
 
 **Python (Django REST / FastAPI):**
 ```
-grep(pattern="class\s+\w+Serializer.*Meta.*fields.*=.*'__all__'|class\s+\w+Serializer.*Meta.*exclude\s*=\s*\[\]|extra_kwargs\s*=\s*\{[^}]*['\"]role['\"].*['\"]read_only['\"]:\s*False", max_matches=20)
+grep(pattern="fields\s*=\s*['\"]__all__['\"]|exclude\s*=\s*(\[\s*\]|\(\s*\))|['\"](role|is_admin|is_staff|is_superuser)['\"]\s*:\s*\{[^}]*['\"]read_only['\"]\s*:\s*False", max_matches=20)
 ```
 
 **JavaScript (Mongoose / Sequelize):**
 ```
-grep(pattern="user\.save\s*\(\s*\)|user\.update\s*\(\s*req\.body\s*\)|updateOne\s*\(\s*\{.*\},\s*req\.body", max_matches=20)
+grep(pattern="(update|updateOne|updateMany|findByIdAndUpdate|findOneAndUpdate)\s*\([^)]*req\.body\s*[,)]|\b(create|build|set)\s*\(\s*req\.body\s*[,)]|new\s+[A-Z]\w*\s*\(\s*req\.body\s*\)|Object\.assign\s*\(\s*\w+\s*,\s*req\.body\s*\)|\.\.\.req\.body\b", max_matches=20)
 ```
 
 **Ruby (Rails strong parameters):**
 ```
-grep(pattern="params\.permit!\s*\(\s*\)|params\.require\s*\(.*\)\.permit\s*\(.*:role", max_matches=15)
+grep(pattern="\.permit!|params\.require\s*\(.*\)\.permit\s*\(.*:(role|roles|admin|is_admin)\b", max_matches=15)
 ```
 
 **Verify**: does the user-update endpoint accept a `role` field from the request body?
 - If `role` is in the serializer's writable fields AND the caller sets it on their own account → **SUBMIT** (self-role-assignment PE)
 - If `role` is explicitly `read_only=True` or excluded from `fields` → **SKIP**
 
-→ Submit: violated_invariant="User profile update endpoint accepts role field from request body without admin check; any user sets own role to admin via PATCH /api/users/me with {role: 'admin'}", severity=10, confidence=9, exposure="authenticated"
+→ Submit: violated_invariant="User profile update endpoint accepts role field from request body without admin check; any user sets own role to admin via PATCH /api/users/me with {role: 'admin'}", severity=10, confidence=9, exposure="authenticated", cwe="CWE-915"
 
 ---
 
@@ -204,7 +204,11 @@ grep(pattern="jwt\.sign\s*\(.*role|jwt\.encode\s*\(.*role|create_access_token\s*
 grep(pattern="payload\[['\"]role['\"]|decoded\[['\"]role['\"]|jwt_data\[.*role|current_user\.role\s*=.*payload", max_matches=20)
 ```
 
-**Verify**: is the role taken directly from the JWT payload WITHOUT re-fetching the user's actual role from the database on each request?
+**Verify**: reading the role from a server-signed, signature-verified token is normal stateless auth and is NOT a finding by itself. SUBMIT only when one of these holds:
+- the role placed in the token at issuance comes from the request (e.g. `jwt.sign({...req.body})`, `additional_claims={"role": request.json["role"]}`);
+- the token is decoded without signature verification (`jwt.decode(..., options={"verify_signature": False})`, jsonwebtoken `jwt.decode` instead of `jwt.verify`);
+- the signing secret is hardcoded or weak (see hunt-secrets-detection), so anyone can mint `role=admin`.
+Otherwise (role only stale until the token expires) note it at severity 4.
 
 ```python
 # VULNERABLE: role read from token, not from DB
@@ -215,9 +219,9 @@ user = db.get(jwt_payload["user_id"])
 user_role = user.role             # DB is authoritative
 ```
 
-`trace_path` from the JWT decode function to confirm: is `role` value from token used directly, or is it discarded and re-loaded from DB?
+`trace_path("jwt_decode_function", mode="data_flow", direction="outbound")` to confirm: is `role` value from token used directly, or is it discarded and re-loaded from DB?
 
-→ Submit: violated_invariant="Role claim read directly from JWT payload without DB re-fetch; if signing key is weak/leaked, or if token replay from old admin session, attacker forges role=admin", severity=9, confidence=8, exposure="authenticated"
+→ Submit: violated_invariant="Role claim read directly from JWT payload without DB re-fetch; if signing key is weak/leaked, or if token replay from old admin session, attacker forges role=admin", severity=9, confidence=8, exposure="authenticated", cwe="CWE-863"
 
 ---
 
@@ -245,7 +249,7 @@ if membership.role == "admin":
 
 `get_code_snippet` for each admin check: is `org_id`/`tenant_id` included in the role lookup?
 
-→ Submit: violated_invariant="Role check uses global user.role without scoping to current tenant; user with admin role in Org A acts as admin in Org B", severity=9, confidence=8, exposure="authenticated"
+→ Submit: violated_invariant="Role check uses global user.role without scoping to current tenant; user with admin role in Org A acts as admin in Org B", severity=9, confidence=8, exposure="authenticated", cwe="CWE-863"
 
 ---
 
@@ -262,7 +266,7 @@ grep(pattern="get_object_or_404\s*\(\w+,\s*(pk|id)\s*=|\.objects\.get\s*\(\s*(pk
 
 **JavaScript:**
 ```
-grep(pattern="findById\s*\(\s*req\.(params|body|query)\.|findByPk\s*\(\s*req\.(params|body|query)\.|findOne\s*\(\s*\{\s*id\s*:", max_matches=30)
+grep(pattern="findById\s*\(\s*req\.(params|body|query)\.|findByPk\s*\(\s*req\.(params|body|query)\.|findOne\s*\(\s*\{\s*id\s*:|where\s*:\s*\{\s*id\s*:\s*req\.", max_matches=30)
 ```
 
 **Java / Kotlin:**
@@ -282,7 +286,7 @@ grep(pattern="find\s*\(\s*params\[|find_by\s*\(\s*id:\s*params\[|where\s*\(\s*id
 
 **PHP:**
 ```
-grep(pattern="find\s*\(\s*\\\$request->|findOrFail\s*\(\s*\\\$request->|where\s*\(['\"]id['\"],\s*\\\$request->", max_matches=30)
+grep(pattern="(find|findOrFail)\s*\(\s*\$(request->|id\b)|where\s*\(\s*['\"]id['\"]\s*,\s*\$(request->|id\b)", max_matches=30)
 ```
 
 **Verify** for each match (the most important step):
@@ -304,7 +308,7 @@ if post.author != request.user:
 
 Objects that frequently have BOLA: orders, invoices, messages, tickets, medical records, documents, payments, API keys, OAuth tokens, SSH keys. Flag these specifically.
 
-→ Submit: violated_invariant="[Model] fetched by caller-supplied [id_param] without verifying caller is [owner/participant]; any authenticated user accesses any [Model] by enumerating IDs", severity=9, confidence=9, exposure="authenticated"
+→ Submit: violated_invariant="[Model] fetched by caller-supplied [id_param] without verifying caller is [owner/participant]; any authenticated user accesses any [Model] by enumerating IDs", severity=9, confidence=9, exposure="authenticated", cwe="CWE-639"
 
 ---
 
@@ -321,7 +325,7 @@ For each admin-created object type: is there a separate API endpoint for it, or 
 
 `get_code_snippet` for the list/fetch handler: does the query have `.filter(is_staff=False)` / `.filter(internal=False)` to exclude admin objects?
 
-→ Submit: violated_invariant="Generic [Model] listing/fetch returns admin-created objects to regular users; user reads system config, other users' private data, or admin-only resources", severity=8, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="Generic [Model] listing/fetch returns admin-created objects to regular users; user reads system config, other users' private data, or admin-only resources", severity=8, confidence=7, exposure="authenticated", cwe="CWE-863"
 
 ---
 
@@ -331,7 +335,7 @@ An object the caller can access legitimately may have a relationship pointer to 
 
 **Find nested resource access:**
 ```
-grep(pattern="request\.(params|body|query)\.\w+_id|req\.(params|body|query)\.\w+_id|params\[:\w+_id\]|\\\$request->\w+_id", max_matches=30)
+grep(pattern="request\.(params|body|query)\.\w+_id|req\.(params|body|query)\.\w+_id|params\[:\w+_id\]|\$request->\w+_id|request\.(args|form|GET|POST|data|json)(\.get\s*\(\s*|\[\s*)['\"]\w+_id['\"]", max_matches=30)
 ```
 
 For each `*_id` parameter:
@@ -350,7 +354,7 @@ if payment.order.user != current_user:
     raise Forbidden
 ```
 
-→ Submit: violated_invariant="Nested resource [ChildModel] fetched by [child_id] param without verifying caller owns parent [ParentModel]; attacker traverses ownership boundary to read [ChildModel] data", severity=8, confidence=7, exposure="authenticated"
+→ Submit: violated_invariant="Nested resource [ChildModel] fetched by [child_id] param without verifying caller owns parent [ParentModel]; attacker traverses ownership boundary to read [ChildModel] data", severity=8, confidence=7, exposure="authenticated", cwe="CWE-639"
 
 ---
 
@@ -365,12 +369,12 @@ grep(pattern="\.objects\.all\s*\(\s*\)|\.objects\.filter\s*\(\s*\)\s*\.order_by|
 
 **JavaScript:**
 ```
-grep(pattern="find\s*\(\s*\{\s*\}\s*\)|findAll\s*\(\s*\)|\.find\s*\(\s*\{\s*\}\s*\)", max_matches=20)
+grep(pattern="find\s*\(\s*\{\s*\}\s*\)|findAll\s*\(\s*\)|\.find\s*\(\s*\)", max_matches=20)
 ```
 
 **Verify**: is `Model.objects.all()` (or equivalent "fetch everything") used in an endpoint that regular users call? Should it be filtered to `filter(user=request.user)` or `filter(tenant=current_tenant)`?
 
-→ Submit: violated_invariant="[endpoint] returns all [Model] records with no user-scope filter; any authenticated user enumerates all users'/tenants' [Model] records", severity=8, confidence=8, exposure="authenticated"
+→ Submit: violated_invariant="[endpoint] returns all [Model] records with no user-scope filter; any authenticated user enumerates all users'/tenants' [Model] records", severity=8, confidence=8, exposure="authenticated", cwe="CWE-862"
 
 ---
 
@@ -380,13 +384,13 @@ Can a user reset another user's email or password without being admin?
 
 **Find account update endpoints:**
 ```
-grep(pattern="change_password\s*\(|reset_password\s*\(|update_email\s*\(|change_email\s*\(|\\.email\s*=\s*request\.|password_reset\s*\(", max_matches=20)
+grep(pattern="change_password\s*\(|reset_password\s*\(|update_email\s*\(|change_email\s*\(|\.(email|password)\s*=\s*(request|req)\.|password_reset\s*\(", max_matches=20)
 ```
 
 **Verify**:
 1. `get_code_snippet` — does the endpoint require the caller to provide their current password for self-updates?
 2. Does the endpoint scope the update to `current_user` only, or does it accept a `user_id` parameter?
-3. `trace_path` — is there an admin endpoint that also resets passwords? Is it admin-checked?
+3. `trace_path("password_setter_function", mode="calls", direction="inbound")` — is there an admin endpoint that also resets passwords? Is it admin-checked?
 
 ```python
 # VULNERABLE: accepts user_id from body — attacker resets anyone's password
@@ -399,7 +403,7 @@ def reset_password(new_password):
     current_user.set_password(new_password)
 ```
 
-→ Submit: violated_invariant="Password/email reset endpoint accepts arbitrary user_id without admin check; any authenticated user takes over any account by resetting their credentials", severity=10, confidence=9, exposure="authenticated"
+→ Submit: violated_invariant="Password/email reset endpoint accepts arbitrary user_id without admin check; any authenticated user takes over any account by resetting their credentials", severity=10, confidence=9, exposure="authenticated", cwe="CWE-639" (use "CWE-620" when a self-service change skips the current password)
 
 ---
 

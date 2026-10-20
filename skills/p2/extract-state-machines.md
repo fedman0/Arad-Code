@@ -2,10 +2,10 @@
 
 ## Contract
 
-**Trigger:** Phase 2, after model-authorization.
+**Trigger:** Phase 2, after model-resource-ownership.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Resource list, entity schema
-**Escalates to:** review-financial-operations, review-concurrency-and-retries
+**Preconditions:** Resource list (Resource Ownership section of the Threat Model in Known Context), entity schema
+**Escalates to:** trace-state-transitions, understand-business-logic
 
 ## Inputs
 - repo_path
@@ -36,6 +36,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: state-bypassing transition, prohibited reverse transition reachable, concurrent transition race, message replay causing double transition.
+Set `cwe` on each hypothesis (e.g. CWE-841 skipped or reversed workflow state, CWE-362 concurrent transition race, CWE-837 replayed message applying a single-use transition twice).
+
+Persist the state-machine map (per entity: states, transitions with handler QN, guards, triggers, atomicity) with `amend_threat_model` as a short `## State Machines` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every state-bearing entity has a complete state graph with transition guards documented.

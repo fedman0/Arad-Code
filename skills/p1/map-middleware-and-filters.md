@@ -4,8 +4,8 @@
 
 **Trigger:** After resolve-dependency-injection.
 **Phase:** 1 — Project Understanding
-**Preconditions:** DI map, entry point list, framework version
-**Escalates to:** review-function-authorization, review-object-authorization
+**Preconditions:** DI map and framework version (Threat Model in Known Context), entry point list (Known entry points)
+**Escalates to:** understand-authorization-and-access, hunt-missing-authz-on-sensitive-endpoints
 
 ## Inputs
 - repo_path
@@ -38,6 +38,11 @@
 ## Output schema
 Standard FINDINGS_SCHEMA. Populate guards_found for each confirmed middleware acting as a guard.
 Hypotheses for: missing auth middleware on a sensitive path, CSRF disabled globally, auth exception swallowed.
+Set `cwe` on each hypothesis (e.g. CWE-306 missing authentication, CWE-862 missing authorization, CWE-352 CSRF disabled, CWE-636 auth failure swallowed so execution continues).
+
+Persist the ordered middleware pipeline per service (global vs. scoped filters, pre-auth endpoints, auth-failure behavior, CSRF scope) with `amend_threat_model` as a short `## Middleware Map` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every entry point has a fully mapped middleware chain from ingress to handler.

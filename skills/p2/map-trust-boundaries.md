@@ -4,12 +4,12 @@
 
 **Trigger:** Phase 2, after model-identities and map-service-boundaries.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Identity model, service communication map, deployment context
-**Escalates to:** trace-identity-propagation, review-object-authorization
+**Preconditions:** Identity model, service communication map, deployment context (Identity Model, Service Communication Graph and Deployment Context sections of the Threat Model in Known Context)
+**Escalates to:** trace-identity-propagation, understand-authorization-and-access
 
 ## Inputs
 - repo_path
-- service communication graph from map-service-boundaries
+- service communication graph (Service Communication Graph section of the Threat Model)
 
 ## Procedure
 1. Define trust levels: anonymous (0), authenticated user (1), service account (2), internal admin (3), superadmin (4).
@@ -35,6 +35,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: trust elevation without re-validation, user field reaching admin operation, webhook processed without signature verification.
+Set `cwe` on each hypothesis (e.g. CWE-290 forwarded claim accepted without re-validation, CWE-269 user-controlled field deciding privilege, CWE-345 webhook processed without signature verification).
+
+Persist the trust boundary map (each boundary crossing with caller trust level, recipient assumption, re-validation status) with `amend_threat_model` as a short `## Trust Boundary Map` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every boundary crossing has a documented trust level and re-validation status.

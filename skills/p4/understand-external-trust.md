@@ -107,14 +107,17 @@ Read the complete OIDC/OAuth implementation. Verify each check is actually prese
 **Authorization code injection (mix-up attack):**
 - If the application supports multiple OAuth providers: can a code issued by provider A
   be submitted to the endpoint that expects a code from provider B?
-- The `iss` (issuer) in the token response must be verified before accepting the code.
+- The authorization response's `iss` parameter (RFC 9207), or a per-provider redirect URI / `state`
+  binding, must be checked before the code is redeemed.
 
 **Authorization code leakage via Referer:**
 - After the OAuth callback (e.g. `/callback?code=ABC123`): does the page load any external
   resources (analytics scripts, CDN images, third-party widgets)?
-- If yes: the `code=ABC123` in the URL is sent in the `Referer` header to those external
-  servers. Read whether the callback URL is cleared before loading external resources,
-  or whether a `Referrer-Policy: no-referrer` header is set on the callback response.
+- Browsers default to `strict-origin-when-cross-origin`, which strips the path and query from
+  cross-origin Referers, so `code=ABC123` leaks to those servers only when the page weakens the
+  policy (`Referrer-Policy: unsafe-url` or `no-referrer-when-downgrade`, a `<meta name="referrer">`
+  tag, or a `referrerpolicy` attribute). Read the policy in effect on the callback response and
+  whether the callback URL is cleared before external resources load.
 
 ---
 
@@ -128,6 +131,10 @@ A hypothesis for each:
 - Sandbox/test mode that bypasses real verification and can be triggered by an attacker
 - OIDC/OAuth check that is absent or uses loose matching
 - Replay attack possible due to missing idempotency
+
+Set `cwe` on each hypothesis (e.g. CWE-295 TLS verification disabled, CWE-918 SSRF, CWE-345 unauthenticated
+callback or unchecked OIDC claim, CWE-696 verification after state change, CWE-489 sandbox mode reachable in
+production, CWE-352 missing OAuth `state`, CWE-294 replayable callback).
 
 ## Forbidden
 

@@ -72,7 +72,8 @@ Find how CSRF is handled for state-changing operations.
 Find every place the application reads from HTTP headers to make a security-relevant decision.
 Use `search_code` to find where headers are read (`request.headers`, `req.get()`,
 `HttpContext.Request.Headers`, `request.getHeader()`, `$_SERVER['HTTP_X_']`, etc.).
-Read each usage in its full context.
+`search_code` is literal by default — search one string per call, or pass `regex=true` (case-sensitive)
+for an alternation. Read each usage in its full context.
 
 **IP address extraction:**
 - Find where the "client IP" is determined. Is it from the connection's remote address
@@ -185,6 +186,11 @@ A hypothesis for each:
 - Missing security header with material security impact
 - Open redirect: user-controlled redirect destination without origin restriction
 - OAuth redirect_uri without exact-match validation
+
+Set `cwe` on each hypothesis (e.g. CWE-942 permissive or bypassable CORS origin, CWE-352 CSRF, CWE-348 client
+IP taken from an untrusted header, CWE-640 Host-header-poisoned reset link, CWE-650 method override bypass,
+CWE-524 authenticated response in a shared cache, CWE-1021 missing frame protection, CWE-693 other missing
+headers, CWE-601 open redirect and loose `redirect_uri`).
 
 ## Forbidden
 

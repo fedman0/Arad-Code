@@ -2,14 +2,14 @@
 
 ## Contract
 
-**Trigger:** After resolve-build-context. Run for each service.
+**Trigger:** After resolve-build-context. Covers every service in a single run.
 **Phase:** 1 — Project Understanding
-**Preconditions:** Service list, framework versions, dependency tree
+**Preconditions:** Service list, framework versions, dependency tree (Repository Inventory and Build Context sections of the Threat Model in Known Context)
 **Escalates to:** resolve-dependency-injection, map-middleware-and-filters
 
 ## Inputs
 - repo_path
-- service: name, root path, framework
+- services: every service in the Repository Inventory (name, root path, framework)
 
 ## Procedure
 1. search_graph(label="Route") or search_graph(name_pattern="Controller|Handler|Resolver") to find HTTP entry points.
@@ -35,7 +35,7 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Populate entry_points_found list.
-Hypotheses only for clear cases where both the path AND absence of any auth layer is confirmed.
+Hypotheses only for clear cases where both the path AND absence of any auth layer is confirmed (`cwe`: CWE-306).
 
 Every `entry_points_found` entry MUST carry:
 - `kind` — route / consumer / job / command / hook / callback. Peer comparison

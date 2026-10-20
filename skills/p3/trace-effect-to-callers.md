@@ -4,15 +4,19 @@
 
 **Trigger:** When a sensitive function is found and we need to know who can reach it.
 **Phase:** 3 — Path Analysis
-**Preconditions:** Symbol graph indexed, entry point map
-**Escalates to:** review-object-authorization, review-function-authorization
+**Preconditions:** Symbol graph indexed, entry point map (Known entry points)
+**Escalates to:** hunt-missing-authz-on-sensitive-endpoints, hunt-privilege-escalation-bola
 
 ## Inputs
 - repo_path
 - sensitive_function: qualified name of the function performing a sensitive operation
 
+If no sensitive_function was supplied, pick the highest-priority sensitive operations from Known Context (sinks of
+existing hypotheses via `list_hypotheses` / `get_hypothesis`, sensitive operations in the Authorization Model and
+Sensitive Data Map sections of the Threat Model) and process up to 3 of them.
+
 ## Procedure
-1. trace_path(sensitive_function, mode="calls") to find all callers at every depth.
+1. trace_path(sensitive_function, mode="calls", direction="inbound") to find all callers at every depth.
 2. For each caller chain: which entry point does it originate from?
 3. For each entry point → sensitive function path: what authorization checks exist along the chain?
 4. Identify paths with no authorization check before the sensitive function.
@@ -35,6 +39,7 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: entry point reaching sensitive function without auth check, lower-privilege path sharing a code path with higher-privilege operation.
+Set `cwe` on each hypothesis (e.g. CWE-862 missing authorization on a path, CWE-306 missing authentication, CWE-269 lower-privilege path to a privileged operation).
 
 ## Stop condition
 When all paths from all entry points to the sensitive function are documented with their auth status.

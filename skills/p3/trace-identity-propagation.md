@@ -4,13 +4,17 @@
 
 **Trigger:** When identity-based findings involve cross-service or async boundaries.
 **Phase:** 3 — Path Analysis
-**Preconditions:** Identity model, trust boundary map, service communication graph
-**Escalates to:** review-tenant-isolation, review-object-authorization
+**Preconditions:** Identity model, trust boundary map, service communication graph (Threat Model in Known Context)
+**Escalates to:** understand-authorization-and-access, hunt-privilege-escalation-bola
 
 ## Inputs
 - repo_path
 - identity_field: the claim or field carrying user/tenant identity (userId, tenantId, actorId)
 - boundary_type: http | message | job | cache
+
+If no identity_field was supplied, take the identity and tenant fields from the Identity Model and Tenant Model
+sections of the Threat Model, pick the highest-priority boundary crossings from the Service Communication Graph,
+the Trust Boundary Map and existing hypotheses (`list_hypotheses`), and process up to 3 of them.
 
 ## Procedure
 1. Find where the identity_field is established at the entry point.
@@ -30,11 +34,12 @@
 
 ## Counterchecks
 - A service that generates its own token from forwarded claims re-validates the original source.
-- Message schema validation can prevent spoofed identity fields if the schema enforces type/format but NOT content authorization.
+- Message schema validation enforces type/format only; it does not stop a producer from setting another user's or tenant's identity value.
 - A service account executing a background job may legitimately not carry user identity.
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: spoofable identity header, privilege amplification via queue, user context lost causing authorization bypass.
+Set `cwe` on each hypothesis (e.g. CWE-290 spoofable identity header or field, CWE-269 privilege amplification via queue, CWE-862 lost user context).
 
 ## Stop condition
 When identity flow is documented for every inter-service boundary in the scope of the current hypothesis.

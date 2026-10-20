@@ -4,12 +4,12 @@
 
 **Trigger:** After inventory-repository completes.
 **Phase:** 1 — Project Understanding
-**Preconditions:** Service list from inventory-repository
+**Preconditions:** Service list (Repository Inventory section of the Threat Model in Known Context)
 **Escalates to:** map-entry-points
 
 ## Inputs
 - repo_path
-- service_list from inventory-repository result
+- service_list from the Repository Inventory section of the Threat Model
 
 ## Procedure
 1. For each service, read the project/build file (*.csproj, package.json, go.mod, etc.).
@@ -36,6 +36,11 @@
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses at this phase relate to dangerous transitive dependencies
 with known CVEs that are reachable (must have evidence of call chain, not just presence).
+Set `cwe` to the CVE's own CWE when known, otherwise CWE-1395 (dependency on a vulnerable third-party component).
+
+Persist the build context (per-service build file, framework and runtime version, security-relevant packages with versions, conditional compilation flags) with `amend_threat_model` as a short `## Build Context` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every service has a resolved dependency tree and framework version.

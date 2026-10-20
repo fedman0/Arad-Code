@@ -2,14 +2,16 @@
 
 ## Contract
 
-**Trigger:** After model-resource-ownership. Run for any multi-tenant application.
+**Trigger:** After model-resource-ownership. Runs on every repository and exits early when the application is not multi-tenant.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Resource ownership model, DI map, DB schema
-**Escalates to:** review-tenant-isolation
+**Preconditions:** Resource ownership model and DI map (Threat Model in Known Context), DB schema
+**Escalates to:** trace-identity-propagation, hunt-privilege-escalation-bola
 
 ## Inputs
 - repo_path
-- multi-tenant: yes/no, tenancy model (schema-per-tenant / row-per-tenant / DB-per-tenant)
+- multi-tenant: yes/no, tenancy model (schema-per-tenant / row-per-tenant / DB-per-tenant) — determine both from the code and the Threat Model
+
+If the application is not multi-tenant, record coverage `{kind: "trust_boundary", name: "tenant_isolation", status: "not_applicable"}` and finish.
 
 ## Procedure
 1. Find the ICurrentTenant / ITenantContext / TenantProvider service — get code snippet.
@@ -38,6 +40,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: TenantId not in query filter, cache miss on tenant key, message consumer not restoring tenant, cross-tenant query reachable by non-admin.
+Set `cwe` on each hypothesis (e.g. CWE-639 missing tenant filter or tenant ID taken from the request, CWE-668 cache key or query shared across tenants).
+
+Persist the tenant model (resolution source, query-filter mechanism and coverage, entities missing TenantId, cache keys, consumer tenant restoration) with `amend_threat_model` as a short `## Tenant Model` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every data access path has a confirmed TenantId filter or explicit justification for its absence.

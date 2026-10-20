@@ -4,14 +4,17 @@
 
 **Trigger:** When investigating inter-service communication vulnerabilities or second-order effects.
 **Phase:** 3 — Path Analysis
-**Preconditions:** Service boundary map, message schema definitions
-**Escalates to:** trace-identity-propagation, review-tenant-isolation, review-concurrency-and-retries
+**Preconditions:** Service boundary map (Service Communication Graph section of the Threat Model in Known Context), message schema definitions
+**Escalates to:** trace-identity-propagation, hunt-privilege-escalation-bola, understand-business-logic
 
 ## Inputs
 - repo_path
 - message_type: the message class/event being traced
 - producer_service: which service publishes this message
 - consumer_service: which service consumes it
+
+If no message_type was supplied, pick the highest-priority message flows from Known Context (consumer entry points,
+the Service Communication Graph in the Threat Model, existing hypotheses via `list_hypotheses`) and process up to 3 of them.
 
 ## Procedure
 1. get_code_snippet for the message class/schema — what fields does it contain?
@@ -39,6 +42,7 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: message field manipulation causing unauthorized operation, consumer skipping auth check, duplicate delivery with non-idempotent consumer, out-of-order messages causing inconsistent state.
+Set `cwe` on each hypothesis (e.g. CWE-345 trusted message field, CWE-862 consumer skipping authorization, CWE-837 non-idempotent duplicate processing, CWE-362 out-of-order processing).
 
 ## Stop condition
 When producer-to-consumer flow is fully documented including trust model, idempotency, and re-validation.

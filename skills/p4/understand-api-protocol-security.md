@@ -14,7 +14,7 @@ which library implements the protocol.
 
 ## Step 0 — Identify all protocols in use
 
-Use `get_architecture` and `sqz_list_dir` to find which protocols are exposed.
+Use `get_architecture` and `list_dir` to find which protocols are exposed.
 Look for:
 - GraphQL: schema files (`*.graphql`, `*.gql`), resolver directories, schema builder code
 - gRPC: `.proto` files, generated stub directories, server registration code
@@ -197,7 +197,7 @@ If the application exposes any of these protocols:
 - Can a caller enumerate available methods?
 - Is each method independently authorized?
 - For SOAP: is the WSDL exposed publicly? It reveals the full API surface.
-- For XML-RPC: are XML payloads processed with XXE protection? (apply Phase 2 from data-flows)
+- For XML-RPC: are XML payloads processed with XXE protection? (apply the XML parsing checks in understand-data-flows Phase 2)
 - For batch/multicall patterns: can a client execute many operations in one request to bypass
   rate limiting?
 
@@ -219,6 +219,11 @@ A hypothesis for each:
 - **WebSocket**: no Origin validation → CSRF over WebSocket
 - **WebSocket**: message dispatch without per-message authorization
 - **REST versioning**: older API version with weaker security still reachable
+
+Set `cwe` on each hypothesis (e.g. CWE-200 introspection or reflection exposure, CWE-770 missing
+depth/complexity/deadline limits, CWE-862 or CWE-639 missing field, method or message authorization,
+CWE-306 unauthenticated upgrade or RPC, CWE-352 mutations over GET, CWE-1385 WebSocket without Origin
+validation, CWE-319 plaintext gRPC, CWE-307 alias-based brute force).
 
 ## Forbidden
 

@@ -13,7 +13,9 @@ what each setting means for security.
 
 ## Phase 1 — Find and read all configuration files
 
-Use `sqz_list_dir` to find configuration files, then `sqz_read_file` each one completely.
+Use `list_dir` (it shows hidden files such as `.env`) and `shell("find . -name '*.yml' -not -path '*/node_modules/*'")`
+style searches to find configuration files, then `read_file` each one completely — `read_file` returns at most
+200 lines per call, so page through longer files with `start_line`/`end_line`.
 Configuration file names vary by stack:
 - **Python**: `settings.py`, `config.py`, `*.cfg`, `pyproject.toml`, `*.ini`
 - **Java/Spring**: `application.properties`, `application.yml`, profile-specific variants
@@ -41,7 +43,7 @@ For each setting that affects security, answer:
   - Node.js: `process.env.X || 'default'`
   - Java/Spring: `@Value("${x:default}")`, `environment.getProperty("x", "default")`
   - .NET: `config["X"] ?? "default"`, `config.GetValue<string>("X", "default")`
-  - Go: `os.Getenv("X")` (empty string if not set — treated as falsy)
+  - Go: `os.Getenv("X")` (returns `""` if not set — read what the code does with an empty value)
   - PHP: `env('X', 'default')`
   - Ruby: `ENV.fetch('X', 'default')`
 - Is the default value safe for production?
@@ -65,7 +67,7 @@ For each setting that affects security, answer:
 For `docker-compose.yml` and similar:
 
 **Port exposure:**
-- What ports are mapped to the host? (`"0.0.0.0:port:port"` exposes to all interfaces)
+- What ports are mapped to the host? (`"0.0.0.0:port:port"` — and a mapping without an IP, `"port:port"` — binds all interfaces)
 - Should any of these be localhost-only (`"127.0.0.1:port:port"`)?
 - Databases, message brokers, admin UIs should never be on 0.0.0.0 in production-like environments.
 
@@ -75,7 +77,8 @@ For `docker-compose.yml` and similar:
 
 **Committed files:**
 - Are `.env`, `env.local`, or similar files committed to the repository?
-- Check `.gitignore` — does it exclude sensitive files?
+- Check `.gitignore` — does it exclude sensitive files? `shell("git ls-files")` lists what is actually
+  committed; `shell("git check-ignore -v <path>")` shows which ignore rule (if any) covers a file.
 
 ---
 
@@ -99,6 +102,10 @@ A hypothesis for each:
 - Settings file committed to version control containing secrets
 
 For each finding: what does an attacker gain? What environments are affected?
+
+Set `cwe` on each hypothesis (e.g. CWE-1188 insecure default or fallback, CWE-1327 service bound to all
+interfaces, CWE-798 hardcoded credential, CWE-489 debug/test feature active outside development, CWE-540
+secrets in committed files).
 
 ## Forbidden
 

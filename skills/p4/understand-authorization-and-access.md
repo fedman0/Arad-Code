@@ -26,7 +26,7 @@ Derive the authorization model from the code itself.
 
 Do not search by name. Instead:
 
-1. Use `trace_path(mode=calls)` from HTTP handlers to find every function whose
+1. Use `trace_path(mode="calls", direction="outbound")` from HTTP handlers to find every function whose
    return value determines whether a request is allowed or denied.
 2. For each authorization function, use `get_code_snippet` to read it completely.
 3. Answer: what data does this function use to make its decision?
@@ -47,7 +47,7 @@ Do not search by name. Instead:
 
 For each significant endpoint (prioritize: admin operations, privileged mutations, resource access):
 
-1. Use `trace_path(mode=calls)` from the view handler through the full call chain.
+1. Use `trace_path(mode="calls", direction="outbound")` from the view handler through the full call chain.
 2. At what point is authorization enforced? At the view? At the service? At the repository?
 3. Is it enforced at EVERY step that matters, or only at the outermost layer?
 4. For endpoints that operate on a resource identified by an ID (URL param, body field):
@@ -115,6 +115,10 @@ A hypothesis for each:
 
 Include the complete call chain: HTTP entry → middleware → gate function → operation,
 with file:line for every step. Mark reachability as `proven` only if you have read every link.
+
+Set `cwe` on each hypothesis (e.g. CWE-807 authorization decided from attacker-controlled input, CWE-639
+object-level or cross-tenant access, CWE-862 missing or commented-out check, CWE-269 privilege escalation,
+CWE-647 path-normalization bypass).
 
 ## Forbidden
 

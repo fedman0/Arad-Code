@@ -4,14 +4,14 @@
 
 **Trigger:** Phase 2, alongside other identity/ownership skills.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Entity schema, service list, config map
-**Escalates to:** review-error-and-logging, review-cryptographic-usage
+**Preconditions:** Entity schema, service list, config map (Repository Inventory and Configuration sections of the Threat Model in Known Context)
+**Escalates to:** trace-persisted-data-reuse, hunt-debug-production-exposure, hunt-weak-crypto
 
 ## Inputs
 - repo_path
 
 ## Procedure
-1. search_code(pattern="password|secret|token|ssn|credit_card|cvv|dob|salary|pii") to find data fields.
+1. Find sensitive data fields with a case-insensitive grep (it also searches hidden files such as `.env`): `grep(pattern="(?i)(passw(or)?d|secret|api_?key|(access|refresh|auth|reset|session|bearer)_?token|credit_?card|card_?number|cvv|date_?of_?birth|salary|social_?security|ssn\b|dob\b|\bpii\b)")`. If the output is truncated, repeat it per directory (`path`) or per language (`file_glob`).
 2. For each sensitive field: where is it stored (DB column, cache, log, file)?
 3. Find serialization: does the sensitive field appear in JSON responses? Check AutoMapper, Serializer configs.
 4. Find logging: does the field appear in log.Info(), logger.LogInformation(), Serilog enrichers?
@@ -35,6 +35,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: password/token in API response, PII in log output, sensitive data in URL parameter, unencrypted sensitive column with logging exposure.
+Set `cwe` on each hypothesis (e.g. CWE-200 secret or PII in an API response, CWE-532 sensitive data in logs, CWE-598 sensitive data in a GET query string, CWE-312 cleartext storage).
+
+Persist the sensitive data map (field, storage location, masking, encryption, output channels) with `amend_threat_model` as a short `## Sensitive Data Map` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every sensitive data field has a documented flow from storage to all possible output channels.

@@ -4,7 +4,7 @@
 
 **Trigger:** After Phase 1 completes. First skill in Phase 2.
 **Phase:** 2 — Identity & Ownership
-**Preconditions:** Service list, DI map, middleware map
+**Preconditions:** Service list, DI map, middleware map (Threat Model in Known Context)
 **Escalates to:** model-authorization, model-resource-ownership
 
 ## Inputs
@@ -37,6 +37,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: JWT not validated, stale role without revocation, trusted external claim without validation.
+Set `cwe` on each hypothesis (e.g. CWE-347 token signature not verified, CWE-287 other token validation gaps, CWE-613 stale role without revocation, CWE-345 external IdP claim trusted without validation).
+
+Persist the identity model (identity types, entity fields, establishment mechanism per entry point type, propagation, admin escalation, impersonation) with `amend_threat_model` as a short `## Identity Model` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When every identity type is documented with its establishment mechanism and propagation model.

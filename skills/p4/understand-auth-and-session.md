@@ -16,7 +16,7 @@ Find any place where authentication can be bypassed, weakened, or subverted.
 1. Call `get_architecture` to find the authentication layer.
 2. Find the code that runs on every request before the handler (middleware, filter, interceptor,
    guard, decorator — whatever this framework calls it).
-3. Use `trace_path(mode=calls)` from the request entry point to find it — do not search by name.
+3. Use `trace_path(mode="calls", direction="outbound")` from the request entry point to find it — do not search by name.
 4. Read the complete implementation of every step:
    token extraction → parsing → cryptographic validation → identity construction.
 
@@ -56,8 +56,10 @@ For token-based authentication (JWT, PASETO, signed cookies, HMAC tokens, etc.):
 ## Phase 3 — Order of checks
 
 Write down the actual order of operations in the auth pipeline. Specifically:
-- Is any blacklist or revocation check performed before or after signature validation?
-  A blacklist checked AFTER signature validation cannot catch cryptographically forged tokens.
+- Does any cache, allowlist or revocation lookup run before signature validation? A lookup that
+  returns an identity on a hit (e.g. "token seen before → authenticated") lets a token skip
+  cryptographic validation entirely. A revocation check that some path skips (early return,
+  exception handler) lets revoked tokens through.
 - Are there any early-return paths that skip later checks?
 - Is there a "shortcut" condition that returns an authenticated identity before the full
   validation completes?
@@ -145,7 +147,9 @@ Read every conditional in the authentication pipeline:
 **Symmetric encryption cipher modes (if app encrypts data, not just hashes):**
 - Find where the application encrypts and decrypts data (not hashing — actual encrypt/decrypt).
 - Is AES-ECB used? ECB: identical plaintext blocks → identical ciphertext → patterns visible.
-- Is AES-CBC used with a static or predictable IV? Reused IV + same key → XOR-based plaintext recovery.
+- Is AES-CBC used with a static or predictable IV? A reused IV leaks which messages share a common prefix;
+  a predictable IV enables chosen-plaintext guessing. For CTR/GCM, a reused nonce with the same key is worse:
+  XORing two ciphertexts yields the XOR of the plaintexts, and GCM nonce reuse also exposes the authentication key.
 - Is authenticated encryption used (AES-GCM, ChaCha20-Poly1305)?
   Without authentication tag: ciphertext can be tampered and the decryptor won't detect it
   (padding oracle, bit-flipping).
@@ -177,7 +181,7 @@ Read every conditional in the authentication pipeline:
 A hypothesis for each:
 - Validation step absent, in wrong order, or bypassable
 - Algorithm confusion: caller controls which algorithm is used to verify their own token
-- Revocation check after signature validation (can miss forged tokens)
+- Cache/allowlist shortcut that returns an identity before signature validation, or a revocation check skipped on some path
 - Auth conditioned on an environment variable that is set incorrectly in staging
 - Token generated from a predictable or low-entropy source
 - Variable-time comparison used on a secret value
@@ -188,10 +192,16 @@ A hypothesis for each:
 - Cookie missing HttpOnly or Secure flag
 - MFA bypass via forced browsing to post-MFA endpoint
 - Account enumeration: distinguishable responses for valid vs invalid accounts
-- Symmetric encryption using ECB mode or CBC with static/predictable IV
+- Symmetric encryption using ECB mode, CBC with static/predictable IV, or a reused CTR/GCM nonce
 - Encryption without authentication tag (malleable ciphertext)
 
 Include the full execution path from HTTP request to identity object, with file:line for every step.
+
+Set `cwe` on each hypothesis (e.g. CWE-287 missing or bypassable validation step, CWE-347 algorithm confusion or
+unverified signature, CWE-330 predictable token, CWE-208 variable-time secret comparison, CWE-916 fast password hash,
+CWE-367 single-use token race, CWE-613 sessions not invalidated, CWE-384 session fixation, CWE-1004 / CWE-614 missing
+HttpOnly / Secure, CWE-288 MFA bypass, CWE-204 account enumeration, CWE-327 ECB, CWE-329 predictable CBC IV,
+CWE-323 reused nonce, CWE-353 missing integrity tag).
 
 ## Forbidden
 

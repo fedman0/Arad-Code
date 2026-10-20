@@ -4,13 +4,13 @@
 
 **Trigger:** When investigating second-order injection or stored payload attacks.
 **Phase:** 3 — Path Analysis
-**Preconditions:** Sensitive data map, entry point map, DB schema
-**Escalates to:** review-query-construction, review-code-execution, review-browser-data-flows
+**Preconditions:** Sensitive data map (Threat Model in Known Context), entry point map (Known entry points), DB schema
+**Escalates to:** hunt-injection-sqli-cmdi, hunt-xss, understand-data-flows
 
 ## Procedure
 1. Find all locations where user-controlled data is persisted to DB, file system, or cache.
 2. For each persisted field: find all places where that field is later READ and USED.
-3. For each read-then-use pattern: trace_path(read_function, mode="data_flow") to find where the value goes.
+3. For each read-then-use pattern: trace_path(read_function, mode="data_flow", direction="outbound") to find where the value goes.
 4. Check: is the value re-sanitized/validated when it is read for later use, or only validated at write time?
 5. Find dangerous reuse sinks: HTML template rendering (stored XSS), SQL construction (second-order SQLi), shell execution, file path construction, LDAP query.
 6. Find the consumer context: when the data is reused, what identity/privilege level is executing the code?
@@ -32,6 +32,7 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: stored XSS (data persisted, later rendered unsanitized into HTML), second-order SQLi (data persisted, later interpolated into SQL), stored payload in webhook/export.
+Set `cwe` from the reuse sink (e.g. CWE-79 stored XSS, CWE-89 second-order SQLi, CWE-78 command, CWE-1236 formula injection in CSV export).
 
 ## Stop condition
 When every identified stored field has a complete map of its read sites and each site's sanitization status.

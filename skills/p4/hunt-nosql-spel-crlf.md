@@ -18,7 +18,7 @@ For each grep match:
 - Unclear → `trace_path("function_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5** (uncertain is not safe)
 
 **c.** Check for sanitization:
-- MongoDB operator injection: typed schema validation (`mongooseSchema.strict`) or manual `$`-prefix strip → **SKIP**
+- MongoDB operator injection: value forced to a primitive (`typeof x === "string"` check, `String(x)`, explicit `$eq`), `sanitizeFilter: true` / `mongoose.set("sanitizeFilter", true)`, `express-mongo-sanitize` / `mongo-sanitize`, or a manual `$`-key strip → **SKIP**. Mongoose `strict` / `strictQuery` are NOT guards: they drop unknown paths, but a `{"$gt": ""}` object on a known field still reaches the query.
 - SpEL: no user data in expression string → **SKIP**; user data present → **SUBMIT immediately** (SpEL = RCE)
 - CRLF: `\r` / `\n` stripped from header value → **SKIP**
 
@@ -36,49 +36,54 @@ grep(pattern="\.find\s*\(\s*req\.(body|query|params)\b|\.findOne\s*\(\s*req\.(bo
 ```
 
 ```
-grep(pattern="collection\.find\s*\(\s*\{[^}]*req\.(body|query)\[|db\.\w+\.find\s*\(\s*\{[^}]*req\.(body|query)\[", max_matches=20)
+grep(pattern="\.(find|findOne|findOneAndUpdate|findOneAndDelete|updateOne|updateMany|deleteOne|deleteMany|countDocuments|exists)\s*\(\s*\{[^}]*req\.(body|query)(\.|\[)", max_matches=20)
 ```
 
 **Verify**: is the entire `req.body`/`req.query` object passed as the MongoDB query filter? If so, an attacker sends `{"password": {"$gt": ""}}` to bypass authentication. Look for:
 - `User.findOne({ username: req.body.username, password: req.body.password })` — if `req.body.password` is `{"$gt":""}`, login bypassed
 - Explicit type check (`typeof req.body.password !== "string"`) → **SKIP**
-- Mongoose strict schema validation → **SKIP** (but verify `strict` not set to false)
+- Mongoose `strict` / `strictQuery` schema options → NOT a guard (see protocol step c); `sanitizeFilter` enabled or the value cast to a string → **SKIP**
+- `req.params` values are always strings → not operator-injectable; `req.query` (parsed by `qs`, `?password[$ne]=x`) and JSON `req.body` are
 
-→ Submit: violated_invariant="MongoDB query filter receives untyped user object; operator injection via {\"$gt\":\"\"} or {\"$regex\":\".*\"} bypasses authentication or returns all records", severity=9, confidence=9, exposure="internet"
+→ Submit: violated_invariant="MongoDB query filter receives untyped user object; operator injection via {\"$gt\":\"\"} or {\"$regex\":\".*\"} bypasses authentication or returns all records", severity=9, confidence=9, exposure="internet", cwe="CWE-943"
 
 ---
 
 ## Step 2 — MongoDB operator injection: Python (pymongo — Django / Flask / FastAPI)
 
 ```
-grep(pattern="collection\.find\s*\(\s*\{[^}]*request\.(args|form|json|GET|POST)|db\.\w+\.find_one\s*\(\s*\{[^}]*request\.", max_matches=20)
+grep(pattern="\.(find|find_one|update_one|update_many|delete_one|delete_many|count_documents)\s*\(\s*\{[^}]*request\.(json|get_json|data|args|form|GET|POST)|\.(find|find_one|delete_many|count_documents)\s*\(\s*request\.(json|get_json\s*\(\s*\)|data)", max_matches=20)
 ```
 
 ```
 grep(pattern="\.find\s*\(\s*\{[^}]*\$where[^}]*request\.|aggregate\s*\(\s*\[\s*\{[^}]*\$where[^}]*request\.", max_matches=15)
 ```
 
-**Verify**: does any MongoDB operator key (starting with `$`) in the query filter come from user input? If the request body is parsed as JSON and merged directly into the query, operator injection is possible.
+**Verify**: does any MongoDB operator key (starting with `$`) in the query filter come from user input? If the request body is parsed as JSON and merged directly into the query, operator injection is possible. Only JSON bodies (`request.json`, `request.get_json()`, DRF `request.data`) can carry operator objects; `request.args` / `request.form` / `request.GET` / `request.POST` values are strings — injectable only when concatenated into a `$where` / `$regex` string.
 
-→ Submit: violated_invariant="pymongo query filter receives user JSON without type checking; {\"$where\":\"sleep(3000)\"} causes DoS, {\"$gt\":\"\"} bypasses auth", severity=9, confidence=8, exposure="internet"
+→ Submit: violated_invariant="pymongo query filter receives user JSON without type checking; {\"$where\":\"sleep(3000)\"} causes DoS, {\"$gt\":\"\"} bypasses auth", severity=9, confidence=8, exposure="internet", cwe="CWE-943"
 
 ---
 
 ## Step 3 — MongoDB operator injection: Go (gin / net/http / gorilla)
 
-The first grep already requires user input in the bson.M literal — use only that:
+Typed values (`r.URL.Query().Get(...)`, `r.FormValue(...)`, `string` struct fields) cannot carry operators — Go's type system blocks the injection. The dangerous case is a request body decoded into an untyped map (`bson.M`, `map[string]interface{}`, `map[string]any`) or an `interface{}` field that then becomes (part of) a filter:
 ```
-grep(pattern="bson\.M\{[^}]*r\.(URL\.Query\(\)\.Get|FormValue|PostForm)\s*\(|bson\.D\{[^}]*r\.(URL\.Query\(\)\.Get|FormValue)", max_matches=20)
+grep(pattern="var\s+\w+\s+(bson\.M|bson\.D|map\[string\]interface\{\}|map\[string\]any)\b|\w+\s*:=\s*(bson\.M|map\[string\]interface\{\}|map\[string\]any)\{\}|\b(interface\{\}|any|bson\.M|map\[string\]interface\{\})\s+.json:\"", max_matches=20)
+```
+
+```
+grep(pattern="\.(Find|FindOne|FindOneAndUpdate|UpdateOne|UpdateMany|DeleteOne|DeleteMany|CountDocuments)\s*\(\s*\w+\s*,\s*[a-z]\w*\s*[,)]", max_matches=20)
 ```
 
 For each match: `get_code_snippet("containing_handler_function")` to read the full query construction.
 
 **Verify**:
-1. The `bson.M{}` value is assigned directly from `r.URL.Query().Get(...)` / `r.FormValue(...)` / decoded JSON body — not sanitized into a typed primitive first.
-2. No operator-key filter: `strings.HasPrefix(value, "$")` → **SKIP**; `reflect.TypeOf(value) == reflect.String` typed assertion → **SKIP**.
+1. The filter variable is decoded from the request (`json.NewDecoder(r.Body).Decode(&filter)`, `c.ShouldBindJSON(&filter)`, a bound struct with an `interface{}` / `bson.M` field) and reaches `Find` / `FindOne` / `UpdateOne` ... without being rebuilt from typed values.
+2. No operator-key filter: rejecting keys with `strings.HasPrefix(key, "$")` → **SKIP**; value type-asserted to `string` → **SKIP**.
 3. If the filter is built via `bson.M{"username": username}` where `username` is a `string` from a typed struct → **SKIP** (Go's type system prevents operator injection). Only flag if the value can be `interface{}` or `map[string]interface{}`.
 
-→ Submit: violated_invariant="Go MongoDB filter uses untyped user value (interface{}) in bson.M without operator key check; {\"$gt\":\"\"} bypasses authentication", severity=9, confidence=7, exposure="internet"
+→ Submit: violated_invariant="Go MongoDB filter uses untyped user value (interface{}) in bson.M without operator key check; {\"$gt\":\"\"} bypasses authentication", severity=9, confidence=7, exposure="internet", cwe="CWE-943"
 
 ---
 
@@ -90,7 +95,7 @@ grep(pattern="serde_json::Value|Value::Object\s*\(|from_value\s*\(.*body|from_va
 ```
 
 ```
-grep(pattern="collection\.find\s*\(\s*doc!\s*\{|collection\.find_one\s*\(\s*doc!\s*\{|collection\.find_one\s*\(\s*\w+\s*,", max_matches=15)
+grep(pattern="coll\w*\.find(_one)?\s*\(\s*(doc!\s*\{|[a-z_]\w*\s*[,)])", max_matches=15)
 ```
 
 For each MongoDB call: `get_code_snippet("containing_function")` and check the filter argument type:
@@ -100,14 +105,14 @@ For each MongoDB call: `get_code_snippet("containing_function")` and check the f
 
 Does the `serde_json::Value` come from `web::Json::<serde_json::Value>` or `body.get("filter")` without a typed struct? → **SUBMIT**.
 
-→ Submit: violated_invariant="Rust MongoDB filter uses serde_json::Value from request body without typed deserialization; attacker injects {\"$gt\":\"\"} operator to bypass authentication", severity=9, confidence=7, exposure="internet"
+→ Submit: violated_invariant="Rust MongoDB filter uses serde_json::Value from request body without typed deserialization; attacker injects {\"$gt\":\"\"} operator to bypass authentication", severity=9, confidence=7, exposure="internet", cwe="CWE-943"
 
 ---
 
 ## Step 5 — NoSQL injection: AWS DynamoDB filter expressions
 
 ```
-grep(pattern="FilterExpression\s*=\s*['\"].*\+|FilterExpression\s*=\s*f['\"].*\{|KeyConditionExpression\s*=\s*['\"].*\+", max_matches=15)
+grep(pattern="(Filter|KeyCondition|Condition|Projection)Expression\s*[=:]\s*(f['\"].*\{|['\"].*['\"]\s*\+|\x60[^\x60]*\$\{)", max_matches=15)
 ```
 
 For each match: `get_code_snippet("containing_function")` to identify what's being concatenated into the expression string.
@@ -118,7 +123,7 @@ For each match: `get_code_snippet("containing_function")` to identify what's bei
 - DynamoDB parameterization pattern (safe): `FilterExpression="#attr = :val"` with `ExpressionAttributeValues={":val": user_input}` — attribute names and operators are hardcoded, only values are user-controlled → **SKIP**
 - Dangerous: `FilterExpression="attribute_name = " + user_input` where `user_input` is the entire expression tail → **SUBMIT**
 
-→ Submit: violated_invariant="DynamoDB FilterExpression assembled with user-supplied string; attacker injects OR/AND conditions to bypass filters and return unauthorized records", severity=8, confidence=7, exposure="internet"
+→ Submit: violated_invariant="DynamoDB FilterExpression assembled with user-supplied string; attacker injects OR/AND conditions to bypass filters and return unauthorized records", severity=8, confidence=7, exposure="internet", cwe="CWE-943"
 
 ---
 
@@ -127,32 +132,33 @@ For each match: `get_code_snippet("containing_function")` to identify what's bei
 ## Step 6 — SpEL injection: Java Spring
 
 ```
-grep(pattern="parser\.parseExpression\s*\(\s*\w+\s*\)|expressionParser\.parseExpression\s*\(\s*\w+\s*\)|new SpelExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)", max_matches=20)
+grep(pattern="\.parse(Expression|Raw)\s*\(\s*[^\"\s)]|\.parse(Expression|Raw)\s*\(\s*\"[^\"]*\"\s*\+", max_matches=20)
 ```
 
-For each match: `get_code_snippet("containing_method")` to read the full method. Identify the variable `\w+` passed to `parseExpression()`.
+The grep returns calls whose argument is not a plain string literal (a variable, a method call, or a literal concatenated with something). For each match: `get_code_snippet("containing_method")` to read the full method. Identify the expression passed to `parseExpression()`.
 
 **Verify** — trace the variable's origin:
 - Declared as a compile-time constant: `private static final String EXPR = "user.age > 18"` → **SKIP**
 - Loaded from a properties file / application config at startup (not per-request) → **SKIP**
 - Assigned from HTTP request: `@RequestParam String expr`, `request.getParameter("filter")`, `@PathVariable` → **SUBMIT immediately** (SpEL = RCE, no further verification needed once user input confirmed)
 - Unclear: `trace_path("method_name", mode="data_flow")` to follow the variable's assignment chain upstream
+- Evaluated only with `SimpleEvaluationContext` (e.g. `SimpleEvaluationContext.forReadOnlyDataBinding()`) instead of `StandardEvaluationContext` → `T()` type references and constructors are blocked: report as data exposure at severity 5, not RCE
 
-→ Submit: violated_invariant="Spring SpEL parseExpression() receives user-controlled string; attacker evaluates T(java.lang.Runtime).exec() for immediate RCE on the server", severity=10, confidence=9, exposure="internet"
+→ Submit: violated_invariant="Spring SpEL parseExpression() receives user-controlled string; attacker evaluates T(java.lang.Runtime).exec() for immediate RCE on the server", severity=10, confidence=9, exposure="internet", cwe="CWE-917"
 
 ---
 
 ## Step 7 — SpEL injection: Kotlin Spring
 
 ```
-grep(pattern="SpelExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)|ExpressionParser\s*\(\s*\)\.parseExpression\s*\(\s*\w+\s*\)", max_matches=20)
+grep(pattern="\.parse(Expression|Raw)\s*\(\s*[^\"\s)]|\.parse(Expression|Raw)\s*\(\s*\"[^\"]*(\$\{?[A-Za-z_]|\"\s*\+)", file_glob="*.kt", max_matches=20)
 ```
 
-For each match: `get_code_snippet("containing_fun")` — read the full Kotlin function. Identify the variable passed to `parseExpression()`.
+This also catches Kotlin string templates (`parseExpression("#{$input}")`). For each match: `get_code_snippet("containing_fun")` — read the full Kotlin function. Identify the variable passed to `parseExpression()`.
 
 **Verify**: same origin-tracing as Step 6 — is the variable a constant/config, or does it come from a request parameter (`@RequestParam`, `@PathVariable`, request body)? If unclear, `trace_path("fun_name", mode="data_flow")` upstream; if still unclear, **submit with confidence=5**. User-controlled SpEL = RCE with no further verification needed.
 
-→ Submit: violated_invariant="Kotlin Spring SpEL parseExpression receives user-controlled string; RCE via T(java.lang.Runtime).exec()", severity=10, confidence=9, exposure="internet"
+→ Submit: violated_invariant="Kotlin Spring SpEL parseExpression receives user-controlled string; RCE via T(java.lang.Runtime).exec()", severity=10, confidence=9, exposure="internet", cwe="CWE-917"
 
 ---
 
@@ -160,22 +166,22 @@ For each match: `get_code_snippet("containing_fun")` — read the full Kotlin fu
 
 **JEXL:**
 ```
-grep(pattern="JexlEngine\s*\(\s*\)\.createExpression\s*\(\s*\w+\s*\)|new JexlBuilder\s*\(\s*\).*create\s*\(\s*\).*createExpression\s*\(\s*\w+\s*\)", max_matches=15)
+grep(pattern="\.create(Expression|Script)\s*\(\s*[^\"\s)]|new\s+JexlBuilder\s*\(", max_matches=15)
 ```
 
 **MVEL:**
 ```
-grep(pattern="MVEL\.eval\s*\(\s*\w+\s*[,)]|MVEL\.compileExpression\s*\(\s*\w+\s*\)|MVEL\.executeExpression\s*\(", max_matches=15)
+grep(pattern="MVEL\.(eval\w*|compileExpression)\s*\(\s*[^\"\s)]|MVEL\.executeExpression\s*\(", max_matches=15)
 ```
 
 **OGNL (Struts / MyBatis):**
 ```
-grep(pattern="Ognl\.getValue\s*\(\s*\w+\s*[,)]|Ognl\.parseExpression\s*\(\s*\w+\s*\)", max_matches=15)
+grep(pattern="Ognl\.(getValue|setValue|parseExpression)\s*\(\s*[^\"\s)]", max_matches=15)
 ```
 
 **Script engine (javax.script):**
 ```
-grep(pattern="ScriptEngine.*eval\s*\(\s*\w+\s*\)|engine\.eval\s*\(\s*\w+\s*\)", max_matches=15)
+grep(pattern="[Ee]ngine\w*\.eval\s*\(\s*[^\"\s)]", max_matches=15)
 ```
 
 For each match: `get_code_snippet("containing_method")` — read the full method. Identify the variable/argument passed to `eval()` / `createExpression()` / `getValue()`.
@@ -186,7 +192,7 @@ For each match: `get_code_snippet("containing_method")` — read the full method
 - Assigned from HTTP input (`request.getParameter(...)`, `@RequestParam`, `@RequestBody` field) → **SUBMIT immediately**
 - Unclear → `trace_path("method", mode="data_flow")` to follow the assignment chain; if still unclear, **submit with confidence=5**
 
-→ Submit: violated_invariant="Java expression engine (JEXL/MVEL/OGNL/ScriptEngine) evaluates user-supplied expression string; RCE via reflection gadgets available in the expression language runtime", severity=10, confidence=9, exposure="internet"
+→ Submit: violated_invariant="Java expression engine (JEXL/MVEL/OGNL/ScriptEngine) evaluates user-supplied expression string; RCE via reflection gadgets available in the expression language runtime", severity=10, confidence=9, exposure="internet", cwe="CWE-917" (use "CWE-94" for ScriptEngine)
 
 ---
 
@@ -195,14 +201,14 @@ For each match: `get_code_snippet("containing_method")` — read the full method
 ## Step 9 — CRLF injection: Java (Servlet / Spring)
 
 ```
-grep(pattern="response\.setHeader\s*\(\s*['\"][^'\"]+['\"],\s*\w+\s*\)|response\.addHeader\s*\(\s*['\"][^'\"]+['\"],\s*\w+\s*\)", max_matches=20)
+grep(pattern="(response|resp|res)\.(setHeader|addHeader)\s*\(\s*\"[^\"]+\"\s*,\s*[^\"\s)]|new\s+Cookie\s*\(\s*\"[^\"]+\"\s*,\s*[^\"\s)]", max_matches=20)
 ```
 
 ```
-grep(pattern="response\.sendRedirect\s*\(\s*\w+\s*\)", max_matches=20)
+grep(pattern="\.sendRedirect\s*\(\s*[^\"\s)]", max_matches=20)
 ```
 
-For each match: `get_code_snippet("containing_method")` to identify the variable `\w+` being set as the header value or redirect URL.
+For each match: `get_code_snippet("containing_method")` to identify the expression being set as the header value or redirect URL.
 
 **Verify** — trace the variable's origin:
 - Hardcoded string, comes from a DB query result (not user-controlled), or comes from server-internal logic → **SKIP**
@@ -212,17 +218,19 @@ For each match: `get_code_snippet("containing_method")` to identify the variable
 
 If unclear, `trace_path("method", mode="data_flow")` to follow the variable upstream; if still unclear, **submit with confidence=5**.
 
-→ Submit: violated_invariant="HTTP response header value flows from request.getParameter() without CRLF stripping; HTTP response splitting injects arbitrary headers and body content", severity=7, confidence=8, exposure="internet"
+Current servlet containers (Tomcat, Jetty, Undertow) reject or neutralise CR/LF in header values, so on a maintained container the impact is limited — check the container/version and use severity 4 unless it is old or a custom HTTP layer writes the headers.
+
+→ Submit: violated_invariant="HTTP response header value flows from request.getParameter() without CRLF stripping; HTTP response splitting injects arbitrary headers and body content", severity=7, confidence=8, exposure="internet", cwe="CWE-113"
 
 ---
 
 ## Step 10 — CRLF injection: log injection (Java / Kotlin / Scala)
 
 ```
-grep(pattern="log\.(info|debug|warn|error)\s*\(\s*['\"].*\+\s*\w+|logger\.(info|debug|warn|error)\s*\(\s*['\"].*\+\s*\w+", max_matches=20)
+grep(pattern="(log|logger|LOG|LOGGER)\.(info|debug|warn|error|trace)\s*\(\s*\"[^\"]*\"\s*\+|(log|logger|LOG|LOGGER)\.(info|debug|warn|error|trace)\s*\(\s*\"[^\"]*(\{\}|\$\{?[A-Za-z_])[^\"]*\"", max_matches=20)
 ```
 
-For each match: `get_code_snippet("containing_method")` to identify the variable being concatenated into the log message.
+The grep covers concatenation, SLF4J `{}` placeholders and Kotlin `$var` templates — placeholders do not escape CR/LF either. For each match: `get_code_snippet("containing_method")` to identify the variable being concatenated into the log message.
 
 **Verify** — the variable must trace to HTTP user input to be a finding:
 - Internal server state, DB result, or fixed constant → **SKIP** (logging internal values is normal)
@@ -230,7 +238,7 @@ For each match: `get_code_snippet("containing_method")` to identify the variable
 - Assigned from `request.getParameter(...)`, `@RequestParam`, request header, `@PathVariable`, request body → **CONTINUE**
 - No `\r\n` sanitization before the log call → **SUBMIT**
 
-→ Submit: violated_invariant="User input from [source] concatenated into log statement without CRLF sanitization; attacker injects newlines to forge audit log entries and break SIEM parsers", severity=5, confidence=7, exposure="internet"
+→ Submit: violated_invariant="User input from [source] concatenated into log statement without CRLF sanitization; attacker injects newlines to forge audit log entries and break SIEM parsers", severity=5, confidence=7, exposure="internet", cwe="CWE-117"
 
 ---
 
@@ -238,12 +246,12 @@ For each match: `get_code_snippet("containing_method")` to identify the variable
 
 **Python:**
 ```
-grep(pattern="response\.headers\s*\[.*\]\s*=\s*\w+.*request\.|flask\.Response\s*\(.*headers.*request\.", max_matches=15)
+grep(pattern="headers\s*\[[^\]]+\]\s*=.*request\.(args|form|headers|values|json|GET|POST|META|cookies|query_params)|response\s*\[\s*['\"][^'\"]+['\"]\s*\]\s*=.*request\.|Response\s*\(.*headers\s*=.*request\.", max_matches=15)
 ```
 
 **Go:**
 ```
-grep(pattern="w\.Header\(\)\.Set\s*\(\s*['\"][^'\"]+['\"],\s*\w+\s*\)|w\.Header\(\)\.Add\s*\(\s*['\"][^'\"]+['\"],\s*\w+\s*\)", max_matches=15)
+grep(pattern="w\.Header\(\)\.(Set|Add)\s*\(\s*\"[^\"]+\"\s*,\s*[^\"\s)]", max_matches=15)
 ```
 
 **Ruby/Rails:**
@@ -253,7 +261,7 @@ grep(pattern="response\.headers\[['\"][^'\"]+['\"]\]\s*=\s*params\[|headers\[['\
 
 **Verify**: Go's `net/http` package sanitizes headers in recent versions — check the Go version in go.mod. Python Flask also sanitizes in recent versions. Still flag because old versions or custom HTTP libs may not.
 
-→ Submit: violated_invariant="HTTP response header value set from user input; CRLF injection possible in older framework versions or custom transport layers", severity=6, confidence=7, exposure="internet"
+→ Submit: violated_invariant="HTTP response header value set from user input; CRLF injection possible in older framework versions or custom transport layers", severity=6, confidence=7, exposure="internet", cwe="CWE-113"
 
 ---
 
@@ -261,22 +269,25 @@ grep(pattern="response\.headers\[['\"][^'\"]+['\"]\]\s*=\s*params\[|headers\[['\
 
 **Unsafe object merge / extend / assign with user data:**
 ```
-grep(pattern="Object\.assign\s*\(\s*\w+,\s*req\.(body|query|params)\b|merge\s*\(\s*\w+,\s*req\.(body|query|params)\b|extend\s*\(\s*\w+,\s*req\.(body|query|params)\b", max_matches=20)
+grep(pattern="Object\.assign\s*\(\s*(\w+|\{\s*\})\s*,\s*req\.(body|query|params)\b|\bmerge\s*\(\s*(\w+|\{\s*\})\s*,\s*req\.(body|query|params)\b|\bextend\s*\(\s*(true\s*,\s*)?(\w+|\{\s*\})\s*,\s*req\.(body|query|params)\b", max_matches=20)
 ```
 
 **Direct property assignment without hasOwnProperty check:**
 ```
-grep(pattern="for\s*\(\s*(const|let|var)\s+\w+\s+in\s+req\.(body|query)\s*\)\s*\{[^}]*\w+\s*\[\s*\w+\s*\]\s*=", max_matches=20)
+grep(pattern="for\s*\(\s*(const|let|var)\s+\w+\s+in\s+(req\.(body|query)|\w*(body|input|payload|source|src)\w*)\s*\)", max_matches=20)
 ```
 
 **lodash merge / deepmerge with user input:**
 ```
-grep(pattern="_\.merge\s*\(\s*\w+,\s*req\.(body|query)\b|deepmerge\s*\(\s*\w+,\s*req\.(body|query)\b|\\\$\.extend\s*\(\s*true,\s*\w+,\s*req\.(body|query)\b", max_matches=20)
+grep(pattern="_\.(merge|mergeWith|defaultsDeep)\s*\(\s*(\w+|\{\s*\})\s*,\s*req\.(body|query)\b|_\.(set|setWith)\s*\(\s*\w+\s*,\s*req\.|deepmerge\s*\(\s*\w+\s*,\s*req\.(body|query)\b|(\$|jQuery)\.extend\s*\(\s*true\s*,\s*(\w+|\{\s*\})\s*,\s*req\.(body|query)\b", max_matches=20)
 ```
 
-**Verify**: does the merge/assign/extend target an object with `{}` or `new Object()` base? Does the user object contain `__proto__` or `constructor.prototype` keys? A PoC: `req.body = {"__proto__": {"isAdmin": true}}` pollutes `Object.prototype.isAdmin` globally.
+**Verify**: what kind of merge receives the user object?
+- **Recursive** merge / set-by-path without a `__proto__` / `constructor` / `prototype` key guard — lodash `merge` / `defaultsDeep` before 4.17.12, jQuery `$.extend(true, …)` before 3.4.0, hand-written deep-merge or for-in copy loops that recurse into nested objects — walks into `__proto__` and writes to `Object.prototype`: `{"__proto__": {"isAdmin": true}}` makes `isAdmin` true on every object → **SUBMIT** (severity 8). Check the library version in the lockfile.
+- `Object.assign(target, req.body)`, object spread, or a shallow `extend` copies only top-level own keys: a JSON `"__proto__"` key replaces the prototype of `target` alone — no global pollution. That is still mass assignment on `target`; **SUBMIT** at severity 5 only if `target` is later trusted (e.g. `if (target.isAdmin)`).
+- `req.query` parsed by `qs` drops `__proto__` keys by default, so JSON bodies are the main vector.
 
-→ Submit: violated_invariant="Object.assign / lodash.merge / deepmerge copies user-controlled keys including __proto__/constructor.prototype into target; prototype pollution sets global properties enabling auth bypass or RCE", severity=8, confidence=8, exposure="internet"
+→ Submit: violated_invariant="Recursive merge (lodash.merge / deepmerge / $.extend(true) / custom deep-merge) copies user-controlled __proto__/constructor.prototype keys; Object.prototype polluted globally enabling auth bypass or RCE gadgets", severity=8 (5 for a shallow Object.assign that only replaces the target's own prototype), confidence=8, exposure="internet", cwe="CWE-1321"
 
 ---
 

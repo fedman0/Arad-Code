@@ -4,8 +4,8 @@
 
 **Trigger:** Early in Phase 1, after inventory-repository.
 **Phase:** 1 — Project Understanding
-**Preconditions:** Config file locations from inventory-repository
-**Escalates to:** map-deployment-context, review-cryptographic-usage
+**Preconditions:** Config file locations (Repository Inventory section of the Threat Model in Known Context)
+**Escalates to:** map-deployment-context, hunt-insecure-config-defaults, hunt-secrets-detection
 
 ## Inputs
 - repo_path
@@ -31,15 +31,20 @@
 ## Counterchecks
 - A setting in appsettings.Development.json only matters if the app runs in Development mode in production.
 - Hardcoded dev credentials are only a finding if they could authenticate against production systems.
-- CORS AllowAnyOrigin is only a finding if the endpoint uses cookie-based auth (CORS does not protect token auth).
+- A wildcard origin (`*`, AllowAnyOrigin) is not credentialed — browsers refuse to expose credentialed responses with `*` — so it only matters for data readable without credentials. The exploitable case is a reflected or pattern-matched origin (e.g. `SetIsOriginAllowed(_ => true)`, echoing the request `Origin`) combined with `Access-Control-Allow-Credentials: true` on cookie-authenticated endpoints.
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: hardcoded secrets, dev settings reachable in prod, DisableAuth flags.
+Set `cwe` on each hypothesis (e.g. CWE-798 hardcoded secret, CWE-1188 insecure development default reachable in production, CWE-306 authentication disabled by flag).
+
+Persist the effective production configuration (override chain, security-relevant settings per environment, auth/isolation feature flags) with `amend_threat_model` as a short `## Configuration` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When the complete effective configuration for production is understood including override chain.
 
 ## Forbidden inferences
-- Do not flag CORS AllowAnyOrigin as a CSRF vector for Bearer token-only APIs.
+- Do not flag a permissive CORS origin on Bearer-token-only APIs — the browser never attaches the token to a cross-origin request.
 - Do not report a secret in .env.example as a leaked credential without confirming it matches production.
 - Do not assume ASPNETCORE_ENVIRONMENT=Production means all Development-only config is disabled without checking.

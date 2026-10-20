@@ -2,14 +2,14 @@
 
 ## Contract
 
-**Trigger:** After map-deployment-context.
+**Trigger:** After map-deployment-context and resolve-dependency-injection.
 **Phase:** 1 — Project Understanding
-**Preconditions:** Service list, deployment context, DI map
-**Escalates to:** trace-cross-service-messages, review-tenant-isolation
+**Preconditions:** Service list, deployment context, DI map (Threat Model in Known Context)
+**Escalates to:** trace-cross-service-messages, model-tenant-boundaries
 
 ## Inputs
 - repo_path
-- service list with deployment info
+- service list with deployment info (Repository Inventory and Deployment Context sections of the Threat Model)
 
 ## Procedure
 1. Find all inter-service HTTP calls: HttpClient, IHttpClientFactory, RestClient, Feign, Refit usage.
@@ -36,6 +36,11 @@
 
 ## Output schema
 Standard FINDINGS_SCHEMA. Hypotheses for: blind trust of forwarded claims, shared DB without row-level isolation, cache key collision enabling cross-tenant read.
+Set `cwe` on each hypothesis (e.g. CWE-290 blindly trusted forwarded identity, CWE-668 shared database or cache exposing another tenant's data).
+
+Persist the service communication graph (caller → callee, protocol, auth mechanism, trust model, shared DBs and caches) with `amend_threat_model` as a short `## Service Communication Graph` section (if no threat model exists yet,
+call `save_threat_model` with `## Overview`, `## Trust Boundaries`, `## Attack Surface`, `## Severity Calibration`
+and this section). Later skills read it from the Threat Model in Known Context.
 
 ## Stop condition
 When all inter-service edges are mapped with their auth mechanisms and trust model.
