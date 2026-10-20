@@ -11,7 +11,8 @@ from core import tui as tui_mod
 from core.models import Evidence
 from core.tui import AradCodeApp, ScrollIndicator, StatusBar
 from fakes_tui import (
-    FakeLLM, FakeRunner, install, log_text, make_db, make_hyp, status_text, tree_lines, type_cmd, wait_idle,
+    FakeLLM, FakeRunner, install, log_text, make_db, make_hyp, status_text, tree_lines, type_cmd, wait_for,
+    wait_idle, wait_started,
 )
 
 CASE_TIMEOUT = 60
@@ -406,8 +407,7 @@ async def t_restart_preloaded(c):
 async def t_queue_and_done(c):
     app, runner, db = new_app({"delay": 0.1}, initial=f"run '{c.repo}'")
     async with app.run_test(size=(140, 40)) as pilot:
-        await pilot.pause(0.05)
-        c.check("B15 initial running", app._command_running())
+        c.check("B15 initial running", await wait_started(pilot))
         await type_cmd(pilot, f"skill p0-recon '{c.repo}'")
         await type_cmd(pilot, "run /nope1")
         await type_cmd(pilot, "help")
@@ -423,6 +423,8 @@ async def t_queue_and_done(c):
         c.check("B16 not waiting to exit while queue was pending", not app._waiting_to_exit)
     app2, runner2, db2 = new_app({"block_on": "p0-recon"}, initial=f"run '{c.repo}'")
     async with app2.run_test(size=(140, 40)) as pilot:
+        await wait_started(pilot)
+        await wait_for(pilot, lambda: ("run_all", str(c.repo.resolve()), False) in runner2.calls)
         await pilot.pause(0.2)
         await pilot.press("ctrl+c")
         await wait_idle(pilot)
@@ -433,8 +435,9 @@ async def t_queue_and_done(c):
         c.check("B16 no extra completion message after later command", "Run complete" not in log_text(app2) and log_text(app2).count("Run stopped") == 1)
     app3, runner3, db3 = new_app({"fail_on": "p0-recon"}, initial=f"run '{c.repo}'")
     async with app3.run_test(size=(140, 40)) as pilot:
+        await wait_for(pilot, lambda: "Run failed" in log_text(app3))
         await wait_idle(pilot)
-        c.check("B16 failed initial run worded as failed", "Run failed" in log_text(app3))
+        c.check("B16 failed initial run worded as failed", "Run failed" in log_text(app3), log_text(app3)[-300:])
         await pilot.press("enter")
         await pilot.pause()
     c.check("B16 enter closes after initial run", app3.return_code == 0 and app3._shutting_down)

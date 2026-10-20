@@ -174,3 +174,23 @@ async def wait_idle(pilot, timeout=5.0):
             return True
         await asyncio.sleep(0.02)
     return False
+
+
+async def wait_started(pilot, timeout=10.0):
+    app = pilot.app
+    end = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < end:
+        if app._command_running():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def wait_for(pilot, predicate, timeout=10.0):
+    end = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < end:
+        if predicate():
+            await pilot.pause()
+            return True
+        await asyncio.sleep(0.02)
+    return False
