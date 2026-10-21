@@ -460,7 +460,7 @@ Join filters with `and`.
 | `blocked` | Can't be decided with what's available |
 | `needs_recheck` | You confirmed it, but all of its evidence has since gone stale |
 
-Severity is an integer from 0 to 10: 9 and 10 are critical, 7 and 8 high, 4 to 6 medium, 1 to 3 low, 0 informational. Confidence is capped by how the evidence was gathered: 4 for grep or plain file reads, 7 for structural tools (AST, symbol search), 10 only when a call chain was actually traced.
+Severity is an integer from 0 to 10: 9 and 10 are critical, 7 and 8 high, 4 to 6 medium, 1 to 3 low, 0 informational. Confidence is capped by how the evidence was gathered: 4 for a grep hit the model never opened, 7 when it read the cited lines themselves or used structural tools (AST, symbol search), 10 only when a call chain was actually traced. Each claim is checked against the calls made during the skill: reading counts only when a `read_file` range in that skill contains the cited lines and the quoted anchor was found there, and a traced chain only when a `trace_path` call names the cited file or function.
 
 When a finding you expected isn't in the report, `doctor` and `query REPO "why <id>"` will usually tell you which obligation, open question or stale anchor is holding it back.
 
