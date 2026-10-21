@@ -63,6 +63,10 @@ class Transcript:
             self._write({"type": "message", "message": m})
         self._written = len(self._messages)
 
+    def event(self, kind: str, **info) -> None:
+        self.sync()
+        self._write({"type": kind, **info})
+
     def close(self, **info) -> None:
         self.sync()
         self._write({"type": "end", **info})
@@ -75,6 +79,9 @@ class NullTranscript:
         pass
 
     def sync(self, messages: Optional[list] = None) -> None:
+        pass
+
+    def event(self, kind: str, **info) -> None:
         pass
 
     def close(self, **info) -> None:

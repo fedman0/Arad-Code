@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 from core.config import Config
 from core.db import EvidenceStore
+from core.llm import Reply
 from core.runner import SkillRunner
+
+EMPTY = {"findings": {"hypotheses": [], "coverage": [], "open_questions": []}}
 
 
 class FakeMCP:
@@ -40,15 +43,17 @@ class ScriptedLLM:
         self.turns = list(turns)
         self.calls = []
 
-    async def complete_with_tools(self, messages, tools, system=None, tool_choice=None):
+    async def complete_turn(self, messages, tools, system=None, tool_choice=None, **extra):
         self.calls.append({"messages": [dict(m) for m in messages], "tool_choice": tool_choice,
-                           "tools": [t["function"]["name"] for t in tools]})
+                           "tools": [t["function"]["name"] for t in tools], **extra})
         if not self.turns:
-            return None, [tc(999, "finish", {"findings": {"hypotheses": [], "coverage": [], "open_questions": []}})]
+            return Reply(None, [tc(999, "finish", EMPTY)], "tool_calls")
         t = self.turns.pop(0)
+        if isinstance(t, Reply):
+            return t
         if isinstance(t, str):
-            return t, None
-        return None, t
+            return Reply(t, None, "stop")
+        return Reply(None, t, "tool_calls")
 
 
 def make_repo(base):

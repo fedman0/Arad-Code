@@ -112,7 +112,7 @@ def test_client_adapts_to_rejected_parameters_and_records_usage():
     client = make_client(api)
     assert asyncio.run(client.complete([{"role": "user", "content": "hi"}])) == "ok"
     final = api.requests[-1]
-    assert "max_tokens" not in final and final["max_completion_tokens"] == 8192
+    assert "max_tokens" not in final and final["max_completion_tokens"] == 16384
     assert "temperature" not in final
     assert len(api.requests) == 3
     asyncio.run(client.complete([{"role": "user", "content": "again"}]))

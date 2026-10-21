@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlsplit
 
@@ -19,6 +20,21 @@ _UNSUPPORTED_WORDS = (
     "unknown field", "extra inputs are not permitted", "extra_forbidden", "unexpected keyword",
     "not allowed", "not permitted",
 )
+_OUTPUT_LIMIT_WORDS = (
+    "max_tokens", "max_completion_tokens", "output tokens", "completion tokens",
+    "in the completion", "output limit",
+)
+
+
+@dataclass
+class Reply:
+    content: Optional[str]
+    tool_calls: Optional[list]
+    finish_reason: Optional[str] = None
+
+    @property
+    def truncated(self) -> bool:
+        return self.finish_reason == "length"
 
 
 def _host(api_base: Optional[str]) -> str:
@@ -56,6 +72,12 @@ def _rejected_params(exc: Exception) -> set[str]:
     return {first[1]} if first else set()
 
 
+def _mentions_output_limit(exc: Exception) -> bool:
+    param = str(getattr(exc, "param", "") or "").lower()
+    text = f"{getattr(exc, 'message', '')} {exc}".lower()
+    return param in ("max_tokens", "max_completion_tokens") or any(w in text for w in _OUTPUT_LIMIT_WORDS)
+
+
 class LLMClient:
     def __init__(self, cfg: Config, model: Optional[str] = None,
                  meter: Optional[UsageMeter] = None):
@@ -72,17 +94,23 @@ class LLMClient:
         self._openrouter = _is_openrouter(cfg.api_base)
         self._token_param = "max_completion_tokens" if _is_openai(cfg.api_base) else "max_tokens"
         self._dropped: set[str] = set()
+        self._room_refused = False
 
-    def _params(self, stream: bool) -> dict:
-        params: dict[str, Any] = {"model": self.model, self._token_param: self._max_tokens}
+    def _params(self, stream: bool, max_tokens: Optional[int] = None,
+                reasoning_effort: Optional[str] = None) -> dict:
+        limit = max_tokens if max_tokens and not self._room_refused else self._max_tokens
+        params: dict[str, Any] = {"model": self.model, self._token_param: limit}
         if self._temperature is not None and "temperature" not in self._dropped:
             params["temperature"] = self._temperature
         extra: dict[str, Any] = {}
-        if self._reasoning_effort and "reasoning" not in self._dropped:
+        effort = self._reasoning_effort
+        if effort and reasoning_effort:
+            effort = reasoning_effort
+        if effort and "reasoning" not in self._dropped:
             if self._openrouter:
-                extra["reasoning"] = {"effort": self._reasoning_effort}
+                extra["reasoning"] = {"effort": effort}
             else:
-                extra["reasoning_effort"] = self._reasoning_effort
+                extra["reasoning_effort"] = effort
         if self._openrouter and "usage" not in self._dropped:
             extra["usage"] = {"include": True}
         if stream:
@@ -113,17 +141,26 @@ class LLMClient:
                       self.model, self._token_param, sorted(self._dropped))
         return changed
 
-    async def _create(self, stream: bool = False, **kwargs):
+    async def _create(self, stream: bool = False, max_tokens: Optional[int] = None,
+                      reasoning_effort: Optional[str] = None, **kwargs):
         if self.meter is not None:
             self.meter.check()
         started = time.monotonic()
-        for attempt in range(5):
-            params = {**self._params(stream), **kwargs}
+        for attempt in range(6):
+            params = {**self._params(stream, max_tokens, reasoning_effort), **kwargs}
             try:
                 return await self._client.chat.completions.create(**params), started
             except (openai.BadRequestError, openai.UnprocessableEntityError) as exc:
-                if attempt == 4 or not self._adapt(exc):
+                if attempt == 5:
                     raise
+                if self._adapt(exc):
+                    continue
+                if max_tokens and not self._room_refused and _mentions_output_limit(exc):
+                    self._room_refused = True
+                    _log.info("model %s refused %s=%d; staying at %d for the rest of the run",
+                              self.model, self._token_param, max_tokens, self._max_tokens)
+                    continue
+                raise
 
     def _record(self, usage: Any, started: float) -> None:
         if self.meter is None:
@@ -169,6 +206,30 @@ class LLMClient:
         self._record(getattr(resp, "usage", None), started)
         return resp.choices[0].message.content or ""
 
+    async def complete_turn(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        system: Optional[str] = None,
+        tool_choice=None,
+        max_tokens: Optional[int] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> Reply:
+        resp, started = await self._create(
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+            messages=self._with_system(messages, system),
+            tools=tools,
+            tool_choice=tool_choice or "auto",
+        )
+        self._record(getattr(resp, "usage", None), started)
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return Reply(None, None, "error")
+        choice = choices[0]
+        msg = choice.message
+        return Reply(msg.content, msg.tool_calls, getattr(choice, "finish_reason", None))
+
     async def complete_with_tools(
         self,
         messages: list[dict],
@@ -176,14 +237,8 @@ class LLMClient:
         system: Optional[str] = None,
         tool_choice=None,
     ) -> tuple[Optional[str], Optional[list]]:
-        resp, started = await self._create(
-            messages=self._with_system(messages, system),
-            tools=tools,
-            tool_choice=tool_choice or "auto",
-        )
-        self._record(getattr(resp, "usage", None), started)
-        msg = resp.choices[0].message
-        return msg.content, msg.tool_calls
+        reply = await self.complete_turn(messages, tools, system=system, tool_choice=tool_choice)
+        return reply.content, reply.tool_calls
 
     async def complete_stream(
         self,

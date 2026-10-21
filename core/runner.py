@@ -6,7 +6,7 @@ import re
 import subprocess
 from typing import Any, Optional
 from .config import Config
-from .llm import LLMClient
+from .llm import LLMClient, Reply
 from .db import EvidenceStore
 from .memory_mcp import CodebaseMemoryClient
 from .models import (
@@ -34,6 +34,53 @@ from .transcript import new_run_id, open_transcript
 from .usage import Usage, UsageMeter, usage_scope
 from .context import ContextWindow
 from .stack import StackProfile, describe, detect_stack
+
+
+_FINISH_CHOICE = {"type": "function", "function": {"name": "finish"}}
+_FORCED_TURNS = 6
+_EMPTY_FORCED_LIMIT = 2
+_FINISH_RETRIES = 2
+_ROOM_FACTOR = 4
+_ROOM_CAP = 65536
+
+_FORCE_FINISH = (
+    "You have used enough iterations. Call finish() RIGHT NOW with all findings "
+    "you have gathered so far. Include every hypothesis with its evidence. "
+    "Do not call any other tool, only finish()."
+)
+_CONTINUE = (
+    "Continue the skill: call a tool to keep investigating, "
+    "or call finish() with your structured findings."
+)
+_CONTINUE_FORCED = "Only finish() is available now. Call finish() with the findings you have."
+_CUT = (
+    "Your reply was cut off at the token limit before it ended. Keep replies short: "
+    "a few tool calls per turn and brief text. Continue the skill."
+)
+_CUT_FORCED = (
+    "Your reply was cut off at the token limit before finish() was called. Call finish() "
+    "now: one sentence per description, snippets limited to the cited lines."
+)
+_FINISH_CUT = (
+    "finish() was cut off at the token limit before its JSON ended, so nothing was "
+    "recorded. Call finish() again with shorter text: one sentence per description, "
+    "snippets limited to the cited lines, and no fields you do not need."
+)
+_FINISH_BAD_JSON = (
+    "finish() arguments were not a JSON object, so nothing was recorded. Call finish() "
+    "again with a findings object: {\"hypotheses\": [...], \"evidence\": [...], "
+    "\"coverage\": [...], \"open_questions\": [...]}."
+)
+
+
+def _unwrap_findings(args: dict) -> Optional[dict]:
+    raw = args.get("findings", args)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return raw if isinstance(raw, dict) else None
 
 
 class SkillRunner(ToolExecutor, EvidenceReconciler):
@@ -182,12 +229,26 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         transcript.close(status=status, models=sorted(per_model), usage=total.to_dict())
         return total
 
+    def _room(self) -> int:
+        base = max(1, int(self._cfg.max_tokens or 1))
+        return max(base, min(base * _ROOM_FACTOR, _ROOM_CAP))
+
     async def _turn(self, llm, transcript, messages: list[dict], tools: list[dict],
-                    system: str, tool_choice=None, window: Optional[ContextWindow] = None):
+                    system: str, tool_choice=None, window: Optional[ContextWindow] = None,
+                    room: bool = False, brief: bool = False) -> Reply:
         transcript.sync(messages)
         wire = window.view(messages) if window is not None else messages
-        return await llm.complete_with_tools(wire, tools, system=system,
-                                             tool_choice=tool_choice)
+        if hasattr(llm, "complete_turn"):
+            extra: dict = {}
+            if room:
+                extra["max_tokens"] = self._room()
+            if brief:
+                extra["reasoning_effort"] = "low"
+            return await llm.complete_turn(wire, tools, system=system, tool_choice=tool_choice,
+                                           **extra)
+        content, tool_calls = await llm.complete_with_tools(wire, tools, system=system,
+                                                            tool_choice=tool_choice)
+        return Reply(content, tool_calls, None)
 
     async def run_skill(
         self,
@@ -282,24 +343,26 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         findings: Optional[dict] = None
 
         finish_tool = next(t for t in TOOLS if t["function"]["name"] == "finish")
-        nudge_at = max_iterations - 6
+        nudge_at = max(0, max_iterations - _FORCED_TURNS)
+        brief = False
+        empty_forced = 0
+        finish_retries = 0
+        no_output = ""
         for iteration in range(max_iterations):
             forced = iteration >= nudge_at
             if forced and iteration == nudge_at:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "You have used enough iterations. Call finish() RIGHT NOW with all findings "
-                        "you have gathered so far. Include every hypothesis with its evidence. "
-                        "Do not call any other tool — only finish()."
-                    ),
-                })
+                messages.append({"role": "user", "content": _FORCE_FINISH})
             tools_to_use = [finish_tool] if forced else TOOLS
-            content, tool_calls = await self._turn(
+            reply = await self._turn(
                 llm, transcript, messages, tools_to_use, active_system_prompt,
-                tool_choice={"type": "function", "function": {"name": "finish"}} if forced else None,
-                window=window,
+                tool_choice=_FINISH_CHOICE if forced else None,
+                window=window, room=forced or brief, brief=brief,
             )
+            transcript.event("turn", iteration=iteration, finish_reason=reply.finish_reason,
+                             forced=forced, brief=brief)
+            content, tool_calls = reply.content, reply.tool_calls
+            cut = reply.truncated
+            brief = False
 
             assistant_msg: dict = {"role": "assistant"}
             if content:
@@ -330,13 +393,19 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                     break
                 if "content" not in assistant_msg:
                     messages.append({"role": "assistant", "content": "(no response)"})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Continue the skill: call a tool to keep investigating, "
-                        "or call finish() with your structured findings."
-                    ),
-                })
+                    if forced:
+                        empty_forced += 1
+                        if empty_forced >= _EMPTY_FORCED_LIMIT:
+                            no_output = (f"the model gave no finish() output in {empty_forced} "
+                                         f"forced attempts (last finish_reason="
+                                         f"{reply.finish_reason or 'none'})")
+                            break
+                brief = cut or (forced and not content)
+                if cut:
+                    nudge = _CUT_FORCED if forced else _CUT
+                else:
+                    nudge = _CONTINUE_FORCED if forced else _CONTINUE
+                messages.append({"role": "user", "content": nudge})
                 continue
 
             finish_args: Optional[dict] = None
@@ -344,21 +413,38 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
             for tc in tool_calls:
                 name = tc.function.name
+                broken = False
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
+                    broken = True
+                if not isinstance(args, dict):
+                    args = {}
+                    broken = True
 
                 if name == "finish":
-                    raw_findings = args.get("findings", args)
-                    if isinstance(raw_findings, str):
-                        try:
-                            raw_findings = json.loads(raw_findings)
-                        except (json.JSONDecodeError, TypeError):
-                            raw_findings = {"hypotheses": [], "coverage": [],
-                                            "open_questions": [f"finish() called with non-JSON string"]}
-                    finish_args = raw_findings if isinstance(raw_findings, dict) else {"hypotheses": [], "coverage": [], "open_questions": []}
-                    result_text = "Findings recorded."
+                    raw_findings = None if broken else _unwrap_findings(args)
+                    can_retry = finish_retries < _FINISH_RETRIES and iteration + 1 < max_iterations
+                    if raw_findings is None and can_retry:
+                        finish_retries += 1
+                        brief = cut
+                        result_text = _FINISH_CUT if cut else _FINISH_BAD_JSON
+                    elif raw_findings is None:
+                        why = "cut off at the token limit" if cut else "not a JSON object"
+                        finish_args = {"hypotheses": [], "coverage": [], "open_questions": [
+                            f"finish() arguments were {why}; nothing was recorded"]}
+                        result_text = "Findings recorded."
+                    else:
+                        finish_args = raw_findings
+                        result_text = "Findings recorded."
+                elif broken:
+                    brief = brief or cut
+                    result_text = (
+                        f"The arguments of this {name} call were cut off at the token limit; "
+                        "call it again, with fewer calls per turn." if cut else
+                        f"The arguments of this {name} call were not valid JSON; call it again."
+                    )
                 else:
                     if verbose:
                         print(f"  [{iteration}] tool={name} args={json.dumps(args)[:120]}")
@@ -380,11 +466,10 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 findings = finish_args
                 break
 
-            # tool_choice="finish" is forced once iteration >= nudge_at (set above)
-
         if findings is None or not isinstance(findings, dict):
+            why = no_output or f"no finish() call within {max_iterations} iterations"
             findings = {"hypotheses": [], "coverage": [], "open_questions": [
-                f"skill {skill_name} did not produce structured output after {max_iterations} iterations"
+                f"skill {skill_name} produced no structured output: {why}"
             ]}
 
         validation_errors: list[str] = []

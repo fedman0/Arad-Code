@@ -42,7 +42,7 @@ class Config:
     mcp_args: list[str] = field(default_factory=list)
     db_path: str = "~/.pentest/evidence.db"
     skills_dir: str = ""
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     temperature: float = 0.0
     reasoning_effort: str = ""
     profile_path: str = ""
@@ -165,7 +165,7 @@ def _config_from_data(
         mcp_args=[str(a) for a in mcp_args],
         db_path=_opt(data, "db_path", "~/.pentest/evidence.db"),
         skills_dir=_opt(data, "skills_dir", ""),
-        max_tokens=_opt(data, "max_tokens", 8192),
+        max_tokens=_opt(data, "max_tokens", 16384),
         temperature=_opt(data, "temperature", 0.0),
         reasoning_effort=env.get("PENTEST_REASONING_EFFORT") or _opt(data, "reasoning_effort", ""),
         profile_path=_opt(data, "profile_path", ""),
