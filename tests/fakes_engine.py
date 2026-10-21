@@ -10,7 +10,7 @@ from core.runner import SkillRunner
 
 class FakeMCP:
     async def find_project_for_repo(self, repo):
-        return None
+        return "fake-project"
 
     async def search_graph(self, **kw):
         return "graph: nothing"

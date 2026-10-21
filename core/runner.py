@@ -232,14 +232,22 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         phase = self._get_skill_phase(skill_name)
         _ne_eligible = negative_evidence and phase in ("p3", "p4", "")
 
-        if repo_path not in self._project_cache:
-            self._project_cache[repo_path] = await self._mcp.find_project_for_repo(repo_path)
-        project_name = self._project_cache.get(repo_path)
+        project_name = await self._project_for(repo_path)
         mcp_hint = (
             f"\n# Codebase Graph Index\nProject name: `{project_name}`\n"
-            "Pass this as the `project` argument to get_architecture(), search_graph(), "
-            "trace_path(), get_code_snippet(), and search_code()."
-            if project_name else ""
+            "The engine passes it to get_architecture(), search_graph(), trace_path(), "
+            "get_code_snippet() and search_code() for you."
+            if project_name else
+            "\n# Codebase Graph Index\nThis repository has no graph index, so get_architecture(), "
+            "search_graph(), trace_path(), get_code_snippet() and search_code() are unavailable. "
+            "Use list_dir, read_file, parse_file_structure, find_all_usages and grep."
+        )
+        orientation = (
+            f"Start by calling get_architecture(project=\"{project_name}\") to orient yourself, "
+            "then use the other tools to read real code and build evidence."
+            if project_name else
+            "Start with list_dir and parse_file_structure to orient yourself, then read real "
+            "code and build evidence."
         )
 
         is_hunt = skill_name.startswith("hunt-")
@@ -247,7 +255,6 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         _active_contract = HUNT_OUTPUT_CONTRACT if is_hunt else OUTPUT_CONTRACT
         start_instruction = (
             f"Repository: {repo_path}  (commit: {commit})\n\n"
-            f"Project name for all graph tools: `{project_name or '<project>'}`\n\n"
             "# Skill Contract\n"
             f"{skill_text}\n\n"
             f"{_active_contract}\n"
@@ -265,7 +272,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             f"# Known Context\n{known_context}\n"
             f"{mcp_hint}\n"
             f"{f'# Additional Context{chr(10)}{extra_context}' if extra_context else ''}\n\n"
-            f"Start by calling get_architecture(project=\"{project_name or '<project>'}\") to orient yourself, then use the other tools to read real code and build evidence. Call finish() when done."
+            f"{orientation} Call finish() when done."
         )
         initial_msg = start_instruction
 

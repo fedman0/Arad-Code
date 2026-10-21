@@ -40,6 +40,9 @@ class FakeLLM(BaseHTTPRequestHandler):
         turn = len(FakeLLM.requests)
         if turn == 1:
             calls = [
+                {"id": "call_0", "type": "function",
+                 "function": {"name": "search_graph",
+                              "arguments": json.dumps({"name_pattern": "read_token"})}},
                 {"id": "call_1", "type": "function",
                  "function": {"name": "grep", "arguments": json.dumps({"pattern": MARKER})}},
                 {"id": "call_2", "type": "function",
@@ -86,7 +89,8 @@ def main() -> int:
     secret_file.write_text(SECRET + "\n")
     repo = base / "repo"
     repo.mkdir()
-    (repo / "settings.py").write_text(f"API_TOKEN = '{MARKER}'\n")
+    (repo / "settings.py").write_text(
+        f"API_TOKEN = '{MARKER}'\n\n\ndef read_token():\n    return API_TOKEN\n")
     git(repo, "init", "-q")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "init")
@@ -114,6 +118,8 @@ def main() -> int:
     check("init exits 0 inside the sandbox", r.returncode == 0, str(r.returncode))
     check("codebase-memory-mcp indexes inside the sandbox",
           "Indexed via codebase-memory-mcp" in r.stdout, r.stdout[-300:])
+    check("the indexed project is found again by its path",
+          "Code graph project:" in r.stdout, r.stdout[-300:])
 
     r = subprocess.run([*cli, "skill", "hunt-secrets-detection", str(repo)], env=env,
                        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=900,
@@ -126,6 +132,8 @@ def main() -> int:
     check("api key forwarded by name", bool(FakeLLM.auth) and FakeLLM.auth[0] == "Bearer smoke-key",
           str(FakeLLM.auth[:1]))
     results = tool_results(FakeLLM.requests[1]) if len(FakeLLM.requests) >= 2 else {}
+    check("graph tools answer inside the sandbox", "read_token" in results.get("call_0", ""),
+          results.get("call_0", "")[:300])
     check("ripgrep works on the mounted repo", MARKER in results.get("call_1", ""),
           results.get("call_1", "")[:300])
     check("host file outside the repo is not readable",

@@ -1,13 +1,57 @@
 from __future__ import annotations
 import asyncio
 import json
+import re
 import subprocess
+from pathlib import Path
 from typing import Any, Optional
 from .config import Config
 
 _STREAM_LIMIT = 64 * 1024 * 1024
 _CALL_TIMEOUT = 60
 _INDEX_TIMEOUT = 900
+_PROJECT_PAGE = 200
+_PROJECT_MAX = 5000
+_TABLE_COLS = re.compile(r"\(cols:\s*([^)]*)\)")
+
+
+def _parse_project_table(text: str) -> list[dict]:
+    cols: list[str] = []
+    rows: list[dict] = []
+    for line in text.splitlines():
+        if not cols:
+            m = _TABLE_COLS.search(line)
+            if m:
+                cols = m.group(1).split()
+            continue
+        if not line.startswith(" "):
+            break
+        tokens = line.split()
+        if not tokens:
+            continue
+        if len(tokens) < len(cols):
+            values = tokens + [""] * (len(cols) - len(tokens))
+        elif len(cols) <= 1:
+            values = [" ".join(tokens)]
+        else:
+            trailing = len(cols) - 2
+            tail = tokens[len(tokens) - trailing:] if trailing else []
+            values = [tokens[0], " ".join(tokens[1:len(tokens) - trailing])] + tail
+        row = dict(zip(cols, values))
+        if row.get("name"):
+            rows.append(row)
+    return rows
+
+
+def _project_page(result: Any) -> tuple[list[dict], bool]:
+    if isinstance(result, list):
+        return [p for p in result if isinstance(p, dict)], False
+    if isinstance(result, dict):
+        items = result.get("projects", [])
+        return [p for p in items if isinstance(p, dict)] if isinstance(items, list) else [], bool(result.get("has_more"))
+    if isinstance(result, str):
+        return _parse_project_table(result), bool(re.search(r"has_more:\s*true", result))
+    return [], False
 
 
 class CodebaseMemoryClient:
@@ -114,21 +158,40 @@ class CodebaseMemoryClient:
                 return None
 
     async def list_projects(self) -> list[dict]:
-        result = await self._call("list_projects", {})
-        if isinstance(result, list):
-            return result
-        if isinstance(result, dict):
-            return result.get("projects", [])
-        return []
+        projects: list[dict] = []
+        seen: set[str] = set()
+        offset = 0
+        while True:
+            page = await self._call("list_projects", {"format": "json", "limit": _PROJECT_PAGE,
+                                                      "offset": offset})
+            if page is None and offset == 0:
+                page = await self._call("list_projects", {})
+            items, more = _project_page(page)
+            fresh = [p for p in items if p.get("name") and p.get("name") not in seen]
+            seen.update(p["name"] for p in fresh)
+            projects.extend(fresh)
+            if not more or not fresh or len(projects) >= _PROJECT_MAX:
+                return projects
+            offset += len(items)
 
     async def find_project_for_repo(self, repo_path: str) -> Optional[str]:
-        from pathlib import Path
-        repo = str(Path(repo_path).resolve())
-        projects = await self.list_projects()
-        for p in projects:
-            if str(Path(p.get("root_path", "")).resolve()) == repo:
-                return p.get("name")
-        return None
+        repo = Path(repo_path).resolve()
+        best: Optional[str] = None
+        best_depth = -1
+        for p in await self.list_projects():
+            name = p.get("name")
+            root_raw = p.get("root_path") or ""
+            if not name or not root_raw:
+                continue
+            try:
+                root = Path(root_raw).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if root == repo:
+                return name
+            if root in repo.parents and len(root.parts) > best_depth:
+                best, best_depth = name, len(root.parts)
+        return best
 
     async def index_repository(self, repo_path: str) -> Optional[dict]:
         return await self._call("index_repository", {"repo_path": repo_path}, timeout=_INDEX_TIMEOUT)

@@ -523,7 +523,7 @@ from types import SimpleNamespace as _NS
 
 class _FakeMCP:
     async def find_project_for_repo(self, repo):
-        return None
+        return "fake-project"
 
     async def search_graph(self, **kw):
         return "graph"

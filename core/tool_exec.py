@@ -17,8 +17,23 @@ from .intake import _EXPOSURE_VALUES
 
 _READ_FILE_MAX_LINES = 800
 
+_GRAPH_TOOLS = frozenset({
+    "search_graph", "trace_path", "get_code_snippet", "search_code", "get_architecture",
+})
+
+_NO_GRAPH = (
+    "{name} is unavailable: the code graph has no index for this repository "
+    "(run `init <repo>` before scanning to build it). Use list_dir, read_file, "
+    "parse_file_structure, find_all_usages and grep instead."
+)
+
 
 class ToolExecutor:
+    async def _project_for(self, repo_path: str) -> Optional[str]:
+        if repo_path not in self._project_cache:
+            self._project_cache[repo_path] = await self._mcp.find_project_for_repo(repo_path)
+        return self._project_cache[repo_path]
+
     def _resolve_path(self, repo_path: str, rel: str) -> Optional[Path]:
         repo = Path(repo_path).resolve()
         try:
@@ -160,22 +175,24 @@ class ToolExecutor:
             return f"Tool error ({name}): {ex}"
 
     async def _execute_tool_inner(self, name: str, args: dict, repo_path: str, skill_name: str = "") -> str:
-        project = self._project_cache.get(repo_path)
+        project = None
+        if name in _GRAPH_TOOLS:
+            project = await self._project_for(repo_path)
+            if project is None:
+                return _NO_GRAPH.format(name=name)
         if name == "search_graph":
             filtered = {k: v for k, v in args.items()
                         if k in ("name_pattern", "label", "qn_pattern", "limit")}
-            if project:
-                filtered["project"] = project
+            filtered["project"] = project
             r = await self._mcp.search_graph(**filtered)
-            return r or "No results (codebase-memory-mcp may not be indexed)"
+            return r or "No results in the code graph for this query"
         if name == "trace_path":
             filtered = {k: v for k, v in args.items()
                         if k in ("function_name", "mode", "depth", "direction")}
             if filtered.get("mode") == "called_by":
                 filtered["mode"] = "calls"
                 filtered.setdefault("direction", "inbound")
-            if project:
-                filtered["project"] = project
+            filtered["project"] = project
             r = await self._mcp.trace_path(**filtered)
             return r or "No results"
         if name == "get_code_snippet":
