@@ -175,7 +175,7 @@ mcp_args: []
 db_path: ~/.pentest/evidence.db
 skills_dir: ""
 
-max_tokens: 8192
+max_tokens: 16384
 temperature: 0.0
 reasoning_effort: ""
 
@@ -207,7 +207,7 @@ The prices above only show the shape. Copy the real numbers from your provider's
 | `mcp_args` | `[]` | Extra arguments for that binary |
 | `db_path` | `~/.pentest/evidence.db` | SQLite evidence store, shared by every repo you scan |
 | `skills_dir` | empty | Use a different skills folder. Empty means `./skills` next to `pentest.py` |
-| `max_tokens` | `8192` | Max tokens per model reply |
+| `max_tokens` | `16384` | Longest reply the model may send. A reply cut off at this limit is retried with up to four times the room (see [Cost, budgets and transcripts](#cost-budgets-and-transcripts)) |
 | `temperature` | `0.0` | Sampling temperature |
 | `reasoning_effort` | empty | `low`, `medium` or `high` for reasoning models. Sent as `reasoning.effort` to OpenRouter and as `reasoning_effort` everywhere else |
 | `profile_path` | empty | Path to a project profile kept outside the target repo (see below) |
@@ -483,6 +483,8 @@ Costs come from the `pricing` table in your config. On OpenRouter the provider r
 
 **Long conversations.** A skill can make dozens of tool calls, and every call sends the whole conversation again, so cost grows quickly with length. Once a conversation passes `context_char_limit` characters, tool output older than the last six results is cut down to its first lines, with a note telling the model it can run the tool again for the rest. This happens in steps rather than on every call, so the provider's prompt cache keeps working. The evidence checks and the saved transcripts always use the full, untrimmed output.
 
+**Replies cut off at the token limit.** The transcript records the `finish_reason` of every turn. When a reply ends with `length`, the engine tells the model what happened and gives the next call up to four times `max_tokens` (at most 65536) with low reasoning effort, so a long `finish()` can get through. The closing turns of a skill, where the model may only call `finish()`, always get that room. If the model returns nothing twice in a row during those turns, the skill ends right away with a note in its open questions instead of spending the remaining turns. A model that refuses the bigger limit stays at `max_tokens` for the rest of the run.
+
 **Models that refuse a parameter.** Some newer models don't accept a custom `temperature`, or want `max_completion_tokens` instead of `max_tokens`. When the endpoint rejects one of those, the client retries without it (or under the other name) and remembers that for the rest of the run, so the same config works across models.
 
 ## Project profile (.llmsast.yaml)
@@ -641,8 +643,9 @@ Things that keep a skill working:
 
 - Write grep patterns in ripgrep's syntax exactly as `rg` should receive them: `\.execute\(`, not `\\.execute\\(`. No lookarounds. Use `multiline=true` when the pattern contains `\n`.
 - The tools are `search_graph`, `trace_path` (`direction="inbound"` for callers, `"outbound"` for callees), `get_code_snippet`, `search_code` (literal unless `regex=true`), `read_file`, `list_dir`, `grep`, `parse_file_structure`, `find_all_usages`, `run_semgrep` (a pattern needs a `language`) and `shell`.
-- `shell` runs one read-only command at a time with no pipes: `git log/show/blame/diff/ls-files/ls-tree/rev-parse/status/shortlog/describe/grep`, `find` (tests only, no `-exec` or `-delete`), `tree`, `wc`, `head`, `tail`, `file`, `stat`, `sha256sum`, `sha1sum`, `md5sum`, `jq`, `diff`, `strings`, `cut`. Paths have to stay inside the repo.
+- `shell` runs one read-only command at a time with no pipes: `git log/show/blame/diff/ls-files/ls-tree/rev-parse/status/shortlog/describe/grep`, `find` (tests only, no `-exec` or `-delete`), `tree`, `wc`, `head`, `tail`, `file`, `stat`, `sha256sum`, `sha1sum`, `md5sum`, `jq`, `diff`, `strings`, `cut`. Paths have to stay inside the repo. `ls`, `cat` and `sed` are refused with a pointer to `list_dir` and `read_file`, and the sandbox image ships every command on the list.
 - Valid `exposure` values are `internet`, `authenticated`, `internal`, `admin_only` and `unreachable`. Anything else gets reset to `unspecified`.
+- Evidence goes in the top-level `evidence` array of `finish()`, tied to its finding by `hypothesis_index`; a hypothesis has no field for evidence of its own. When a finding with confidence above 3 has no evidence item, or a hypothesis is missing a required field, `finish()` is sent back to the model with the list of problems, twice at most. A finding that still has no evidence is kept as a lead at confidence 3 and never reaches the report.
 
 A skill file can start with a short YAML header:
 
@@ -692,7 +695,10 @@ Set `PENTEST_API_KEY`, run `config-init`, or pass `--api-key`.
 ripgrep isn't on `PATH`. Install it (`apt install ripgrep`, `brew install ripgrep`, ...). Without it the tool falls back to GNU grep, which doesn't understand most skill patterns.
 
 **Graph tools return nothing**
-codebase-memory-mcp isn't installed or the repo isn't indexed. Run `pentest.py --headless init <repo>`. `install.sh --check` tells you whether the binary is on `PATH`.
+codebase-memory-mcp isn't installed or the repo isn't indexed. Run `pentest.py --headless init <repo>`; it prints `Code graph project: <name>` when the index can be used. `install.sh --check` tells you whether the binary is on `PATH`. The sandbox has its own index, so run `init` in the same mode (sandboxed or not) as the scan.
+
+**A skill ends with `produced no structured output`**
+The model never completed a `finish()` call. The `turn` events in the skill's transcript show the `finish_reason` of each reply; `length` means it hit `max_tokens`. Raise `max_tokens`, lower `reasoning_effort`, or pick a model with a larger output limit.
 
 **The scan runs but nothing is exported**
 Run `doctor`. The usual reasons are unresolved proof obligations, a blocking open question, or evidence that's only textual. `query <repo> "why <id>"` shows the details for one finding.
