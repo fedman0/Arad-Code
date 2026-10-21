@@ -20,7 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SEMGREP_VERSION_CACHE_PATH=/tmp/semgrep/version
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ripgrep git ca-certificates \
+ && apt-get install -y --no-install-recommends ripgrep git ca-certificates jq tree file binutils \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/requirements.txt

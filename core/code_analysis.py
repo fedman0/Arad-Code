@@ -428,6 +428,13 @@ _SAFE_ENV = {
     "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_PAGER": "cat", "PAGER": "cat", "GIT_OPTIONAL_LOCKS": "0",
 }
+_SHELL_ALTERNATIVES = {
+    "ls": "list_dir", "dir": "list_dir", "cat": "read_file", "less": "read_file",
+    "more": "read_file", "sed": "read_file with start_line and end_line",
+    "awk": "read_file with start_line and end_line", "grep": "the grep tool",
+    "rg": "the grep tool", "ag": "the grep tool", "ack": "the grep tool",
+    "egrep": "the grep tool", "fgrep": "the grep tool",
+}
 _ENV_PASSTHROUGH = {"PATH", "HOME", "LANG", "LC_ALL", "TZ"}
 
 
@@ -491,13 +498,18 @@ def run_shell(repo_path: str, command: str) -> str:
         return "Empty command"
     if any(p in ("|", "||", "&&", ";", "&", "`", ">", ">>", "<", "<<") for p in parts) \
             or any(ch in command for ch in ("`", "$(", "\n")):
-        return "Shell operators (pipes, redirection, command substitution, ;, &&) are not allowed"
+        return ("Shell operators (pipes, redirection, command substitution, ;, &&) are not "
+                "allowed: one command per call. Filter the output yourself, or use the grep "
+                "tool for text search.")
     if "/" in parts[0]:
         return "Give the command name only, without a path"
     binary = parts[0]
     if binary not in _SHELL_WHITELIST:
-        return (f"Command '{binary}' not allowed. "
-                f"Allowed: {', '.join(SHELL_ALLOWED_BINARIES)}")
+        alternative = _SHELL_ALTERNATIVES.get(binary)
+        if alternative:
+            return f"Command '{binary}' not allowed here; use {alternative} instead."
+        return (f"Command '{binary}' not allowed: the shell is read-only and runs no "
+                f"interpreters or build tools. Allowed: {', '.join(SHELL_ALLOWED_BINARIES)}")
     repo = Path(repo_path).resolve()
     args = parts[1:]
     problem = _check_shell_command(repo, binary, args)

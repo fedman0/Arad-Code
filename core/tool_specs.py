@@ -185,8 +185,10 @@ TOOLS = [
         "function": {
             "name": "shell",
             "description": (
-                "Run one read-only command with the repo as cwd (no pipes, redirection or "
-                "command substitution; paths must stay inside the repository). "
+                "Run one read-only command with the repo as cwd (no pipes, redirection, "
+                "command substitution, ';' or '&&'; paths must stay inside the repository). "
+                "ls, cat, sed, awk, grep, interpreters and build tools are not available: "
+                "use list_dir, read_file (with start_line/end_line) and the grep tool for those. "
                 "Allowed commands: git (log, show, blame, diff, ls-files, ls-tree, rev-parse, "
                 "status, shortlog, describe, grep), find (name/path/type/size/time tests only, "
                 "no -exec or -delete), tree, wc, head, tail, file, stat, sha256sum, sha1sum, "
