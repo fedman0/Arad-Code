@@ -386,7 +386,6 @@ FINDINGS_SCHEMA = {
                     "severity": {"type": "integer", "minimum": 0, "maximum": 10},
                     "confidence": {"type": "integer", "minimum": 0, "maximum": 10},
                     "skill_source": {"type": "string"},
-                    "evidence_refs": {"type": "array", "items": {"type": "string"}},
                     "cwe": {"type": "string", "description": "CWE ID e.g. CWE-89, CWE-79, CWE-306"},
                     "proof_obligations": {
                         "type": "array",

@@ -25,7 +25,7 @@ from .evidence_gate import (
 )
 from .intake import (
     _as_list, _without_id, _prepare_model_hypothesis, _validate_model_hypothesis,
-    _apply_model_demotion,
+    _apply_model_demotion, _finish_problems,
 )
 from .tool_exec import ToolExecutor
 from .reconcile import EvidenceReconciler
@@ -81,6 +81,20 @@ def _unwrap_findings(args: dict) -> Optional[dict]:
         except (json.JSONDecodeError, TypeError):
             return None
     return raw if isinstance(raw, dict) else None
+
+
+def _rejection(problems: list[str], forced: bool) -> str:
+    shown = "\n".join(f"- {p}" for p in problems[:20])
+    if len(problems) > 20:
+        shown += f"\n- and {len(problems) - 20} more"
+    return (
+        "Findings NOT recorded. Fix these and call finish() again"
+        + (" (only finish() is available now)" if forced else "") + ":\n" + shown +
+        "\n\nEvery hypothesis needs at least one item in the top-level `evidence` array "
+        "(file_path, line_start, line_end, snippet, anchor_text copied verbatim from the "
+        "file, hypothesis_index). A hypothesis you cannot cite may stay as a lead: give it "
+        "confidence 3 or less and say in `uncertainty` what is missing."
+    )
 
 
 class SkillRunner(ToolExecutor, EvidenceReconciler):
@@ -436,8 +450,13 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                             f"finish() arguments were {why}; nothing was recorded"]}
                         result_text = "Findings recorded."
                     else:
-                        finish_args = raw_findings
-                        result_text = "Findings recorded."
+                        problems = _finish_problems(raw_findings, commit)
+                        if problems and can_retry:
+                            finish_retries += 1
+                            result_text = _rejection(problems, forced)
+                        else:
+                            finish_args = raw_findings
+                            result_text = "Findings recorded."
                 elif broken:
                     brief = brief or cut
                     result_text = (

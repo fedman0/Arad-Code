@@ -197,6 +197,8 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
 
 **Important**: hypothesis_index 0 = your FIRST hypothesis, 1 = your SECOND hypothesis, etc.
 Every evidence item must have hypothesis_index. Do not omit any field listed above.
+Evidence lives only in the top-level `evidence` array; a hypothesis has no field for it.
+Every hypothesis needs at least one evidence item, or finish() is sent back to you to fix.
 
 """
 
@@ -207,6 +209,11 @@ The engine gates findings. One missing field and a real vulnerability is
 silently dropped. Before calling finish(), check each item below.
 
 ## Every evidence item
+- Evidence lives only in the top-level `evidence` array of finish(); a hypothesis
+  has no field of its own for it. Every hypothesis with confidence above 3 needs
+  at least one evidence item there, or finish() is sent back to you with the
+  list of what is missing. A hypothesis you cannot cite may stay as a lead at
+  confidence 3 or less, with the gap stated in `uncertainty`.
 - `hypothesis_index`: REQUIRED. 0-based index into your `hypotheses` array.
   Evidence without it is discarded and the hypothesis it belonged to is left
   with no support, so it cannot be reported.
