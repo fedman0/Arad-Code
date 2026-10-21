@@ -112,6 +112,12 @@ def main() -> int:
         env[sb.IMAGE_ENV] = os.environ[sb.IMAGE_ENV]
     cli = [sys.executable, str(ROOT / "arad.py"), "--headless"]
 
+    if not env.get(sb.IMAGE_ENV):
+        r = subprocess.run([*cli, "sandbox", "build"], env=env, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=3600, cwd=base)
+        print(r.stdout[-2000:], r.stderr[-2000:], sep="\n")
+        check("sandbox image builds", r.returncode == 0, str(r.returncode))
+
     r = subprocess.run([*cli, "init", str(repo)], env=env, capture_output=True, text=True,
                        stdin=subprocess.DEVNULL, timeout=900, cwd=base)
     print(r.stdout[-2000:], r.stderr[-2000:], sep="\n")
