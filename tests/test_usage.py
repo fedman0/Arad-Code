@@ -232,7 +232,7 @@ def test_skill_run_persists_usage_transcript_and_model(tmp_path):
     finding = {"hypotheses": [{
         "actor": "anonymous user", "capability": "send a query", "entry_point": "app/views.py:search",
         "security_boundary": "HTTP", "violated_invariant": "query echoed back unescaped",
-        "observable_impact": "reflected xss", "severity": 6, "confidence": 4, "exposure": "internet",
+        "observable_impact": "reflected xss", "severity": 6, "confidence": 3, "exposure": "internet",
         "model": "spoofed-model"}], "coverage": [], "open_questions": []}
 
     def reply(body):
