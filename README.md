@@ -485,7 +485,7 @@ Costs come from the `pricing` table in your config. On OpenRouter the provider r
 
 **Replies cut off at the token limit.** The transcript records the `finish_reason` of every turn. When a reply ends with `length`, the engine tells the model what happened and gives the next call up to four times `max_tokens` (at most 65536) with low reasoning effort, so a long `finish()` can get through. The closing turns of a skill, where the model may only call `finish()`, always get that room. If the model returns nothing twice in a row during those turns, the skill ends right away with a note in its open questions instead of spending the remaining turns. A model that refuses the bigger limit stays at `max_tokens` for the rest of the run.
 
-**Models that refuse a parameter.** Some newer models don't accept a custom `temperature`, or want `max_completion_tokens` instead of `max_tokens`. When the endpoint rejects one of those, the client retries without it (or under the other name) and remembers that for the rest of the run, so the same config works across models.
+**Models that refuse a parameter.** Some newer models don't accept a custom `temperature`, or want `max_completion_tokens` instead of `max_tokens`. When the endpoint rejects one of those, the client retries without it (or under the other name) and remembers that for the rest of the run, so the same config works across models. Some reasoning models, DeepSeek's thinking mode among them, also refuse to be told which tool to call. The closing turns of a skill ask for `finish()` by name, so when that is refused the client asks for any tool call instead, then leaves the choice to the model, with `finish()` still the only tool offered.
 
 ## Project profile (.llmsast.yaml)
 

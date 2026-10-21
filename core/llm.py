@@ -78,6 +78,18 @@ def _mentions_output_limit(exc: Exception) -> bool:
     return param in ("max_tokens", "max_completion_tokens") or any(w in text for w in _OUTPUT_LIMIT_WORDS)
 
 
+def _rejects_tool_choice(exc: Exception) -> bool:
+    param = str(getattr(exc, "param", "") or "").lower()
+    text = f"{getattr(exc, 'message', '')} {exc}".lower()
+    return param == "tool_choice" or "tool_choice" in text or "tool choice" in text
+
+
+def _choice_rank(choice: Any) -> int:
+    if isinstance(choice, dict):
+        return 0
+    return 1 if choice == "required" else 2
+
+
 class LLMClient:
     def __init__(self, cfg: Config, model: Optional[str] = None,
                  meter: Optional[UsageMeter] = None):
@@ -95,6 +107,13 @@ class LLMClient:
         self._token_param = "max_completion_tokens" if _is_openai(cfg.api_base) else "max_tokens"
         self._dropped: set[str] = set()
         self._room_refused = False
+        self._choice_floor = 0
+
+    def _tool_choice(self, choice: Any) -> Any:
+        rank = _choice_rank(choice)
+        if rank >= 2 or self._choice_floor <= rank:
+            return choice
+        return "required" if self._choice_floor == 1 else "auto"
 
     def _params(self, stream: bool, max_tokens: Optional[int] = None,
                 reasoning_effort: Optional[str] = None) -> dict:
@@ -146,13 +165,21 @@ class LLMClient:
         if self.meter is not None:
             self.meter.check()
         started = time.monotonic()
-        for attempt in range(6):
+        for attempt in range(8):
             params = {**self._params(stream, max_tokens, reasoning_effort), **kwargs}
+            if "tool_choice" in params:
+                params["tool_choice"] = self._tool_choice(params["tool_choice"])
             try:
                 return await self._client.chat.completions.create(**params), started
             except (openai.BadRequestError, openai.UnprocessableEntityError) as exc:
-                if attempt == 5:
+                if attempt == 7:
                     raise
+                sent = params.get("tool_choice")
+                if sent is not None and _choice_rank(sent) < 2 and _rejects_tool_choice(exc):
+                    self._choice_floor = _choice_rank(sent) + 1
+                    _log.info("model %s refused tool_choice=%r; using %r for the rest of the run",
+                              self.model, sent, self._tool_choice(sent))
+                    continue
                 if self._adapt(exc):
                     continue
                 if max_tokens and not self._room_refused and _mentions_output_limit(exc):

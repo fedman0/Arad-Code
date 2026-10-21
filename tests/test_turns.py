@@ -163,3 +163,65 @@ def test_legacy_fakes_without_finish_reason_still_drive_a_skill(tmp_path):
     runner._llm = Legacy()
     res = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp))
     assert res.hypotheses == [] and not res.open_questions
+
+
+DEEPSEEK_REFUSAL = "Thinking mode does not support this tool_choice"
+
+
+def refusing(refused, reply):
+    seen = []
+
+    def api(body):
+        seen.append(body)
+        choice = body.get("tool_choice")
+        kind = "named" if isinstance(choice, dict) else choice
+        if kind in refused:
+            return bad_request(DEEPSEEK_REFUSAL, None, "invalid_request_error")
+        return reply(body)
+    return api, seen
+
+
+def test_client_steps_down_from_a_refused_tool_choice_and_remembers():
+    ok = lambda body: completion({"role": "assistant", "content": "ok"})
+    api, seen = refusing({"named", "required"}, ok)
+    client = make_client(FakeAPI(reply=api, strict=False))
+    named = {"type": "function", "function": {"name": "finish"}}
+    r = asyncio.run(client.complete_turn([{"role": "user", "content": "hi"}], [], tool_choice=named))
+    assert r.content == "ok"
+    assert [b["tool_choice"] for b in seen] == [named, "required", "auto"]
+    asyncio.run(client.complete_turn([{"role": "user", "content": "hi"}], [], tool_choice=named))
+    assert seen[-1]["tool_choice"] == "auto" and len(seen) == 4
+
+    api, seen = refusing({"named"}, ok)
+    client = make_client(FakeAPI(reply=api, strict=False))
+    asyncio.run(client.complete_turn([{"role": "user", "content": "hi"}], [], tool_choice=named))
+    assert [b["tool_choice"] for b in seen] == [named, "required"]
+
+
+def test_unrelated_bad_requests_still_fail():
+    def api(body):
+        return bad_request("messages: invalid role", "messages", "invalid_request_error")
+
+    client = make_client(FakeAPI(reply=api, strict=False))
+    try:
+        asyncio.run(client.complete_turn([{"role": "user", "content": "hi"}], [],
+                                         tool_choice={"type": "function", "function": {"name": "f"}}))
+    except Exception as exc:
+        assert "invalid role" in str(exc)
+    else:
+        raise AssertionError("expected the request to fail")
+
+
+def test_a_skill_finishes_on_a_model_that_refuses_named_tool_choice(tmp_path):
+    finish_call = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "f1", "type": "function",
+         "function": {"name": "finish", "arguments": json.dumps(EMPTY)}}]}
+    api, seen = refusing({"named"}, lambda body: completion(finish_call))
+    runner, _ = make_runner(tmp_path)
+    rp = str(make_repo(tmp_path / "repo"))
+    runner._llm = make_client(FakeAPI(reply=api, strict=False))
+    res = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp, max_iterations=1))
+    assert not res.open_questions
+    assert [b["tool_choice"] if not isinstance(b["tool_choice"], dict) else "named" for b in seen] \
+        == ["named", "required"]
+    assert [t["function"]["name"] for t in seen[-1]["tools"]] == ["finish"]
