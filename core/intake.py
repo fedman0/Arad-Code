@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Optional
-from .models import Hypothesis
+from .models import Evidence, Hypothesis
 
 
 _ENGINE_OWNED_HYPOTHESIS_FIELDS = (
@@ -117,6 +117,15 @@ def _evidence_index(item: dict, count: int) -> Optional[int]:
     return idx
 
 
+def _prepare_model_evidence(data: dict) -> dict:
+    out = dict(data)
+    for key in ("id", "stale", "hypothesis_index", "hypothesis_id"):
+        out.pop(key, None)
+    if not isinstance(out.get("snippet"), str):
+        out["snippet"] = ""
+    return out
+
+
 def _finish_problems(findings: dict, commit: str = "") -> list[str]:
     problems: list[str] = []
     hyps = _as_list(findings.get("hypotheses"))
@@ -145,6 +154,12 @@ def _finish_problems(findings: dict, commit: str = "") -> list[str]:
         missing = [k for k in _EVIDENCE_LOCATION_FIELDS if e.get(k) in (None, "")]
         if missing:
             problems.append(f"evidence[{j}] is missing {', '.join(missing)}")
+            continue
+        try:
+            Evidence.model_validate({**_prepare_model_evidence(e), "hypothesis_id": "check",
+                                     "commit": commit})
+        except Exception as ex:
+            problems.append(f"evidence[{j}] is invalid: {_describe_validation_error(ex)}")
             continue
         supported.add(idx)
     for i, obj in valid.items():

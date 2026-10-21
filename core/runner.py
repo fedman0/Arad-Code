@@ -25,7 +25,7 @@ from .evidence_gate import (
 )
 from .intake import (
     _as_list, _without_id, _prepare_model_hypothesis, _validate_model_hypothesis,
-    _apply_model_demotion, _finish_problems,
+    _apply_model_demotion, _finish_problems, _prepare_model_evidence,
 )
 from .tool_exec import ToolExecutor
 from .reconcile import EvidenceReconciler
@@ -565,6 +565,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                         f"evidence[{i}]: hypothesis_index {hyp_idx} refers to a hypothesis "
                         "that failed validation")
                     continue
+                e_data = _prepare_model_evidence(e_data)
                 e_data["hypothesis_id"] = hypothesis_by_index[hyp_idx].id
                 e_data["commit"] = commit
                 evidence_items.append(Evidence.model_validate(e_data))
@@ -1225,7 +1226,7 @@ When done, call finish() with:
             e_raw = dict(e_raw)
             e_raw.pop("id", None)
             e_raw.pop("stale", None)
-            e_raw.pop("hypothesis_index", None)
+            e_raw = _prepare_model_evidence(e_raw)
             e_raw["hypothesis_id"] = h.id
             e_raw["commit"] = commit
             evidence.append(Evidence.model_validate(e_raw))

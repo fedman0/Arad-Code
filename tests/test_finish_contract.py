@@ -91,3 +91,22 @@ def test_forced_finish_rejection_says_only_finish_is_left(tmp_path):
 def test_empty_findings_are_never_bounced(tmp_path):
     res, llm = run(tmp_path, [[finish([])]])
     assert len(llm.calls) == 1 and not res.hypotheses and not res.open_questions
+
+
+def test_evidence_without_a_snippet_is_kept_and_filled_from_the_file(tmp_path):
+    item = ev(0)
+    del item["snippet"]
+    res, llm = run(tmp_path, [[tc(1, "search_graph", {"name_pattern": "search"})],
+                              [finish([hyp()], [item])]])
+    assert len(llm.calls) == 2 and len(res.evidence) == 1
+    assert res.evidence[0].snippet.strip().startswith("cursor.execute")
+    assert res.hypotheses[0].status == "evidence_supported"
+    assert not any("evidence[0] invalid" in q for q in res.open_questions)
+
+
+def test_evidence_with_a_bad_field_is_sent_back_naming_it(tmp_path):
+    res, llm = run(tmp_path, [[finish([hyp()], [ev(0, kind="screenshot")])],
+                              [tc(2, "finish", FINDING)]])
+    reply = tool_replies(llm)["call_101"]
+    assert "evidence[0] is invalid: kind:" in reply
+    assert len(llm.calls) == 2 and len(res.evidence) == 1
