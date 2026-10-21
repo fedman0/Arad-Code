@@ -96,6 +96,7 @@ This is a pattern-detection sweep. Your goal is to find as many vulnerability pa
 - Cite: file path + line number + the exact code you observed.
 - Set confidence 7 unless the skill's Submit line gives a lower value (structural evidence caps confidence at 7).
 - You do NOT need to trace full call chains, read ORM models, or read DB schemas for this skill.
+- When it is not obvious that a route reaches the sink, one trace_path(function_name=<sink function>, direction="inbound") call usually settles it; cite the chain it returns.
 - Submit as soon as you confirm a pattern. Do not wait until you have "enough" evidence.
 
 ## Call finish() when you have worked through all checks or used about 20 turns."""
@@ -155,7 +156,7 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
 | snippet | The exact lines containing the pattern (>= 12 characters) |
 | anchor_text | A distinctive substring (>= 12 characters) copied verbatim from those lines; the engine re-reads the file to check it |
 | hypothesis_index | **0-based index**: 0 = first hypothesis in your list, 1 = second, etc. |
-| analysis_quality | {"method": "structural", "confidence": "high"} when you used search_graph / get_code_snippet / parse_file_structure / find_all_usages; {"method": "textual"} when you only used grep / read_file |
+| analysis_quality | {"method": "structural", "confidence": "high"} when you read the cited lines (read_file over a range that contains them, or get_code_snippet) or used search_graph / parse_file_structure / find_all_usages; {"method": "textual"} when the citation is a grep hit you did not open |
 
 ## Example (one hypothesis + one evidence):
 
@@ -221,12 +222,17 @@ silently dropped. Before calling finish(), check each item below.
   verbatim from the cited lines. The engine re-reads the file and checks it.
   A short or generic anchor counts as no anchor and lowers confidence.
 - `analysis_quality.method`: report honestly how you established this.
-  `semantic` = followed real call edges via trace_path/get_code_snippet.
-  `structural` = parsed the file via parse_file_structure/find_all_usages.
-  `textual` = grep or read_file only.  `inferred` = reasoning, not observation.
+  `semantic` = a trace_path call in this skill followed the call chain through
+  the cited file or function.
+  `structural` = you read the cited lines themselves (read_file over a range
+  that contains them, or get_code_snippet) or parsed the file
+  (parse_file_structure, find_all_usages, search_graph).
+  `textual` = a grep hit you did not open.  `inferred` = reasoning, not observation.
+  The engine checks each claim against the calls you made: structural from
+  read_file needs the cited lines inside a range you read and an anchor_text
+  found there, and semantic needs a matching trace_path call.
   This caps the finding's confidence (textual 4, inferred 3, structural 7,
-  semantic 10), so grep-only evidence cannot produce a high-confidence finding.
-  Prefer parse_file_structure and find_all_usages over grep where you can.
+  semantic 10), so an unopened grep hit cannot produce a high-confidence finding.
 
 ## Every hypothesis
 - `cwe`: the CWE id of the bug class (e.g. "CWE-639"). It names the SARIF rule and
@@ -241,6 +247,11 @@ silently dropped. Before calling finish(), check each item below.
   evidence in `evidence_ref`. Mark `unresolved` when you could not confirm it.
   An unresolved required obligation blocks the finding — that is intended:
   report it as an open question rather than guessing.
+- A `reachability` obligation is settled best by
+  trace_path(function_name=<the sink function>, direction="inbound"): a chain
+  of callers that ends at a route or handler proves the actor can get there.
+  Cite that chain as evidence with method `semantic`. Use the short function
+  name or the qualified name that search_graph returns.
 - `exposure`: who can actually reach the entry point. `unreachable` withdraws
   the finding, so use it when you prove no actor can get there.
 

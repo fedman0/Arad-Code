@@ -26,7 +26,10 @@ TOOLS = [
             "description": (
                 "Trace call chains from a function. mode='calls' follows call edges, "
                 "mode='data_flow' follows values, mode='cross_service' follows HTTP/async routes. "
-                "direction='inbound' returns callers, 'outbound' returns callees, 'both' returns both."
+                "direction='inbound' returns callers, 'outbound' returns callees, 'both' returns both. "
+                "function_name is a short name or a qualified name from search_graph. "
+                "An inbound chain from a sink to a route handler is the strongest proof that "
+                "the sink is reachable, and evidence it supports counts as semantic."
             ),
             "parameters": {
                 "type": "object",
