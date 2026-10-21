@@ -12,7 +12,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Arad Code scanning OWASP Juice Shop, with the workflow tree on the right and two findings opened in detail" width="900">
+  <img src="docs/screenshot.png" alt="Arad Code scanning OWASP Juice Shop: each finished skill with its findings, time and tokens, and the findings tree on the right" width="900">
 </p>
 
 Arad Code drives an LLM through a set of audit "skills" (plain markdown playbooks) against a repository. The model gets real tools: a code graph, ripgrep, an AST parser, semgrep, a read-only shell. It maps the project first (entry points, middleware, identities, ownership), then traces data and hunts for concrete vulnerability patterns.
