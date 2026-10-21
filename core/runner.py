@@ -22,6 +22,7 @@ from .tool_specs import TOOLS, _PROMPT_TOOL_NAMES
 from .evidence_gate import (
     _synthesize_evidence_from_tools, _gate_hypothesis_status, _build_tool_call_index,
     _cap_method_per_evidence, _apply_quality_caps, _inject_minimum_obligations, _apply_profile,
+    _read_spans, _read_verified,
 )
 from .intake import (
     _as_list, _without_id, _prepare_model_hypothesis, _validate_model_hypothesis,
@@ -577,11 +578,19 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
         tool_index = _build_tool_call_index(messages)
         run_tools = frozenset(name for name, _ in tool_index)
+        spans = _read_spans(tool_index, repo_path)
         for ev in evidence_items:
+            seen = _read_verified(ev, spans, repo_path)
             capped = _cap_method_per_evidence(
                 ev.analysis_quality.method, ev.file_path, ev.description,
-                tool_index, run_tools,
+                tool_index, run_tools, read_verified=seen,
             )
+            if seen and capped == "structural" and _cap_method_per_evidence(
+                    ev.analysis_quality.method, ev.file_path, ev.description,
+                    tool_index, run_tools) != "structural":
+                ev.analysis_quality.limitations.append(
+                    "structural because read_file showed the cited lines and the anchor was found "
+                    "in them; no graph or parser tool was used")
             if capped != ev.analysis_quality.method:
                 ev.analysis_quality.limitations.append(
                     f"method downgraded {ev.analysis_quality.method}→{capped}: "

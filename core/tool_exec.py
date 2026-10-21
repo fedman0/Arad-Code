@@ -11,11 +11,9 @@ from .code_analysis import run_semgrep, list_dir, run_shell
 from .tool_specs import _THREADED_TOOLS
 from .evidence_gate import (
     _gate_hypothesis_status, _apply_quality_caps, _inject_minimum_obligations,
+    _READ_FILE_MAX_LINES, _READ_HEAD_LINES, _READ_FROM_LINES,
 )
 from .intake import _EXPOSURE_VALUES
-
-
-_READ_FILE_MAX_LINES = 800
 
 _GRAPH_TOOLS = frozenset({
     "search_graph", "trace_path", "get_code_snippet", "search_code", "get_architecture",
@@ -62,14 +60,14 @@ class ToolExecutor:
                 start_line = 1
             if start_line is not None:
                 s = max(0, start_line - 1)
-                e = end_line if end_line is not None else s + 150
+                e = end_line if end_line is not None else s + _READ_FROM_LINES
                 if s >= total:
                     return f"start_line {start_line} is past the end of the file ({total} lines)"
                 if e <= s:
                     return f"Empty range: end_line must be >= start_line (file has {total} lines)"
                 e = min(e, s + _READ_FILE_MAX_LINES, total)
             else:
-                s, e = 0, min(200, total)
+                s, e = 0, min(_READ_HEAD_LINES, total)
             body = "\n".join(f"{s + i + 1:4}: {l}" for i, l in enumerate(all_lines[s:e]))
             if e < total:
                 body += f"\n[showing lines {s + 1}-{e} of {total}; use start_line/end_line to read more]"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 import json
+from pathlib import Path
+from typing import Optional
 from .models import Hypothesis, Evidence, OpenQuestion, ConflictRecord
 from .profile import ProjectProfile
 
@@ -177,6 +179,52 @@ _QUALITY_CONF_CAP = {"textual": 4, "inferred": 3, "structural": 7, "semantic": 1
 
 _MIN_ANCHOR_LEN = 12
 
+_READ_FILE_MAX_LINES = 800
+_READ_HEAD_LINES = 200
+_READ_FROM_LINES = 150
+
+
+def _read_window(start_line: Optional[int], end_line: Optional[int]) -> tuple[int, int]:
+    if start_line is None and end_line is not None:
+        start_line = 1
+    if start_line is None:
+        return 0, _READ_HEAD_LINES
+    s = max(0, start_line - 1)
+    e = end_line if end_line is not None else s + _READ_FROM_LINES
+    return s, min(e, s + _READ_FILE_MAX_LINES)
+
+
+def _read_spans(tool_index: "list[tuple[str, dict]]", repo_path: str) -> "list[tuple[Path, int, int]]":
+    repo = Path(repo_path).resolve()
+    spans: list[tuple[Path, int, int]] = []
+    for name, args in tool_index:
+        if name != "read_file" or not isinstance(args.get("file_path"), str):
+            continue
+        try:
+            start = args.get("start_line")
+            end = args.get("end_line")
+            start = int(start) if start is not None else None
+            end = int(end) if end is not None else None
+            target = (repo / args["file_path"]).resolve()
+            target.relative_to(repo)
+        except (TypeError, ValueError, OSError):
+            continue
+        s, e = _read_window(start, end)
+        if e > s:
+            spans.append((target, s + 1, e))
+    return spans
+
+
+def _read_verified(ev: "Evidence", spans: "list[tuple[Path, int, int]]", repo_path: str) -> bool:
+    if ev.stale or len(" ".join((ev.anchor_text or "").split())) < _MIN_ANCHOR_LEN:
+        return False
+    try:
+        target = (Path(repo_path).resolve() / ev.file_path).resolve()
+    except (OSError, ValueError):
+        return False
+    return any(path == target and lo <= ev.line_start and ev.line_end <= hi
+               for path, lo, hi in spans)
+
 
 _SEMANTIC_TOOLS = frozenset({
     "trace_path", "query_graph",
@@ -282,13 +330,16 @@ def _cap_method_per_evidence(
     ev_desc: str,
     tool_index: list[tuple[str, dict]],
     run_tools: frozenset[str],
+    read_verified: bool = False,
 ) -> str:
     """Per-evidence method cap.
 
     semantic  — per-evidence: a _SEMANTIC_TOOLS call whose args mention
                 this evidence's file or description must exist.
     structural — per-run: any structural tool must have been called at all
-                (a file read covers all evidence from that file).
+                (a file read covers all evidence from that file), or
+                per-evidence: read_file showed the cited lines and the
+                anchor was found in them (read_verified).
     textual   — always allowed.
     inferred  — always allowed.
     """
@@ -301,7 +352,7 @@ def _cap_method_per_evidence(
         ):
             method = "structural"
     if method == "structural":
-        if not (run_tools & (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS)):
+        if not (read_verified or run_tools & (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS)):
             method = "textual"
     return method
 
