@@ -300,7 +300,7 @@ class EvidenceReconciler:
                         h.status = "initial"
 
             conflicts = self._db.get_conflicts_for_hypothesis(h.id, repo_path)
-            _apply_quality_caps(h, valid_ev)
+            _apply_quality_caps(h, valid_ev, missing_cap=None)
             _inject_minimum_obligations(h)
             # Fix 7: profile suppression must not override a human confirmation
             if h.status != "human_confirmed":

@@ -306,9 +306,12 @@ def _cap_method_per_evidence(
     return method
 
 
-def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]") -> None:
+def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]",
+                        missing_cap: "int | None" = _QUALITY_CONF_CAP["inferred"]) -> None:
     valid = [e for e in evidence if not e.stale]
     if not valid:
+        if missing_cap is not None and h.confidence > missing_cap:
+            h.confidence = missing_cap
         return
     worst_cap = min(_QUALITY_CONF_CAP.get(e.analysis_quality.method, 4) for e in valid)
     if h.confidence > worst_cap:
