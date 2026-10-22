@@ -22,7 +22,7 @@ from textual.widgets import Footer, Header, Input, RichLog, Static, Tree
 from .rtl import has_rtl as _has_rtl, render as _rtl_render, rtl_markup as _rtlm
 
 from .version import VERSION
-from .usage import Usage, format_cost, format_tokens
+from .usage import BudgetExceeded, Usage, format_cost, format_tokens
 
 def _model_short(model: str, limit: int = 18) -> str:
     name = (model or "").rsplit("/", 1)[-1]
@@ -1430,13 +1430,16 @@ class AradCodeApp(App):
         self._wf_model.add_phase("run", f"Skill Scan · {phase}" if phase else "Skill Scan")
 
         if resume:
-            from .cache import completed_skills
+            from .cache import completed_skills, started_skills
             commit = runner._get_commit(repo)
-            done = completed_skills(repo, commit)
-            if done:
-                self._log(f"[dim]Resuming — {len(done)} skill(s) already done[/dim]")
+            done = {s for s in completed_skills(repo, commit) if "#" not in s}
+            started = started_skills(repo, commit)
+            if started:
+                partly = len(started - done)
+                more = f", {partly} partly done" if partly else ""
+                self._log(f"[dim]Resuming — {len(done)} skill(s) already done{more}[/dim]")
                 try:
-                    existing = [h for h in db.list_hypotheses(repo) if h.skill_source in done]
+                    existing = [h for h in db.list_hypotheses(repo) if h.skill_source in started]
                     if existing:
                         by_skill: dict[str, list] = defaultdict(list)
                         for h in existing:
@@ -1565,7 +1568,23 @@ class AradCodeApp(App):
         self._rebuild_panel()
 
         try:
-            result = await runner.run_skill(skill_name, repo, extra)
+            try:
+                result = await runner.run_skill(skill_name, repo, extra)
+            except BudgetExceeded as exc:
+                saved = getattr(exc, "saved_batches", 0)
+                if saved:
+                    partial = exc.partial
+                    self._wf_model.finish_agent(skill_name, state="stopped")
+                    if partial.hypotheses:
+                        self._wf_model.add_findings(skill_name, partial.hypotheses)
+                        self._add_finding(len(partial.hypotheses))
+                    self._log(f"[yellow]{saved} finished batch(es) of this skill were saved "
+                              f"({len(partial.hypotheses)} finding(s)); the rest did not run.[/yellow]")
+                    try:
+                        runner.reconcile(repo)
+                    except Exception:
+                        pass
+                raise
             h_count = len(result.hypotheses)
             conf = sum(1 for h in result.hypotheses if h.status in ("evidence_supported", "reproduced"))
             node.model = getattr(result, "model", "") or node.model

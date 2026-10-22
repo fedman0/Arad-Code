@@ -270,6 +270,7 @@ class Evidence(BaseModel):
     analysis_quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
     field_path: Optional[str] = None
     anchor_text: Optional[str] = None
+    merged_by: Optional[str] = None
 
 
 class NegativeEvidence(BaseModel):

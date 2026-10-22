@@ -55,7 +55,7 @@ def _as_order(value, source: str) -> int:
         raise SkillFormatError(f"{source}: order must be a number")
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise SkillFormatError(f"{source}: order must be a number") from None
 
 
@@ -79,7 +79,7 @@ def _as_turns(value, source: str) -> Optional[int]:
         raise SkillFormatError(f"{source}: max_turns must be a number")
     try:
         turns = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise SkillFormatError(f"{source}: max_turns must be a number") from None
     if not MIN_TURNS <= turns <= MAX_TURNS:
         raise SkillFormatError(f"{source}: max_turns must be between {MIN_TURNS} and {MAX_TURNS}")
@@ -102,7 +102,7 @@ def _as_batch(value, source: str) -> int:
         raise SkillFormatError(f"{source}: batch must be a number")
     try:
         size = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise SkillFormatError(f"{source}: batch must be a number") from None
     if not 1 <= size <= MAX_BATCH:
         raise SkillFormatError(f"{source}: batch must be between 1 and {MAX_BATCH}")

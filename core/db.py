@@ -243,6 +243,7 @@ _MIGRATIONS = (
     _migrate_usage,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
+UNDECIDED_BLOCKER = "reached no decision on it in two attempts"
 
 
 class EvidenceStore:
@@ -384,14 +385,19 @@ class EvidenceStore:
         "not_applicable": 1, "unseen": 0, "excluded": 0,
     }
 
+    @staticmethod
+    def is_undecided_flag(status: Optional[str], blocker: Optional[str]) -> bool:
+        return status == "needs_follow_up" and (blocker or "").endswith(UNDECIDED_BLOCKER)
+
     def upsert_coverage(self, repo_path: str, item: CoverageItem, force: bool = False):
         if not force:
             row = self.conn.execute(
-                "SELECT status FROM coverage WHERE repo_path=? AND kind=? AND name=?",
+                "SELECT status, blocker FROM coverage WHERE repo_path=? AND kind=? AND name=?",
                 (repo_path, item.kind, item.name),
             ).fetchone()
             if row:
-                old_rank = self._COV_RANK.get(row["status"], 0)
+                old_rank = (0 if self.is_undecided_flag(row["status"], row["blocker"])
+                            else self._COV_RANK.get(row["status"], 0))
                 new_rank = self._COV_RANK.get(item.status, 0)
                 if new_rank <= old_rank:
                     return

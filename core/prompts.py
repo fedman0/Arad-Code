@@ -242,7 +242,10 @@ silently dropped. Before calling finish(), check each item below.
   be reported again as a new hypothesis. When you have new evidence for it, add
   an entry with only `existing_id` set to its id (fill the required fields
   briefly) and point your evidence items at that entry with `hypothesis_index`;
-  the engine attaches them to the recorded finding and checks it again.
+  the engine attaches them to the recorded finding and checks it again. A stronger
+  `reachability`, `input_control` or `guard_coverage` and any `proof_obligations`
+  you resolved in that entry are applied to the recorded finding too, as long as
+  at least one of your evidence items for it is kept.
 - `cwe`: the CWE id of the bug class (e.g. "CWE-639"). It names the SARIF rule and
   lets the engine match findings against proof-of-absence records.
 - `entry_point`: include the file and the handler function, e.g.

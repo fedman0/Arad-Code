@@ -385,6 +385,29 @@ async def t_resume_count(c):
     c.check("B17 app exited cleanly", app._exception is None, repr(app._exception))
 
 
+async def t_resume_partial_fanout(c):
+    from core import cache
+    repo = str(c.repo.resolve())
+    db = make_db("fanout")
+    db.save_hypothesis(repo, make_hyp(skill_source="review-test", entry_point="GET /rest/basket/:id"))
+    db.save_hypothesis(repo, make_hyp(skill_source="p9-old", entry_point="GET /c"))
+    cache.clear_run_state(repo)
+    cache.record_fanout(repo, "abc123def456", "review-test", False, ["GET /rest/basket/:id"], [])
+    runner = FakeRunner(db, findings={})
+    runner.done = set()
+    app = AradCodeApp()
+    install(app, runner, db)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await type_cmd(pilot, f"run '{c.repo}' --resume")
+        await wait_idle(pilot)
+        text = log_text(app)
+        c.check("partly done fan-out is not counted as a finished skill",
+                "0 skill(s) already done, 1 partly done" in text, text[-600:])
+        c.check("findings of finished batches are loaded", app._finding_count == 1, app._finding_count)
+    cache.clear_run_state(repo)
+    c.check("fan-out resume app exited cleanly", app._exception is None, repr(app._exception))
+
+
 async def t_restart_preloaded(c):
     from core import cache
     repo = str(c.repo.resolve())
@@ -614,7 +637,7 @@ async def t_models_usage_and_skips(c):
 
 
 CASES = [t_markup_crashes, t_status_findings, t_bindings, t_query_status_and_tasks, t_error_marks_failed,
-         t_cli, t_real_cli, t_workflow, t_repo_checks_and_parse, t_resume_count, t_restart_preloaded,
+         t_cli, t_real_cli, t_workflow, t_repo_checks_and_parse, t_resume_count, t_resume_partial_fanout, t_restart_preloaded,
          t_queue_and_done, t_headless, t_scroll_lock, t_tree_state, t_rtl, t_restart_and_ctrl_c,
          t_models_usage_and_skips]
 

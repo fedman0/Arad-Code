@@ -233,7 +233,7 @@ class CodebaseMemoryClient:
         self,
         function_name: str,
         mode: str = "calls",
-        depth: int = 5,
+        depth: int = 3,
         project: Optional[str] = None,
         direction: Optional[str] = None,
         **extra: Any,
@@ -272,7 +272,8 @@ class CodebaseMemoryClient:
         return await self._call_raw_text("get_architecture", args)
 
     async def query_graph(self, query: str, project: Optional[str] = None,
-                          max_rows: Optional[int] = None, fmt: Optional[str] = None) -> Any:
+                          max_rows: Optional[int] = None, fmt: Optional[str] = None,
+                          **extra: Any) -> Any:
         args: dict = {"query": query}
         if project:
             args["project"] = project
@@ -280,11 +281,12 @@ class CodebaseMemoryClient:
             args["max_rows"] = max_rows
         if fmt:
             args["format"] = fmt
+        args.update(_present(extra))
         return await self._call("query_graph", args)
 
     async def query_graph_text(self, query: str, project: Optional[str] = None,
-                               max_rows: Optional[int] = None) -> str:
-        result = await self.query_graph(query, project=project, max_rows=max_rows)
+                               max_rows: Optional[int] = None, **extra: Any) -> str:
+        result = await self.query_graph(query, project=project, max_rows=max_rows, **extra)
         if result is None:
             return ""
         return result if isinstance(result, str) else json.dumps(result, indent=2)

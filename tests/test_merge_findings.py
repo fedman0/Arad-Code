@@ -78,3 +78,80 @@ def test_a_human_decision_survives_a_merge(tmp_path):
     runner._llm = ScriptedLLM([[finish([dict(hyp(), existing_id=h.id)], [ev(0)])]])
     asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp))
     assert db.get_hypothesis(rp, h.id).status == "human_confirmed"
+
+
+def merge_scan(runner, rp, h, entry=None, evidence=None, tools=None):
+    entry = dict(hyp(), existing_id=h.id, **(entry or {}))
+    turns = [[tc(1, "read_file", {"file_path": "app/views.py"})]] if tools is None else tools
+    runner._llm = ScriptedLLM(turns + [[finish([entry], evidence or [ev(0)])]])
+    return asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp))
+
+
+def test_new_evidence_reopens_a_model_rejection_or_block(tmp_path):
+    for status in ("rejected", "blocked"):
+        runner, db, rp = setup(tmp_path / status)
+        h = first_scan(runner, rp)
+        h.status = status
+        h.rejected_by = "model" if status == "rejected" else None
+        h.rejection_reason = "model said no"
+        h.rejected_at_commit = runner._get_commit(rp)
+        db.save_hypothesis(rp, h)
+        res = merge_scan(runner, rp, h)
+        assert res.merged == [h.id]
+        assert db.get_hypothesis(rp, h.id).status == "evidence_supported"
+        runner.reconcile(rp)
+        after = db.get_hypothesis(rp, h.id)
+        assert after.status == "evidence_supported" and after.priority > 0
+        assert any("reopened by new evidence" in u for u in after.uncertainty)
+
+
+def test_a_human_rejection_survives_a_merge(tmp_path):
+    runner, db, rp = setup(tmp_path)
+    h = first_scan(runner, rp)
+    h.status, h.rejected_by = "rejected", "human"
+    db.save_hypothesis(rp, h)
+    merge_scan(runner, rp, h)
+    assert db.get_hypothesis(rp, h.id).status == "rejected"
+
+
+def test_a_merge_carries_resolved_claims_and_obligations(tmp_path):
+    runner, db, rp = setup(tmp_path)
+    runner._llm = ScriptedLLM([[tc(1, "read_file", {"file_path": "app/views.py"})],
+                               [finish([hyp(reachability="probable")], [ev(0)])]])
+    h = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp)).hypotheses[0]
+    assert h.status == "initial"
+    assert any(o.claim_type == "reachability" and o.status == "unresolved" for o in h.proof_obligations)
+    merge_scan(runner, rp, h, entry={"reachability": "proven", "proof_obligations": [
+        {"question": "Is search reachable from GET /search?", "status": "verified", "claim_type": "reachability"}]})
+    runner.reconcile(rp)
+    after = db.get_hypothesis(rp, h.id)
+    assert after.reachability == "proven" and after.status == "evidence_supported"
+    assert not any(o.status == "unresolved" for o in after.proof_obligations if o.required_for_finding)
+
+
+def test_claims_without_kept_evidence_change_nothing(tmp_path):
+    runner, db, rp = setup(tmp_path)
+    h = first_scan(runner, rp)
+    before = len(db.get_all_evidence_for_hypothesis(h.id))
+    runner._llm = ScriptedLLM([[finish([dict(hyp(), existing_id=h.id, reachability="proven")])]])
+    res = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp, max_iterations=1))
+    assert res.merged == []
+    assert len(db.get_all_evidence_for_hypothesis(h.id)) == before
+    bad = merge_scan(runner, rp, h, evidence=[ev(5)], tools=[])
+    assert bad.merged == []
+
+
+def test_weaker_merged_evidence_does_not_lower_the_confidence_cap(tmp_path):
+    runner, db, rp = setup(tmp_path)
+    runner._llm = ScriptedLLM([[tc(1, "trace_path", {"function_name": "app/views.py:search"})],
+                               [finish([hyp(confidence=8)], [ev(0, analysis_quality={"method": "semantic"})])]])
+    h = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp)).hypotheses[0]
+    runner.reconcile(rp)
+    assert db.get_hypothesis(rp, h.id).confidence == 8
+    merge_scan(runner, rp, h, evidence=[ev(0, analysis_quality={"method": "textual"})],
+               tools=[[tc(1, "grep", {"pattern": "cursor.execute"})]])
+    runner.reconcile(rp)
+    after = db.get_hypothesis(rp, h.id)
+    assert after.confidence == 8 and after.status == "evidence_supported"
+    kinds = sorted((e.analysis_quality.method, e.merged_by) for e in db.get_all_evidence_for_hypothesis(h.id))
+    assert kinds == [("semantic", None), ("textual", "hunt-injection-sqli-cmdi")]

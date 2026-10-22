@@ -183,3 +183,60 @@ def completed_skills(repo_path: str, commit: str) -> set[str]:
     if state.get("commit") != commit:
         return set()
     return set(state.get("completed", []))
+
+
+def _state_for(repo_path: str, commit: str) -> dict:
+    state = load_run_state(repo_path)
+    if state.get("commit") != commit:
+        state = {"commit": commit, "completed": []}
+    return state
+
+
+def forget_skills(repo_path: str, commit: str, names) -> None:
+    names = set(names)
+    state = load_run_state(repo_path)
+    if not commit or state.get("commit") != commit:
+        clear_run_state(repo_path)
+        return
+    state["completed"] = [s for s in state.get("completed", []) if s.split("#", 1)[0] not in names]
+    fanout = {k: v for k, v in (state.get("fanout") or {}).items() if k not in names}
+    if fanout:
+        state["fanout"] = fanout
+    else:
+        state.pop("fanout", None)
+    state["updated_at"] = time.time()
+    save_run_state(repo_path, state)
+
+
+def fanout_progress(repo_path: str, commit: str, skill_name: str) -> dict:
+    if not commit:
+        return {}
+    state = load_run_state(repo_path)
+    if state.get("commit") != commit:
+        return {}
+    entry = (state.get("fanout") or {}).get(skill_name)
+    return entry if isinstance(entry, dict) else {}
+
+
+def record_fanout(repo_path: str, commit: str, skill_name: str, retry: bool,
+                  reviewed, undecided) -> None:
+    if not commit:
+        return
+    state = _state_for(repo_path, commit)
+    entry = state.setdefault("fanout", {}).setdefault(skill_name, {})
+    for field, names in (("retried" if retry else "reviewed", reviewed),
+                         ("failed" if retry else "undecided", undecided)):
+        items = entry.setdefault(field, [])
+        items.extend(n for n in names if n not in items)
+    state["updated_at"] = time.time()
+    save_run_state(repo_path, state)
+
+
+def started_skills(repo_path: str, commit: str) -> set[str]:
+    if not commit:
+        return set()
+    state = load_run_state(repo_path)
+    if state.get("commit") != commit:
+        return set()
+    names = {s.split("#", 1)[0] for s in state.get("completed", [])}
+    return names | set((state.get("fanout") or {}).keys())

@@ -119,7 +119,7 @@ def _evidence_index(item: dict, count: int) -> Optional[int]:
 
 def _prepare_model_evidence(data: dict) -> dict:
     out = dict(data)
-    for key in ("id", "stale", "hypothesis_index", "hypothesis_id"):
+    for key in ("id", "stale", "hypothesis_index", "hypothesis_id", "merged_by"):
         out.pop(key, None)
     if not isinstance(out.get("snippet"), str):
         out["snippet"] = ""
@@ -199,3 +199,61 @@ def _apply_model_demotion(h: "Hypothesis", demotion: Optional[str], commit: str)
         h.rejected_at_commit = commit
     if demotion == "rejected":
         h.rejected_by = "model"
+
+
+_CLAIM_ORDER = {
+    "reachability": ("unknown", "probable", "proven"),
+    "input_control": ("unknown", "partial", "full"),
+}
+_FILL_IN_CLAIMS = ("guard_coverage", "guard_analysis", "runtime_assumptions", "impact_basis",
+                   "temporal_validity")
+
+
+def _injected_and_met(h: "Hypothesis", ob) -> bool:
+    if ob.status != "unresolved" or not (ob.reason or "").startswith("engine-injected"):
+        return False
+    if ob.claim_type == "reachability":
+        return h.reachability == "proven"
+    if ob.claim_type == "input_control":
+        return h.input_control in ("full", "partial")
+    if ob.claim_type == "guard":
+        return h.guard_coverage not in ("unknown", "some_paths")
+    return False
+
+
+def _merge_model_claims(h: "Hypothesis", entries: list) -> None:
+    from typing import get_args
+    from .models import ProofObligation
+    for data in entries:
+        if not isinstance(data, dict):
+            continue
+        for field, order in _CLAIM_ORDER.items():
+            new = data.get(field)
+            if new in order and order.index(new) > order.index(getattr(h, field)):
+                setattr(h, field, new)
+        for field in _FILL_IN_CLAIMS:
+            new = data.get(field)
+            default = Hypothesis.model_fields[field].default
+            if (new in get_args(Hypothesis.model_fields[field].annotation) and new != default
+                    and getattr(h, field) == default):
+                setattr(h, field, new)
+        for path in _as_list(data.get("uncovered_paths")):
+            if isinstance(path, str) and path.strip() and path not in h.uncovered_paths:
+                h.uncovered_paths.append(path)
+        for raw in _as_list(data.get("proof_obligations")):
+            try:
+                ob = ProofObligation.model_validate(raw)
+            except Exception:
+                continue
+            question = ob.question.strip().lower()
+            match = next((o for o in h.proof_obligations
+                          if (ob.claim_type != "other" and o.claim_type == ob.claim_type
+                              and o.required_for_finding == ob.required_for_finding)
+                          or o.question.strip().lower() == question), None)
+            if match is None:
+                h.proof_obligations.append(ob)
+            elif match.status == "unresolved" and ob.status != "unresolved":
+                match.status = ob.status
+                match.evidence_ref = ob.evidence_ref or match.evidence_ref
+                match.reason = ob.reason or match.reason
+    h.proof_obligations = [o for o in h.proof_obligations if not _injected_and_met(h, o)]

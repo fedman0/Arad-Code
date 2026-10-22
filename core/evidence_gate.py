@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
 from typing import Optional
 from .models import Hypothesis, Evidence, OpenQuestion, ConflictRecord
@@ -45,6 +46,9 @@ def _synthesize_evidence_from_tools(
 
     for name, args in tool_index:
         if name not in (_SEMANTIC_TOOLS | _STRUCTURAL_TOOLS):
+            continue
+        if name == "query_graph" and not any(t in str(args.get("_result") or "").lower()
+                                             for t in targets):
             continue
         for k, v in args.items():
             if k not in _IDENTITY_ARG_KEYS or not isinstance(v, str) or len(v) < 4:
@@ -277,8 +281,37 @@ def _extract_called_tools(messages: list[dict]) -> frozenset[str]:
     return frozenset(names)
 
 
+_GRAPH_TOOL_NAMES = frozenset({
+    "search_graph", "trace_path", "get_code_snippet", "query_graph", "search_code",
+    "get_architecture",
+})
+_FAILED_PREFIXES = (
+    "Tool error (", "No results", "No rows", "Symbol not found in graph index",
+    "query_graph is read-only", "query is required",
+)
+_CYPHER_STRING = re.compile(r"'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"")
+
+
+def _failed_result(name: str, result: Optional[str]) -> bool:
+    if result is None:
+        return False
+    text = result.strip()
+    if text.startswith("Tool error ("):
+        return True
+    if name not in _GRAPH_TOOL_NAMES:
+        return False
+    return (not text or text.startswith(_FAILED_PREFIXES)
+            or text.startswith(f"{name} is unavailable: the code graph has no index"))
+
+
+def _cypher_literals(query: str) -> str:
+    return " ".join(a or b for a, b in _CYPHER_STRING.findall(query or ""))
+
+
 def _build_tool_call_index(messages: list[dict]) -> list[tuple[str, dict]]:
     """Return list of (bare_tool_name, parsed_args) for every tool call in the run."""
+    results = {m.get("tool_call_id"): m.get("content") for m in messages
+               if m.get("role") == "tool" and isinstance(m.get("content"), str)}
     index: list[tuple[str, dict]] = []
     for msg in messages:
         if msg.get("role") != "assistant":
@@ -291,8 +324,24 @@ def _build_tool_call_index(messages: list[dict]) -> list[tuple[str, dict]]:
                 args = json.loads(tc.get("function", {}).get("arguments", "{}"))
             except Exception:
                 args = {}
+            if not isinstance(args, dict):
+                args = {}
+            result = results.get(tc.get("id"))
+            if _failed_result(name, result):
+                continue
+            if name == "query_graph":
+                args = {"query": _cypher_literals(str(args.get("query") or "")),
+                        "_result": result or ""}
             index.append((name, args))
     return index
+
+
+def _result_names_file(args: dict, ev_file: str) -> bool:
+    text = str(args.get("_result") or "").lower()
+    path = (ev_file or "").strip().lstrip("./").lower()
+    if not text or not path:
+        return False
+    return path in text or (len(Path(path).name) >= 4 and Path(path).name in text)
 
 
 _IDENTITY_ARG_KEYS = frozenset({
@@ -347,6 +396,7 @@ def _cap_method_per_evidence(
         return method
     if method == "semantic":
         if not any(
+            _result_names_file(args, ev_file) if name == "query_graph" else
             name in _SEMANTIC_TOOLS and _args_match_evidence(args, ev_file, ev_desc)
             for name, args in tool_index
         ):
@@ -364,7 +414,8 @@ def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]",
         if missing_cap is not None and h.confidence > missing_cap:
             h.confidence = missing_cap
         return
-    worst_cap = min(_QUALITY_CONF_CAP.get(e.analysis_quality.method, 4) for e in valid)
+    own = [e for e in valid if not e.merged_by] or valid
+    worst_cap = min(_QUALITY_CONF_CAP.get(e.analysis_quality.method, 4) for e in own)
     if h.confidence > worst_cap:
         h.confidence = worst_cap
 

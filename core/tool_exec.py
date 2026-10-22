@@ -24,10 +24,28 @@ _GRAPH_TOOLS = frozenset({
 _SEARCH_GRAPH_ARGS = ("name_pattern", "label", "qn_pattern", "limit", "query", "semantic_query",
                       "file_pattern", "relationship", "include_connected", "offset")
 _TRACE_PATH_ARGS = ("function_name", "mode", "depth", "direction", "parameter_name",
-                    "risk_labels", "limit")
-_SNIPPET_ARGS = ("include_neighbors", "source_mode", "start_line", "max_lines")
+                    "risk_labels", "limit", "cursor")
+_SNIPPET_ARGS = ("include_neighbors", "source_mode", "start_line", "max_lines", "member_offset")
 _TRACE_MODES = frozenset({"calls", "data_flow", "cross_service"})
-_GRAPH_WRITE = re.compile(r"\b(create|merge|delete|detach|set|remove|drop|load\s+csv|call)\b", re.I)
+_GRAPH_WRITE = re.compile(
+    r"(?<![\w.$])(create|merge|delete|detach|set|remove|drop|load\s+csv|call|foreach)(?![\w$])", re.I)
+_CYPHER_NOISE = re.compile(
+    r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`|//[^\n]*|/\*.*?\*/", re.S)
+_TEXT_JOIN = {"query": " ", "name_pattern": "|", "qn_pattern": "|"}
+_TEXT_ARGS = ("name_pattern", "label", "qn_pattern", "query", "file_pattern", "relationship")
+
+
+def _writes_graph(query: str) -> bool:
+    return bool(_GRAPH_WRITE.search(_CYPHER_NOISE.sub(" ", query or "")))
+
+
+def _text_arg(key: str, value) -> str:
+    if isinstance(value, (list, tuple)):
+        items = [str(v).strip() for v in value
+                 if isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v).strip()]
+        joiner = _TEXT_JOIN.get(key)
+        return joiner.join(items) if joiner else (items[0] if items else "")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _clamp(value, low: int, high: int, default: int) -> int:
@@ -39,11 +57,18 @@ def _clamp(value, low: int, high: int, default: int) -> int:
 
 def _search_graph_args(args: dict) -> dict:
     out = {k: v for k, v in args.items() if k in _SEARCH_GRAPH_ARGS}
+    for key in _TEXT_ARGS:
+        if key in out:
+            text = _text_arg(key, out[key])
+            if text:
+                out[key] = text
+            else:
+                out.pop(key)
     sq = out.get("semantic_query")
     if isinstance(sq, str):
         sq = [sq]
     if isinstance(sq, list):
-        sq = [str(s) for s in sq if str(s).strip()][:5]
+        sq = [s.strip() for s in sq if isinstance(s, str) and s.strip()][:5]
     if sq and not out.get("query"):
         out["semantic_query"] = sq
     else:
@@ -66,6 +91,9 @@ def _trace_path_args(args: dict) -> dict:
         out["depth"] = _clamp(out["depth"], 1, 10, 3)
     if "limit" in out:
         out["limit"] = _clamp(out["limit"], 1, 500, 100)
+    if not isinstance(out.get("cursor"), str) or not out["cursor"].strip():
+        out.pop("cursor", None)
+    out.setdefault("depth", 3)
     return out
 
 
@@ -77,6 +105,17 @@ def _snippet_args(args: dict) -> dict:
         out["start_line"] = _clamp(out["start_line"], 1, 10_000_000, 1)
     if out.get("source_mode") not in (None, "auto", "full", "outline"):
         out.pop("source_mode")
+    if "member_offset" in out:
+        out["member_offset"] = _clamp(out["member_offset"], 0, 1_000_000, 0)
+    return out
+
+
+def _query_graph_page(args: dict) -> dict:
+    out: dict = {}
+    if isinstance(args.get("cursor"), str) and args["cursor"].strip():
+        out["cursor"] = args["cursor"].strip()
+    elif args.get("offset") is not None:
+        out["offset"] = _clamp(args["offset"], 0, 10_000_000, 0)
     return out
 
 _NO_GRAPH = (
@@ -257,11 +296,12 @@ class ToolExecutor:
             query = str(args.get("query") or "").strip()
             if not query:
                 return "query is required: a read-only Cypher MATCH ... RETURN statement."
-            if _GRAPH_WRITE.search(query):
+            if _writes_graph(query):
                 return ("query_graph is read-only: use MATCH ... WHERE ... RETURN without "
                         "CREATE, MERGE, SET, DELETE, REMOVE, DROP, LOAD CSV or CALL.")
             r = await self._mcp.query_graph_text(query, project=project,
-                                                 max_rows=_clamp(args.get("max_rows"), 1, 500, 100))
+                                                 max_rows=_clamp(args.get("max_rows"), 1, 500, 100),
+                                                 **_query_graph_page(args))
             return r or "No rows"
         if name == "search_code":
             r = await self._mcp.search_code(args["pattern"], args.get("limit", 50), project=project,
