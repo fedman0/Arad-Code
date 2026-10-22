@@ -1,5 +1,6 @@
 ---
 order: 10
+max_turns: 40
 ---
 
 # SKILL: model-identities

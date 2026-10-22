@@ -1,6 +1,7 @@
 ---
 order: 40
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: map-entry-points

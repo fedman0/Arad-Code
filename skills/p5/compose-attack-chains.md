@@ -1,3 +1,7 @@
+---
+max_turns: 40
+---
+
 # compose-attack-chains
 
 Phase 5 skill. Starts from hypotheses already in the evidence store and re-reads only the code at each link point

@@ -1,6 +1,7 @@
 ---
 order: 60
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: map-middleware-and-filters

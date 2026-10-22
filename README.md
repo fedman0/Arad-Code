@@ -655,6 +655,7 @@ order: 35
 tier: fast
 parallel: true
 requires: [web, multiservice]
+max_turns: 40
 ---
 
 # SKILL: map-graphql-schema
@@ -666,6 +667,7 @@ requires: [web, multiservice]
 | `tier` | `main` | `fast` runs the skill on `fast_model` when one is set |
 | `parallel` | `false` | The skill doesn't depend on others in its phase and may run alongside them |
 | `requires` | none | Skip the skill unless the project shows at least one of these: `web`, `templates`, `iac`, `llm`, `messaging`, `multiservice`, `ldap`, `multitenant` |
+| `max_turns` | `30` | How many model turns the skill gets (8 to 120). The last six only allow `finish()`. The built-in mapping, modelling, tracing and `understand-*` skills use 40; the `hunt-*` skills keep 30 |
 
 The header is stripped before the skill text goes to the model. A header that doesn't parse stops the run with the file name in the error, instead of being sent along as text.
 

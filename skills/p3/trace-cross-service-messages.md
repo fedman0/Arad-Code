@@ -1,6 +1,7 @@
 ---
 parallel: true
 requires: [messaging, multiservice]
+max_turns: 40
 ---
 
 # SKILL: trace-cross-service-messages

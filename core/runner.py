@@ -37,6 +37,7 @@ from .context import ContextWindow
 from .stack import StackProfile, describe, detect_stack
 
 
+_DEFAULT_TURNS = 30
 _FINISH_CHOICE = {"type": "function", "function": {"name": "finish"}}
 _FORCED_TURNS = 6
 _EMPTY_FORCED_LIMIT = 2
@@ -270,12 +271,15 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         skill_name: str,
         repo_path: str,
         extra_context: str = "",
-        max_iterations: int = 30,
+        max_iterations: Optional[int] = None,
         verbose: bool = False,
         negative_evidence: Optional[bool] = None,
     ) -> SkillResult:
         if negative_evidence is None:
             negative_evidence = bool(self._cfg.negative_evidence)
+        if max_iterations is None:
+            info = self._skills.find(skill_name)
+            max_iterations = (info.max_turns if info and info.max_turns else _DEFAULT_TURNS)
         llm = self._llm_for_skill(skill_name)
         system = HUNT_SYSTEM_PROMPT if skill_name.startswith("hunt-") else SYSTEM_PROMPT
         key, token, transcript = self._begin_scope(skill_name, repo_path, llm, system)

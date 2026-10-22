@@ -1,6 +1,7 @@
 ---
 order: 20
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: resolve-build-context

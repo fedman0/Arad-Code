@@ -1,6 +1,7 @@
 ---
 order: 30
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: resolve-configuration

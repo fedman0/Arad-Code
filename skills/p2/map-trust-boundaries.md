@@ -1,5 +1,6 @@
 ---
 order: 70
+max_turns: 40
 ---
 
 # SKILL: map-trust-boundaries

@@ -1,5 +1,6 @@
 ---
 parallel: true
+max_turns: 40
 ---
 
 # SKILL: understand-business-logic

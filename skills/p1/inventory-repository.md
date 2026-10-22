@@ -1,6 +1,7 @@
 ---
 order: 10
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: inventory-repository

@@ -1,6 +1,7 @@
 ---
 parallel: true
 requires: [web]
+max_turns: 40
 ---
 
 # SKILL: understand-http-security

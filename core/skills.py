@@ -7,6 +7,8 @@ import yaml
 
 MAINTENANCE_PHASE = "p0"
 DEFAULT_ORDER = 100
+MIN_TURNS = 8
+MAX_TURNS = 120
 
 
 class SkillFormatError(ValueError):
@@ -22,6 +24,7 @@ class SkillInfo:
     parallel: bool = False
     requires: tuple[str, ...] = ()
     tier: str = "main"
+    max_turns: Optional[int] = None
 
 
 def split_frontmatter(text: str, source: str = "skill") -> tuple[dict, str]:
@@ -64,6 +67,20 @@ def _as_tier(value, source: str) -> str:
     return tier
 
 
+def _as_turns(value, source: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise SkillFormatError(f"{source}: max_turns must be a number")
+    try:
+        turns = int(value)
+    except (TypeError, ValueError):
+        raise SkillFormatError(f"{source}: max_turns must be a number") from None
+    if not MIN_TURNS <= turns <= MAX_TURNS:
+        raise SkillFormatError(f"{source}: max_turns must be between {MIN_TURNS} and {MAX_TURNS}")
+    return turns
+
+
 def _as_names(value) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -92,6 +109,7 @@ class SkillCatalog:
             parallel=_as_flag(meta.get("parallel", False)),
             requires=_as_names(meta.get("requires")),
             tier=_as_tier(meta.get("tier"), str(path)),
+            max_turns=_as_turns(meta.get("max_turns"), str(path)),
         )
 
     def phase_skills(self, phase: str) -> list[SkillInfo]:

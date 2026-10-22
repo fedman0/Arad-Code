@@ -1,5 +1,6 @@
 ---
 order: 50
+max_turns: 40
 ---
 
 # SKILL: extract-state-machines

@@ -1,5 +1,6 @@
 ---
 order: 30
+max_turns: 40
 ---
 
 # SKILL: model-resource-ownership

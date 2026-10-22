@@ -1,6 +1,7 @@
 ---
 parallel: true
 requires: [web, multiservice]
+max_turns: 40
 ---
 
 # SKILL: understand-infrastructure-security

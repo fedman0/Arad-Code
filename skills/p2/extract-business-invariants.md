@@ -1,5 +1,6 @@
 ---
 order: 60
+max_turns: 40
 ---
 
 # SKILL: extract-business-invariants

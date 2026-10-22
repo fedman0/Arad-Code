@@ -1,6 +1,7 @@
 ---
 order: 40
 requires: [multitenant]
+max_turns: 40
 ---
 
 # SKILL: model-tenant-boundaries

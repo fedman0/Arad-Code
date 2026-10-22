@@ -1,6 +1,7 @@
 ---
 order: 70
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: map-deployment-context

@@ -1,6 +1,7 @@
 ---
 order: 80
 tier: fast
+max_turns: 40
 ---
 
 # SKILL: map-service-boundaries
