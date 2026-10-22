@@ -266,6 +266,21 @@ def _fallback_structure(source: str, file_path: str) -> str:
     return json.dumps({"file": file_path, "symbols": results}, indent=2)
 
 
+def _rg_target(repo_path: str, path: Optional[str] = None) -> tuple[str, str]:
+    repo = Path(repo_path).resolve()
+    if not path:
+        return str(repo), "."
+    try:
+        rel = (repo / path).resolve().relative_to(repo).as_posix()
+    except (ValueError, OSError):
+        rel = path
+    return str(repo), rel or "."
+
+
+def _relative_lines(text: str) -> str:
+    return "\n".join(l[2:] if l.startswith("./") else l for l in text.split("\n"))
+
+
 def find_all_usages(repo_path: str, symbol_name: str,
                     file_glob: Optional[str] = None, max_matches: int = 100) -> str:
     try:
@@ -275,13 +290,14 @@ def find_all_usages(repo_path: str, symbol_name: str,
     safe = re.escape(symbol_name)
     combined = rf'(?:\b{safe}\b|\.{safe}\b|>{safe}\b)'
     try:
+        cwd, target = _rg_target(repo_path)
         cmd = ["rg", "--line-number", "--no-heading", "-m", str(max_matches + 1)]
         if file_glob:
             cmd.extend(["-g", file_glob])
-        cmd.extend(["-e", combined, "--", repo_path])
+        cmd.extend(["-e", combined, "--", target])
         r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                           timeout=20, stdin=subprocess.DEVNULL)
-        raw_lines = [l for l in r.stdout.splitlines() if l.strip()]
+                           timeout=20, stdin=subprocess.DEVNULL, cwd=cwd)
+        raw_lines = [l for l in _relative_lines(r.stdout).splitlines() if l.strip()]
     except FileNotFoundError:
         raw_lines = []
         per_pattern = max(1, max_matches // 3)
@@ -290,7 +306,7 @@ def find_all_usages(repo_path: str, symbol_name: str,
             raw_lines.extend(l for l in partial.splitlines() if l.strip())
     except subprocess.TimeoutExpired as ex:
         partial = ex.stdout.decode(errors="replace") if isinstance(ex.stdout, bytes) else (ex.stdout or "")
-        raw_lines = [l for l in partial.splitlines() if l.strip()]
+        raw_lines = [l for l in _relative_lines(partial).splitlines() if l.strip()]
         raw_lines.append("[TRUNCATED]")
     seen: set[str] = set()
     deduped: list[str] = []
@@ -311,24 +327,24 @@ def find_all_usages(repo_path: str, symbol_name: str,
 
 def _rg_grep(repo_path: str, pattern: str, path: Optional[str] = None,
              file_glob: Optional[str] = None, max_matches: int = 100) -> str:
-    search_path = str(Path(repo_path) / path) if path else repo_path
+    cwd, target = _rg_target(repo_path, path)
     try:
         cmd = ["rg", "--line-number", "--no-heading", f"-m{max_matches}"]
         if file_glob:
             cmd.extend(["-g", file_glob])
-        cmd.extend(["-e", pattern, "--", search_path])
+        cmd.extend(["-e", pattern, "--", target])
         r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                           timeout=20, stdin=subprocess.DEVNULL)
-        return r.stdout[:12000]
+                           timeout=20, stdin=subprocess.DEVNULL, cwd=cwd)
+        return _relative_lines(r.stdout)[:12000]
     except FileNotFoundError:
         cmd = ["grep", "-rn", f"-m{max_matches}"]
         if file_glob:
             cmd.extend(["--include", file_glob])
-        cmd.extend(["-e", pattern, "--", search_path])
+        cmd.extend(["-e", pattern, "--", target])
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                               timeout=20, stdin=subprocess.DEVNULL)
-            return r.stdout[:12000]
+                               timeout=20, stdin=subprocess.DEVNULL, cwd=cwd)
+            return _relative_lines(r.stdout)[:12000]
         except Exception:
             return ""
     except Exception:

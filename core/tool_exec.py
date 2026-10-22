@@ -8,7 +8,7 @@ from typing import Optional
 from .models import (
     FunctionSummary, OpenQuestion, ConflictRecord, AnalysisQuality, ReturnValueContract,
 )
-from .code_analysis import run_semgrep, list_dir, run_shell
+from .code_analysis import run_semgrep, list_dir, run_shell, _relative_lines
 from .tool_specs import _THREADED_TOOLS
 from .evidence_gate import (
     _gate_hypothesis_status, _apply_quality_caps, _inject_minimum_obligations,
@@ -138,13 +138,14 @@ class ToolExecutor:
     def _grep(self, repo_path: str, pattern: str, path: Optional[str] = None,
               file_glob: Optional[str] = None, max_matches: int = 100,
               multiline: bool = False) -> str:
+        repo = Path(repo_path).resolve()
         if path:
             safe = self._resolve_path(repo_path, path)
             if safe is None:
                 return "Access denied: path outside repository"
-            search_path = str(safe)
+            search_path = safe.relative_to(repo).as_posix() or "."
         else:
-            search_path = repo_path
+            search_path = "."
         try:
             max_matches = max(1, int(max_matches))
         except (TypeError, ValueError):
@@ -158,10 +159,10 @@ class ToolExecutor:
                 cmd.append("-U")
             cmd.extend(["-e", pattern, "--", search_path])
             r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                               timeout=20, stdin=subprocess.DEVNULL)
+                               timeout=20, stdin=subprocess.DEVNULL, cwd=str(repo))
             if r.returncode == 2 and not r.stdout:
                 return f"grep error: {r.stderr.strip()[:800]}"
-            return r.stdout[:12000] or "No matches"
+            return _relative_lines(r.stdout)[:12000] or "No matches"
         except FileNotFoundError:
             try:
                 cmd = ["grep", "-rnE", f"-m{max_matches}", "--exclude-dir=.git"]
@@ -171,10 +172,10 @@ class ToolExecutor:
                     cmd.extend(["--include", file_glob])
                 cmd.extend(["-e", pattern, "--", search_path])
                 r = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
-                                   timeout=20, stdin=subprocess.DEVNULL)
+                                   timeout=20, stdin=subprocess.DEVNULL, cwd=str(repo))
                 if r.returncode == 2 and not r.stdout:
                     return f"grep error: {r.stderr.strip()[:800]}"
-                return r.stdout[:12000] or "No matches"
+                return _relative_lines(r.stdout)[:12000] or "No matches"
             except Exception as ex:
                 return f"grep error: {ex}"
         except Exception as ex:
