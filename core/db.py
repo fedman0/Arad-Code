@@ -13,6 +13,33 @@ from .models import (
 from .usage import Usage
 
 
+_AMENDMENT_HEAD = 1200
+
+
+def _first_line(text: Optional[str]) -> str:
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("#").strip()
+        if line:
+            return line[:80]
+    return ""
+
+
+def _amendment_brief(amendment: dict, number: int) -> str:
+    full = amendment.get("content") or ""
+    summary = (amendment.get("summary") or "").strip()
+    if summary:
+        shown = summary
+    elif len(full) <= _AMENDMENT_HEAD + 200:
+        return full
+    else:
+        head = full[:_AMENDMENT_HEAD]
+        shown = head.rsplit("\n", 1)[0] if "\n" in head else head
+    if len(shown) >= len(full):
+        return full
+    return (f"{shown}\n[shortened here; get_threat_model(section=\"{number}\") returns all "
+            f"{len(full)} characters]")
+
+
 class SchemaVersionError(RuntimeError):
     pass
 
@@ -476,7 +503,7 @@ class EvidenceStore:
         )
         self.conn.commit()
 
-    def get_threat_model(self, repo_path: str) -> Optional[str]:
+    def get_threat_model(self, repo_path: str, brief: bool = False) -> Optional[str]:
         row = self.conn.execute(
             "SELECT content, amendments FROM threat_models WHERE target=?", (repo_path,)
         ).fetchone()
@@ -486,24 +513,56 @@ class EvidenceStore:
         amendments = json.loads(row["amendments"] or "[]")
         if amendments:
             addenda = "\n\n".join(
-                f"### Amendment {i+1} (by {a.get('added_by_skill', '?')})\n{a['content']}"
+                f"### Amendment {i+1} (by {a.get('added_by_skill', '?')})\n"
+                f"{_amendment_brief(a, i + 1) if brief else a['content']}"
                 for i, a in enumerate(amendments)
             )
             return content + "\n\n---\n\n" + addenda
         return content
 
-    def amend_threat_model(self, repo_path: str, addendum: str, skill: str = "") -> bool:
+    def get_threat_model_section(self, repo_path: str, section: str = "") -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT content, amendments FROM threat_models WHERE target=?", (repo_path,)
+        ).fetchone()
+        if row is None:
+            return None
+        amendments = json.loads(row["amendments"] or "[]")
+
+        def full(number: int, a: dict) -> str:
+            return f"### Amendment {number} (by {a.get('added_by_skill', '?')})\n{a.get('content') or ''}"
+
+        key = str(section or "").strip().lstrip("#").strip().lower()
+        if key.isdigit() and 1 <= int(key) <= len(amendments):
+            return full(int(key), amendments[int(key) - 1])
+        if key and key not in ("0", "base"):
+            for number, a in enumerate(amendments, 1):
+                title = " ".join((a.get("content") or "").strip().splitlines()[:2]).lower()
+                if key in title or key == (a.get("added_by_skill") or "").lower():
+                    return full(number, a)
+            if key not in row["content"].lower():
+                return ""
+        listing = "\n".join(
+            f"  {number}. {_first_line(a.get('content'))} (by {a.get('added_by_skill', '?')}, "
+            f"{len(a.get('content') or '')} characters)"
+            for number, a in enumerate(amendments, 1))
+        return row["content"] + (f"\n\nAmendments:\n{listing}" if listing else "")
+
+    def amend_threat_model(self, repo_path: str, addendum: str, skill: str = "",
+                           summary: str = "") -> bool:
         row = self.conn.execute(
             "SELECT amendments FROM threat_models WHERE target=?", (repo_path,)
         ).fetchone()
         if row is None:
             return False
         amendments = json.loads(row["amendments"] or "[]")
-        amendments.append({
+        entry = {
             "content": addendum,
             "added_at": utc_now_iso(),
             "added_by_skill": skill,
-        })
+        }
+        if summary.strip():
+            entry["summary"] = summary.strip()
+        amendments.append(entry)
         self.conn.execute(
             "UPDATE threat_models SET amendments=?, updated_at=? WHERE target=?",
             (json.dumps(amendments), utc_now_iso(), repo_path)

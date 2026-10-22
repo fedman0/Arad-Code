@@ -58,6 +58,7 @@ class Config:
     verify_model: str = ""
     concurrency: int = 3
     context_char_limit: int = 200000
+    history_char_limit: int = 110000
     skill_gating: bool = True
     negative_evidence: bool = False
     verbose: bool = False
@@ -157,6 +158,7 @@ def _config_from_data(
     max_retries = _opt_number(data, "max_retries", int)
     concurrency = _opt_number(data, "concurrency", int)
     context_char_limit = _opt_number(data, "context_char_limit", int)
+    history_char_limit = _opt_number(data, "history_char_limit", int)
     return Config(
         model=model or env.get("PENTEST_MODEL") or _opt(data, "model", "gpt-5.5"),
         api_base=api_base or env.get("PENTEST_API_BASE") or _opt(data, "api_base", "https://api.openai.com/v1"),
@@ -181,6 +183,7 @@ def _config_from_data(
         verify_model=env.get("PENTEST_VERIFY_MODEL") or str(_opt(data, "verify_model", "")),
         concurrency=max(1, 3 if concurrency is None else concurrency),
         context_char_limit=200000 if context_char_limit is None else context_char_limit,
+        history_char_limit=110000 if history_char_limit is None else history_char_limit,
         skill_gating=_as_bool(_opt(data, "skill_gating", True)),
         negative_evidence=_as_bool(_opt(data, "negative_evidence", False)),
         verbose=_as_bool(_opt(data, "verbose", False)),

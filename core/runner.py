@@ -207,7 +207,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         profile_text = self._profile(repo_path).to_prompt()
         if profile_text:
             parts.append(profile_text)
-        threat_model = self._db.get_threat_model(repo_path)
+        threat_model = self._db.get_threat_model(repo_path, brief=True)
         if threat_model:
             parts.append("# Threat Model (built by prior skill — use this as your starting context)\n" + threat_model)
         entry_points = self._db.list_entry_points(repo_path)
@@ -273,7 +273,8 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         return self._llm_for(info.tier if info else "main")
 
     def _window(self) -> ContextWindow:
-        return ContextWindow(self._cfg.context_char_limit)
+        return ContextWindow(self._cfg.context_char_limit,
+                             history_chars=self._cfg.history_char_limit)
 
     def _begin_scope(self, name: str, repo_path: str, llm, system: str):
         key = f"{name}@{next(self._scope_seq)}"

@@ -10,8 +10,10 @@ def _size(message: dict) -> int:
 
 
 class ContextWindow:
-    def __init__(self, limit_chars: int, keep_recent: int = 6, head_chars: int = 1500):
+    def __init__(self, limit_chars: int, keep_recent: int = 6, head_chars: int = 1500,
+                 history_chars: int = 0):
         self.limit = max(0, int(limit_chars or 0))
+        self.history = max(0, int(history_chars or 0))
         self.keep_recent = max(1, keep_recent)
         self.head = max(200, head_chars)
         self._boundary = 0
@@ -31,11 +33,16 @@ class ContextWindow:
         return [self._trim(m) if i < self._boundary and m.get("role") == "tool" else m
                 for i, m in enumerate(messages)]
 
+    def _over(self, out: list[dict]) -> bool:
+        if self.limit and sum(_size(m) for m in out) > self.limit:
+            return True
+        return bool(self.history) and sum(_size(m) for m in out[1:]) > self.history
+
     def view(self, messages: list[dict]) -> list[dict]:
-        if not self.limit:
+        if not self.limit and not self.history:
             return messages
         out = self._render(messages)
-        if sum(_size(m) for m in out) <= self.limit:
+        if not self._over(out):
             return out
         tools = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
         if len(tools) <= self.keep_recent:

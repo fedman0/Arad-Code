@@ -20,6 +20,7 @@ trust_repo_profile: false
 concurrency: 3
 skill_gating: true
 context_char_limit: 200000
+history_char_limit: 110000
 negative_evidence: false
 verbose: false
 headless: false

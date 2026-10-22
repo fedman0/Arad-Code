@@ -288,9 +288,33 @@ TOOLS = [
             ),
             "parameters": {
                 "type": "object",
-                "required": ["addendum"],
+                "required": ["addendum", "summary"],
                 "properties": {
                     "addendum": {"type": "string", "description": "Markdown correction or addition"},
+                    "summary": {"type": "string",
+                                "description": "3 to 8 lines with the facts later skills need most from "
+                                               "this addendum. Later skills see this summary in their "
+                                               "Known Context; the full addendum stays available "
+                                               "through get_threat_model"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_threat_model",
+            "description": (
+                "Full text of one threat model amendment. The Known Context shows each amendment "
+                "shortened; pass its number, or a word from its title such as 'Middleware Map', "
+                "to read all of it. Without section it returns the base model and a list of "
+                "the amendments."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "section": {"type": "string",
+                                "description": "Amendment number or a word from its title"},
                 },
             },
         },

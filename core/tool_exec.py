@@ -331,8 +331,17 @@ class ToolExecutor:
             addendum = args.get("addendum", "")
             if not addendum.strip():
                 return "Addendum cannot be empty."
-            ok = self._db.amend_threat_model(repo_path, addendum, skill_name)
+            summary = args.get("summary") if isinstance(args.get("summary"), str) else ""
+            ok = self._db.amend_threat_model(repo_path, addendum, skill_name, summary)
             return "Amendment recorded." if ok else "No threat model exists yet — call save_threat_model first."
+        if name == "get_threat_model":
+            text = self._db.get_threat_model_section(repo_path, str(args.get("section") or ""))
+            if text is None:
+                return "No threat model exists yet."
+            if not text:
+                return (f"No threat model section matches {args.get('section')!r}. Call "
+                        "get_threat_model without section to list the amendments.")
+            return text
         if name == "save_function_summary":
             qn = args.get("qualified_name", "")
             fp = args.get("file_path", "")

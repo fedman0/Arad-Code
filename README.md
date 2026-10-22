@@ -71,7 +71,7 @@ Skills live in `skills/`, one folder per phase. A full run goes through them in 
 | `p4` | Hunting: 17 `hunt-*` breadth scans (SQLi, SSRF, XSS, auth bypass, secrets, IaC, LLM/MCP issues and more) plus 9 deep-dive reviews | 26 |
 | `p5` | Compose individual findings into attack chains | 1 |
 
-Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it.
+Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it. The maps the `p1` and `p2` skills add to the threat model are shown to later skills as the short summary the writing skill gave with it, and `get_threat_model` returns a map in full when a skill needs the details.
 
 `p1` and `p2` run one skill at a time because each builds on the one before. The `p3` and `p4` skills don't depend on each other, so up to three of them run at once (`--concurrency` changes that). `trace-input-to-effect` goes through every entry point the earlier phases found: it runs once per batch of six, and each entry point ends with a recorded decision (see [Writing your own skills](#writing-your-own-skills)).
 
@@ -222,7 +222,8 @@ The prices above only show the shape. Copy the real numbers from your provider's
 | `fast_model` | empty | Cheaper model for the `p1` mapping skills. Empty means `model` (see [Using more than one model](#using-more-than-one-model)) |
 | `verify_model` | empty | Model for `verify`. Empty means `model` |
 | `concurrency` | `3` | How many `p3`/`p4` skills may run at the same time. `1` runs everything in order |
-| `context_char_limit` | `200000` | Once a skill's conversation grows past this many characters, older tool output is shortened. `0` keeps everything |
+| `context_char_limit` | `200000` | Once a skill's conversation grows past this many characters, older tool output is shortened. `0` turns this limit off |
+| `history_char_limit` | `110000` | The same shortening starts once the tool calls and results after the skill's first message pass this many characters. This keeps calls cheaper and gives every skill the same room, however long its Known Context is. `0` turns it off; set both to `0` to keep everything |
 | `skill_gating` | `true` | Skip skills that don't apply to the project's stack |
 | `negative_evidence` | `false` | Same as passing `-N` to every `run` and `skill` (also applies to scans started in the UI) |
 | `verbose` | `false` | Same as passing `-v` to every `run` |
@@ -481,7 +482,7 @@ Costs come from the `pricing` table in your config. On OpenRouter the provider r
 
 **Transcripts.** Each skill's whole conversation with the model (the prompt, every tool call and its result, the final answer, and the usage) is saved as JSON lines under `transcripts/<repo>/<run id>/`, next to the evidence store. When a finding looks wrong, that file shows how the model got there. The files are only readable by you, but they do contain source code from the scanned repo and whatever the model found in it, secrets included. `--no-transcripts` or `transcripts: false` turns them off.
 
-**Long conversations.** A skill can make dozens of tool calls, and every call sends the whole conversation again, so cost grows quickly with length. Once a conversation passes `context_char_limit` characters, tool output older than the last six results is cut down to its first lines, with a note telling the model it can run the tool again for the rest. This happens in steps rather than on every call, so the provider's prompt cache keeps working. The evidence checks and the saved transcripts always use the full, untrimmed output.
+**Long conversations.** A skill can make dozens of tool calls, and every call sends the whole conversation again, so cost grows quickly with length. Once a conversation passes `context_char_limit` characters, or the part after the first message passes `history_char_limit`, tool output older than the last six results is cut down to its first lines, with a note telling the model it can run the tool again for the rest. This happens in steps rather than on every call, so the provider's prompt cache keeps working. The evidence checks and the saved transcripts always use the full, untrimmed output.
 
 **Replies cut off at the token limit.** The transcript records the `finish_reason` of every turn. When a reply ends with `length`, the engine tells the model what happened and gives the next call up to four times `max_tokens` (at most 65536) with low reasoning effort, so a long `finish()` can get through. The closing turns of a skill, where the model may only call `finish()`, always get that room. If the model returns nothing twice in a row during those turns, the skill ends right away with a note in its open questions instead of spending the remaining turns. A model that refuses the bigger limit stays at `max_tokens` for the rest of the run.
 
