@@ -110,3 +110,35 @@ def test_evidence_with_a_bad_field_is_sent_back_naming_it(tmp_path):
     reply = tool_replies(llm)["call_101"]
     assert "evidence[0] is invalid: kind:" in reply
     assert len(llm.calls) == 2 and len(res.evidence) == 1
+
+
+def test_obligation_status_is_judged_against_the_finding():
+    ob = FINDINGS_SCHEMA["properties"]["hypotheses"]["items"]["properties"]["proof_obligations"]
+    assert "against the finding" in ob["items"]["properties"]["status"]["description"]
+    assert "against the finding" in OUTPUT_CONTRACT
+
+
+def test_a_refuted_required_obligation_is_sent_back_once(tmp_path):
+    ob = {"question": "Is any rate limiter applied to the login route?", "status": "refuted",
+          "claim_type": "guard", "required_for_finding": True, "reason": "none at server.ts:616"}
+    fixed = dict(ob, status="verified", evidence_ref="app/views.py:4")
+    res, llm = run(tmp_path, [[tc(1, "search_graph", {"name_pattern": "search"})],
+                              [finish([hyp(proof_obligations=[ob])], [ev(0)])],
+                              [finish([hyp(proof_obligations=[fixed])], [ev(0)])]])
+    reply = tool_replies(llm)["call_101"]
+    assert reply.startswith("Findings NOT recorded")
+    assert "Is any rate limiter applied to the login route?" in reply
+    assert "judged against the finding" in reply
+    assert len(llm.calls) == 3 and len(res.hypotheses) == 1
+    assert res.hypotheses[0].status == "evidence_supported"
+
+
+def test_optional_refuted_points_and_demotions_are_not_sent_back(tmp_path):
+    optional = {"question": "Is the token also written to the log?", "status": "refuted",
+                "required_for_finding": False}
+    required = {"question": "Is the input concatenated into SQL?", "status": "refuted"}
+    res, llm = run(tmp_path, [[finish([hyp(proof_obligations=[optional]),
+                                       hyp(entry_point="app/views.py:other", status="rejected",
+                                           proof_obligations=[required])],
+                                      [ev(0), ev(1)])]])
+    assert len(llm.calls) == 1 and len(res.hypotheses) == 2

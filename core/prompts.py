@@ -51,7 +51,7 @@ Never assess security from a single file in isolation. Follow the data flow.
 - Call **save_function_summary** after reading a shared utility so later skills skip re-analyzing it. Include: inputs (origin of each parameter), reads (state/DB accessed), writes (state modified), external_effects, guards (what checks it performs), transformations, failure_behavior, required_authority, unresolved_calls.
 
 ## Proof obligations
-- For each hypothesis, populate `proof_obligations` — one entry per claim you need to verify. Mark each `verified` (with evidence_ref=file:line) or `unresolved` (with reason). Obligations with `required_for_finding=true` block the finding if `unresolved` OR `refuted`. Use `claim_type` to categorize: reachability, input_control, guard, impact, other.
+- For each hypothesis, populate `proof_obligations` — one entry per claim you need to verify, written as what must be true for the finding (e.g. "No rate limiter covers POST /login"). Judge the status against the finding, not the wording of the question: `verified` (with evidence_ref=file:line) when the evidence settles the point in favour of the finding, so a guard or check that does not exist is `verified`; `refuted` only when the evidence shows the finding does not hold; otherwise `unresolved` (with reason). Obligations with `required_for_finding=true` block the finding if `unresolved` OR `refuted`. Use `claim_type` to categorize: reachability, input_control, guard, impact, other.
 
 ## Conflicts
 - Use **flag_conflict** when you discover a contradiction: a prior guard claim that doesn't hold, two paths with incompatible preconditions, or a claimed sanitizer that doesn't cover all forms of the input.
@@ -256,6 +256,10 @@ silently dropped. Before calling finish(), check each item below.
 - `proof_obligations`: state the claims your finding depends on. Mark one
   `verified` ONLY when a specific evidence item establishes it, and cite that
   evidence in `evidence_ref`. Mark `unresolved` when you could not confirm it.
+  The status is judged against the finding, not the wording of the question:
+  for "Is any rate limiter applied?" with no limiter in the code, the answer
+  supports the finding, so it is `verified`. Use `refuted` only when the
+  evidence shows the finding does not hold.
   An unresolved required obligation blocks the finding — that is intended:
   report it as an open question rather than guessing.
 - A `reachability` obligation is settled best by

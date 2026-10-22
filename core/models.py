@@ -399,8 +399,16 @@ FINDINGS_SCHEMA = {
                             "type": "object",
                             "required": ["question"],
                             "properties": {
-                                "question": {"type": "string"},
-                                "status": {"type": "string", "enum": ["verified", "unresolved", "refuted"]},
+                                "question": {"type": "string",
+                                             "description": "One point the finding depends on, written as "
+                                                            "what must be true for it, e.g. 'No rate "
+                                                            "limiter covers POST /login'"},
+                                "status": {"type": "string", "enum": ["verified", "unresolved", "refuted"],
+                                           "description": "Judged against the finding, not the wording: "
+                                                          "verified = the evidence settles the point in "
+                                                          "favour of the finding (a missing guard is "
+                                                          "verified); refuted = it shows the finding does "
+                                                          "not hold; unresolved = not settled"},
                                 "claim_type": {"type": "string", "enum": ["reachability", "input_control", "guard", "impact", "other"]},
                                 "required_for_finding": {"type": "boolean"},
                                 "evidence_ref": {"type": "string"},

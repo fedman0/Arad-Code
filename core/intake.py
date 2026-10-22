@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Optional
-from .models import Evidence, Hypothesis
+from .models import Evidence, Hypothesis, ProofObligation
 
 
 _ENGINE_OWNED_HYPOTHESIS_FIELDS = (
@@ -132,6 +132,20 @@ def _existing_id(h_data: Any) -> str:
     return str(h_data.get("existing_id") or "").strip()
 
 
+def _refuted_required(h_data: dict) -> list[str]:
+    if h_data.get("status") in _MODEL_DEMOTION_STATUSES:
+        return []
+    out: list[str] = []
+    for raw in _as_list(h_data.get("proof_obligations")):
+        try:
+            ob = ProofObligation.model_validate(raw)
+        except Exception:
+            continue
+        if ob.required_for_finding and ob.status == "refuted":
+            out.append(ob.question.strip())
+    return out
+
+
 def _finish_problems(findings: dict, commit: str = "",
                      known: "frozenset[str] | set[str]" = frozenset()) -> list[str]:
     problems: list[str] = []
@@ -142,6 +156,12 @@ def _finish_problems(findings: dict, commit: str = "",
         if not isinstance(h, dict):
             problems.append(f"hypotheses[{i}] is not an object")
             continue
+        for question in _refuted_required(h):
+            problems.append(
+                f"hypotheses[{i}] marks the required obligation {question[:100]!r} refuted, which "
+                "says the finding does not hold. Status is judged against the finding: a guard or "
+                "check that does not exist is verified. Mark it verified if the evidence supports "
+                "the finding, or drop the hypothesis if it does not")
         existing = _existing_id(h)
         if existing:
             if existing in known:

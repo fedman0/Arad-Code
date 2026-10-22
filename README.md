@@ -646,6 +646,7 @@ Things that keep a skill working:
 - `shell` runs one read-only command at a time with no pipes: `git log/show/blame/diff/ls-files/ls-tree/rev-parse/status/shortlog/describe/grep`, `find` (tests only, no `-exec` or `-delete`), `tree`, `wc`, `head`, `tail`, `file`, `stat`, `sha256sum`, `sha1sum`, `md5sum`, `jq`, `diff`, `strings`, `cut`. Paths have to stay inside the repo. `ls`, `cat` and `sed` are refused with a pointer to `list_dir` and `read_file`, and the sandbox image ships every command on the list.
 - Valid `exposure` values are `internet`, `authenticated`, `internal`, `admin_only` and `unreachable`. Anything else gets reset to `unspecified`.
 - Evidence goes in the top-level `evidence` array of `finish()`, tied to its finding by `hypothesis_index`; a hypothesis has no field for evidence of its own. When a finding with confidence above 3 has no evidence item, or a hypothesis is missing a required field, `finish()` is sent back to the model with the list of problems, twice at most. A finding that still has no evidence is kept as a lead at confidence 3 and never reaches the report.
+- A proof obligation's status is judged against the finding, not the wording of its question. For "Is any rate limiter applied?" with no limiter in the code, the answer supports the finding, so the obligation is `verified`; `refuted` means the evidence shows the finding does not hold. A finding sent with a required obligation marked `refuted` goes back to the model with that note, within the same two retries.
 
 A skill file can start with a short YAML header:
 
