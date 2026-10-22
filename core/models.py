@@ -355,6 +355,7 @@ class SkillResult(BaseModel):
     analysis_quality: AnalysisQuality = Field(default_factory=AnalysisQuality)
     model: str = ""
     usage: dict = Field(default_factory=dict)
+    merged: list[str] = Field(default_factory=list)
 
 
 FINDINGS_SCHEMA = {
@@ -386,6 +387,10 @@ FINDINGS_SCHEMA = {
                     "severity": {"type": "integer", "minimum": 0, "maximum": 10},
                     "confidence": {"type": "integer", "minimum": 0, "maximum": 10},
                     "skill_source": {"type": "string"},
+                    "existing_id": {"type": "string",
+                                    "description": "Id of a finding already recorded (see Known Context) when "
+                                                   "this entry only adds evidence to it; its other fields "
+                                                   "are then ignored"},
                     "cwe": {"type": "string", "description": "CWE ID e.g. CWE-89, CWE-79, CWE-306"},
                     "proof_obligations": {
                         "type": "array",

@@ -200,6 +200,9 @@ You are submitting **pattern-confirmed** findings. Fill every field exactly as d
 Every evidence item must have hypothesis_index. Do not omit any field listed above.
 Evidence lives only in the top-level `evidence` array; a hypothesis has no field for it.
 Every hypothesis needs at least one evidence item, or finish() is sent back to you to fix.
+A pattern that is already in the Known Context list of recorded findings is not a new
+hypothesis: add an entry with `existing_id` set to that finding's id and point your
+evidence at it instead.
 
 """
 
@@ -235,6 +238,11 @@ silently dropped. Before calling finish(), check each item below.
   semantic 10), so an unopened grep hit cannot produce a high-confidence finding.
 
 ## Every hypothesis
+- A bug that is already in the Known Context list of recorded findings must not
+  be reported again as a new hypothesis. When you have new evidence for it, add
+  an entry with only `existing_id` set to its id (fill the required fields
+  briefly) and point your evidence items at that entry with `hypothesis_index`;
+  the engine attaches them to the recorded finding and checks it again.
 - `cwe`: the CWE id of the bug class (e.g. "CWE-639"). It names the SARIF rule and
   lets the engine match findings against proof-of-absence records.
 - `entry_point`: include the file and the handler function, e.g.

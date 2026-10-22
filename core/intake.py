@@ -6,7 +6,7 @@ from .models import Evidence, Hypothesis
 _ENGINE_OWNED_HYPOTHESIS_FIELDS = (
     "id", "created_at", "status", "priority", "rejected_by", "rejected_at_commit",
     "rejection_reason", "rejection_condition", "rejection_controlling_evidence_ids",
-    "validation", "model", "verified_with", "evidence_refs",
+    "validation", "model", "verified_with", "evidence_refs", "existing_id",
 )
 
 _EVIDENCE_LOCATION_FIELDS = ("file_path", "line_start", "line_end")
@@ -126,13 +126,30 @@ def _prepare_model_evidence(data: dict) -> dict:
     return out
 
 
-def _finish_problems(findings: dict, commit: str = "") -> list[str]:
+def _existing_id(h_data: Any) -> str:
+    if not isinstance(h_data, dict):
+        return ""
+    return str(h_data.get("existing_id") or "").strip()
+
+
+def _finish_problems(findings: dict, commit: str = "",
+                     known: "frozenset[str] | set[str]" = frozenset()) -> list[str]:
     problems: list[str] = []
     hyps = _as_list(findings.get("hypotheses"))
     valid: dict[int, Hypothesis] = {}
+    merges: dict[int, str] = {}
     for i, h in enumerate(hyps):
         if not isinstance(h, dict):
             problems.append(f"hypotheses[{i}] is not an object")
+            continue
+        existing = _existing_id(h)
+        if existing:
+            if existing in known:
+                merges[i] = existing
+                continue
+            problems.append(
+                f"hypotheses[{i}] gives existing_id {existing!r}, which is not a recorded finding; "
+                "use an id from the Known Context list or describe it as a new hypothesis")
             continue
         data, _ = _prepare_model_hypothesis(h, commit)
         obj, error = _validate_model_hypothesis(data)
@@ -166,6 +183,11 @@ def _finish_problems(findings: dict, commit: str = "") -> list[str]:
         if i not in supported and obj.confidence > _LEAD_CONFIDENCE:
             label = (obj.violated_invariant or obj.entry_point)[:60]
             problems.append(f"hypotheses[{i}] ({label}) has no evidence item")
+    for i, existing in merges.items():
+        if i not in supported:
+            problems.append(
+                f"hypotheses[{i}] adds to finding {existing} but no evidence item has "
+                f"hypothesis_index {i}; add the evidence or drop the entry")
     return problems
 
 

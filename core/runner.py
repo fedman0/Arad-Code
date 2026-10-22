@@ -26,7 +26,7 @@ from .evidence_gate import (
 )
 from .intake import (
     _as_list, _without_id, _prepare_model_hypothesis, _validate_model_hypothesis,
-    _apply_model_demotion, _finish_problems, _prepare_model_evidence,
+    _apply_model_demotion, _finish_problems, _prepare_model_evidence, _existing_id,
 )
 from .tool_exec import ToolExecutor
 from .reconcile import EvidenceReconciler
@@ -38,6 +38,7 @@ from .stack import StackProfile, describe, detect_stack
 
 
 _DEFAULT_TURNS = 30
+_KNOWN_FINDINGS = 60
 _FINISH_CHOICE = {"type": "function", "function": {"name": "finish"}}
 _FORCED_TURNS = 6
 _EMPTY_FORCED_LIMIT = 2
@@ -73,6 +74,11 @@ _FINISH_BAD_JSON = (
     "again with a findings object: {\"hypotheses\": [...], \"evidence\": [...], "
     "\"coverage\": [...], \"open_questions\": [...]}."
 )
+
+
+def _short(text: str, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def _unwrap_findings(args: dict) -> Optional[dict]:
@@ -179,8 +185,15 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             parts.append("Known guards:\n" + "\n".join(gs))
         hypotheses = self._db.list_hypotheses(repo_path)
         if hypotheses:
-            hs = [f"  [{h.id}] {h.violated_invariant} (status={h.status})" for h in hypotheses[:10]]
-            parts.append("Existing hypotheses (avoid duplicates):\n" + "\n".join(hs))
+            ranked = sorted(hypotheses, key=lambda h: (-h.priority, h.id))
+            shown = ranked[:_KNOWN_FINDINGS]
+            hs = [f"  [{h.id}] {h.cwe or '-'} {_short(h.entry_point, 70)}: "
+                  f"{_short(h.violated_invariant, 90)} (status={h.status})" for h in shown]
+            if len(ranked) > len(shown):
+                hs.append(f"  ... and {len(ranked) - len(shown)} more; list_hypotheses shows them all")
+            parts.append("Findings already recorded. Do not report any of these again as a new "
+                         "hypothesis; to add evidence to one, give its id as existing_id:\n"
+                         + "\n".join(hs))
 
         open_questions = self._db.list_open_questions(repo_path, status="open")
         if open_questions:
@@ -455,7 +468,9 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                             f"finish() arguments were {why}; nothing was recorded"]}
                         result_text = "Findings recorded."
                     else:
-                        problems = _finish_problems(raw_findings, commit)
+                        problems = _finish_problems(
+                            raw_findings, commit,
+                            {h.id for h in self._db.list_hypotheses(repo_path)})
                         if problems and can_retry:
                             finish_retries += 1
                             result_text = _rejection(problems, forced)
@@ -500,10 +515,22 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         hypotheses = []
         hypothesis_by_index: dict[int, Hypothesis] = {}
         raw_hypotheses = _as_list(findings.get("hypotheses"))
+        merged: list[Hypothesis] = []
         for raw_idx, h_data in enumerate(raw_hypotheses):
             if not isinstance(h_data, dict):
                 validation_errors.append(f"hypothesis[{raw_idx}] is not an object")
                 continue
+            existing = _existing_id(h_data)
+            if existing:
+                prior = self._db.get_hypothesis(repo_path, existing)
+                if prior is not None:
+                    if all(m.id != prior.id for m in merged):
+                        merged.append(prior)
+                    hypothesis_by_index[raw_idx] = next(m for m in merged if m.id == prior.id)
+                    continue
+                validation_errors.append(
+                    f"hypothesis[{raw_idx}]: existing_id {existing!r} is not a recorded finding; "
+                    "kept as a new hypothesis")
             h_data, demotion = _prepare_model_hypothesis(h_data, commit)
             h_data["skill_source"] = skill_name
             h_data["model"] = self._model_name(llm)
@@ -682,6 +709,19 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             h.status = _gate_hypothesis_status(h, ev_for_h, conf_for_h, all_open_questions)
             h.priority = h.compute_priority()
 
+        for h in merged:
+            added = [e for e in evidence_items if e.hypothesis_id == h.id]
+            if not added:
+                continue
+            ev_all = self._db.get_evidence_for_hypothesis(h.id) + [e for e in added if not e.stale]
+            ev_ids = {e.id for e in added}
+            conf_for_h = self._db.get_conflicts_for_hypothesis(h.id, repo_path) + [
+                c for c in all_conflicts
+                if h.id in (c.left, c.right) or any(f"evidence/{eid}" in (c.left, c.right) for eid in ev_ids)]
+            h.uncertainty.append(f"{len(added)} evidence item(s) added by {skill_name}")
+            h.status = _gate_hypothesis_status(h, ev_all, conf_for_h, all_open_questions)
+            h.priority = h.compute_priority()
+
         _raw_oq = findings.get("open_questions")
         if isinstance(_raw_oq, list):
             open_questions = list(_raw_oq)
@@ -736,6 +776,9 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             guards_found=guards,
         )
         self._db.save_skill_result(repo_path, result)
+        for h in merged:
+            self._db.save_hypothesis(repo_path, h)
+        result.merged = [h.id for h in merged]
         return result
 
     async def _run_skill_list(self, skills: list[str], repo_path: str,
