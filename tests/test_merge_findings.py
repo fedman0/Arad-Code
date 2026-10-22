@@ -155,3 +155,26 @@ def test_weaker_merged_evidence_does_not_lower_the_confidence_cap(tmp_path):
     assert after.confidence == 8 and after.status == "evidence_supported"
     kinds = sorted((e.analysis_quality.method, e.merged_by) for e in db.get_all_evidence_for_hypothesis(h.id))
     assert kinds == [("semantic", None), ("textual", "hunt-injection-sqli-cmdi")]
+
+
+def test_list_hypotheses_gives_one_line_per_finding_and_pages(tmp_path):
+    runner, db, rp = setup(tmp_path)
+    for i in range(70):
+        db.save_hypothesis(rp, Hypothesis(actor="a", capability="c", entry_point=f"GET /r{i} -> h{i}",
+                                          security_boundary="b", violated_invariant="rule " + "x" * 300,
+                                          observable_impact="impact " + "y" * 300,
+                                          cwe="CWE-639" if i % 2 else "CWE-89"))
+    out = asyncio.run(runner._execute_tool("list_hypotheses", {"limit": 200}, rp))
+    lines = out.splitlines()
+    assert len(lines) == 61 and "showing 1-60 of 70" in lines[-1]
+    assert all(line.startswith("[") and len(line) < 330 for line in lines[:-1])
+    page = asyncio.run(runner._execute_tool("list_hypotheses", {"offset": 60}, rp))
+    assert len(page.splitlines()) == 11 and "showing 61-70 of 70" in page
+    hit = asyncio.run(runner._execute_tool("list_hypotheses", {"query": "/r7 h7"}, rp))
+    assert len(hit.splitlines()) == 1 and "GET /r7 -> h7" in hit and "CWE-639" in hit
+    both = asyncio.run(runner._execute_tool("list_hypotheses", {"query": "cwe-89 /r1"}, rp))
+    assert all("CWE-89" in line for line in both.splitlines())
+    none = asyncio.run(runner._execute_tool("list_hypotheses", {"query": "nothing-like-this"}, rp))
+    assert none == "No hypotheses match."
+    past = asyncio.run(runner._execute_tool("list_hypotheses", {"offset": 90}, rp))
+    assert past == "No hypotheses past offset 90; 70 match."

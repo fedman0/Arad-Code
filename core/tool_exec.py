@@ -33,6 +33,12 @@ _CYPHER_NOISE = re.compile(
     r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`|//[^\n]*|/\*.*?\*/", re.S)
 _TEXT_JOIN = {"query": " ", "name_pattern": "|", "qn_pattern": "|"}
 _TEXT_ARGS = ("name_pattern", "label", "qn_pattern", "query", "file_pattern", "relationship")
+_LIST_HYPOTHESES_MAX = 60
+
+
+def _one_line(text: Optional[str], limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def _writes_graph(query: str) -> bool:
@@ -429,22 +435,26 @@ class ToolExecutor:
                 rows = [h for h in rows if h.status == args["status"]]
             if args.get("min_priority") is not None:
                 rows = [h for h in rows if h.priority >= int(args["min_priority"])]
+            terms = str(args.get("query") or "").lower().split()
+            if terms:
+                rows = [h for h in rows if all(t in " ".join(
+                    (h.id, h.cwe or "", h.entry_point or "", h.violated_invariant or "",
+                     h.skill_source or "")).lower() for t in terms)]
             total_count = len(rows)
-            limit = int(args.get("limit") or 40)
-            rows = rows[:limit]
+            offset = max(0, int(args.get("offset") or 0))
+            limit = max(1, min(int(args.get("limit") or 40), _LIST_HYPOTHESES_MAX))
+            rows = rows[offset:offset + limit]
             if not rows:
-                return "No hypotheses match."
-            out = []
-            for h in rows:
-                out.append(
-                    f"[{h.id}] sev={h.severity} conf={h.confidence} prio={h.priority} "
-                    f"status={h.status} exposure={h.exposure}\n"
-                    f"   entry: {h.entry_point}\n"
-                    f"   invariant: {h.violated_invariant}\n"
-                    f"   impact: {h.observable_impact}"
-                )
-            if len(rows) < total_count:
-                out.append(f"[showing {len(rows)}/{total_count} — use limit/status/min_priority to filter]")
+                return (f"No hypotheses past offset {offset}; {total_count} match."
+                        if total_count else "No hypotheses match.")
+            out = [f"[{h.id}] {h.status} sev={h.severity} conf={h.confidence} {h.cwe or '-'} "
+                   f"{h.exposure} | {_one_line(h.entry_point, 80)} | "
+                   f"{_one_line(h.violated_invariant, 110)} | {_one_line(h.observable_impact, 60)}"
+                   for h in rows]
+            if offset or offset + len(rows) < total_count:
+                out.append(f"[showing {offset + 1}-{offset + len(rows)} of {total_count}; narrow with "
+                           "query, status or min_priority, or page with offset; get_hypothesis "
+                           "gives the full record]")
             return "\n".join(out)
         if name == "get_hypothesis":
             h = self._db.get_hypothesis(repo_path, args.get("hypothesis_id", ""))

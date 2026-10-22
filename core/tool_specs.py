@@ -419,17 +419,23 @@ TOOLS = [
         "function": {
             "name": "list_hypotheses",
             "description": (
-                "List hypotheses already in the evidence store, with severity, exposure, "
-                "entry point and impact. Required for chain composition and deduplication — "
-                "never invent a hypothesis ID, always get it from here."
+                "List hypotheses already in the evidence store, one line each: status, severity, "
+                "CWE, exposure, entry point, invariant and impact. Required for chain composition "
+                "and deduplication; never invent a hypothesis ID, always get it from here. "
+                "To check whether a bug is already recorded, pass query with a route, file or CWE. "
+                "get_hypothesis gives the full record."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {"type": "string",
                                "description": "Filter by status, e.g. evidence_supported, reproduced, initial"},
+                    "query": {"type": "string",
+                              "description": "Words that must all appear in the id, CWE, entry point, "
+                                             "invariant or skill, e.g. '/rest/basket CWE-639'"},
                     "min_priority": {"type": "integer", "description": "Only return priority >= this"},
-                    "limit": {"type": "integer", "description": "Max rows (default 40)"},
+                    "offset": {"type": "integer", "description": "Skip this many rows, for paging"},
+                    "limit": {"type": "integer", "description": "Max rows (default 40, at most 60)"},
                 },
             },
         },
