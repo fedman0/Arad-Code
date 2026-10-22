@@ -668,8 +668,14 @@ max_turns: 40
 | `parallel` | `false` | The skill doesn't depend on others in its phase and may run alongside them |
 | `requires` | none | Skip the skill unless the project shows at least one of these: `web`, `templates`, `iac`, `llm`, `messaging`, `multiservice`, `ldap`, `multitenant` |
 | `max_turns` | `30` | How many model turns the skill gets (8 to 120). The last six only allow `finish()`. The built-in mapping, modelling, tracing and `understand-*` skills use 40; the `hunt-*` skills keep 30 |
+| `fanout` | none | `entry_points` runs the skill once per batch of entry points instead of once for the whole application (see below) |
+| `batch` | `6` | How many entry points one fan-out run gets (1 to 40) |
 
 The header is stripped before the skill text goes to the model. A header that doesn't parse stops the run with the file name in the error, instead of being sent along as text.
+
+**Fan-out over entry points.** With `fanout: entry_points` the engine builds an inventory first: the entry points the `p1` skills recorded, normalised and deduplicated, plus the routes the code graph sees registered. It groups them by their first meaningful path segment, so `/rest/basket/:id` and `/rest/basket/:id/checkout` are reviewed together, and runs the skill once per batch, in parallel up to `concurrency`. Each run gets an "Assigned entry points" list and must record a coverage decision for every entry on it. Entries that come back without a decision get one more pass, and are then marked `needs_follow_up`, so `coverage` shows exactly which entry points nobody looked at. Every batch has its own transcript and usage line, and `--resume` continues batch by batch. Without any inventory the skill runs once and finds the entry points itself.
+
+**Findings that already exist.** Every skill sees a compact list of the findings already recorded. When a skill has new evidence for one of them, it sends an entry with `existing_id` set to that finding's id instead of reporting the bug again; the engine checks the new evidence like any other, attaches it to the recorded finding and runs the gate on all of its evidence, without changing its wording or a triage decision.
 
 ## Where things are stored
 
