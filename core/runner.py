@@ -35,9 +35,19 @@ from .transcript import new_run_id, open_transcript
 from .usage import Usage, UsageMeter, usage_scope
 from .context import ContextWindow
 from .stack import StackProfile, describe, detect_stack
+from .fanout import (
+    GRAPH_ROUTES_QUERY, Target, assignment, batch_key, inventory, make_batches,
+    parse_graph_routes, uncovered,
+)
 
 
 _DEFAULT_TURNS = 30
+_NO_INVENTORY = (
+    "# Assigned entry points\n"
+    "No entry points have been recorded for this repository yet. Find them yourself (route "
+    "registrations, message consumers, scheduled jobs, CLI commands) and review as many as you "
+    "can. Record a coverage item with kind \"entry_point\" for every one you reach a decision on."
+)
 _KNOWN_FINDINGS = 60
 _FINISH_CHOICE = {"type": "function", "function": {"name": "finish"}}
 _FORCED_TURNS = 6
@@ -74,6 +84,17 @@ _FINISH_BAD_JSON = (
     "again with a findings object: {\"hypotheses\": [...], \"evidence\": [...], "
     "\"coverage\": [...], \"open_questions\": [...]}."
 )
+
+
+def _focus(chunk: "list[Target]") -> tuple[str, ...]:
+    tokens: list[str] = []
+    for t in chunk:
+        head = re.split(r"[:{*\[]", t.path, maxsplit=1)[0].rstrip("/")
+        if len(head) > 1:
+            tokens.append(head)
+        if t.handler and t.file_path:
+            tokens.append(t.file_path)
+    return tuple(dict.fromkeys(tokens))
 
 
 def _short(text: str, limit: int) -> str:
@@ -166,7 +187,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         except Exception:
             return ""
 
-    def _build_initial_context(self, repo_path: str) -> str:
+    def _build_initial_context(self, repo_path: str, focus: tuple[str, ...] = ()) -> str:
         parts: list[str] = []
         profile_text = self._profile(repo_path).to_prompt()
         if profile_text:
@@ -185,7 +206,9 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             parts.append("Known guards:\n" + "\n".join(gs))
         hypotheses = self._db.list_hypotheses(repo_path)
         if hypotheses:
-            ranked = sorted(hypotheses, key=lambda h: (-h.priority, h.id))
+            tokens = [f.lower() for f in focus if f]
+            ranked = sorted(hypotheses, key=lambda h: (
+                not any(tok in (h.entry_point or "").lower() for tok in tokens), -h.priority, h.id))
             shown = ranked[:_KNOWN_FINDINGS]
             hs = [f"  [{h.id}] {h.cwe or '-'} {_short(h.entry_point, 70)}: "
                   f"{_short(h.violated_invariant, 90)} (status={h.status})" for h in shown]
@@ -287,23 +310,31 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         max_iterations: Optional[int] = None,
         verbose: bool = False,
         negative_evidence: Optional[bool] = None,
+        label: Optional[str] = None,
+        focus: tuple[str, ...] = (),
     ) -> SkillResult:
         if negative_evidence is None:
             negative_evidence = bool(self._cfg.negative_evidence)
+        info = self._skills.find(skill_name)
+        if info is not None and info.fanout and label is None:
+            results = await self.run_fanout(skill_name, repo_path, verbose=verbose,
+                                            negative_evidence=negative_evidence,
+                                            max_iterations=max_iterations)
+            return self._combine(skill_name, repo_path, results)
         if max_iterations is None:
-            info = self._skills.find(skill_name)
             max_iterations = (info.max_turns if info and info.max_turns else _DEFAULT_TURNS)
+        scope = label or skill_name
         llm = self._llm_for_skill(skill_name)
         system = HUNT_SYSTEM_PROMPT if skill_name.startswith("hunt-") else SYSTEM_PROMPT
-        key, token, transcript = self._begin_scope(skill_name, repo_path, llm, system)
+        key, token, transcript = self._begin_scope(scope, repo_path, llm, system)
         status = "interrupted"
         try:
             result = await self._run_skill_inner(
                 skill_name, repo_path, extra_context, max_iterations, verbose,
-                negative_evidence, llm, transcript)
+                negative_evidence, llm, transcript, focus)
             status = "done"
         finally:
-            usage = self._end_scope(key, token, transcript, skill_name, repo_path, status)
+            usage = self._end_scope(key, token, transcript, scope, repo_path, status)
         result.model = self._model_name(llm)
         result.usage = usage.to_dict()
         return result
@@ -318,10 +349,11 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         negative_evidence: bool,
         llm,
         transcript,
+        focus: tuple[str, ...] = (),
     ) -> SkillResult:
         skill_text = self._load_skill(skill_name)
         commit = self._get_commit(repo_path)
-        known_context = self._build_initial_context(repo_path)
+        known_context = self._build_initial_context(repo_path, focus)
         phase = self._get_skill_phase(skill_name)
         _ne_eligible = negative_evidence and phase in ("p3", "p4", "")
 
@@ -797,7 +829,8 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         if not resume:
             # only drop progress for the skills this invocation will redo;
             # `--phase p4` used to wipe a completed full run's record
-            keep = {s for s in completed_skills(repo_path, commit) if s not in skills}
+            keep = {s for s in completed_skills(repo_path, commit)
+                    if s.split("#", 1)[0] not in skills}
             clear_run_state(repo_path)
             for name in keep:
                 mark_skill_done(repo_path, commit, name)
@@ -866,6 +899,14 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 if on_progress:
                     on_progress(name, "not_applicable", reason)
                 continue
+            if info is not None and info.fanout:
+                await flush()
+                results.extend(await self.run_fanout(
+                    name, repo_path, verbose=verbose, negative_evidence=negative_evidence,
+                    done=frozenset(done), on_progress=on_progress))
+                mark_skill_done(repo_path, commit, name)
+                self._db.delete_coverage(repo_path, "skill", name)
+                continue
             if info is not None and info.parallel and concurrency > 1:
                 batch.append(name)
                 continue
@@ -876,6 +917,117 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             results.append(await run_one(name, False))
         await flush()
         return results
+
+    async def _graph_routes(self, repo_path: str) -> list[tuple[str, str, str]]:
+        query = getattr(self._mcp, "query_graph", None)
+        if query is None:
+            return []
+        project = await self._project_for(repo_path)
+        if not project:
+            return []
+        try:
+            result = await query(GRAPH_ROUTES_QUERY, project=project, max_rows=5000, fmt="json")
+        except Exception:
+            return []
+        return parse_graph_routes(result)
+
+    async def run_fanout(self, skill_name: str, repo_path: str, verbose: bool = False,
+                         negative_evidence: Optional[bool] = None,
+                         done: frozenset = frozenset(), on_progress=None,
+                         max_iterations: Optional[int] = None) -> list[SkillResult]:
+        info = self._skills.find(skill_name)
+        size = info.batch if info is not None else 6
+        commit = self._get_commit(repo_path)
+        targets = inventory(self._db.list_entry_points(repo_path), await self._graph_routes(repo_path))
+        if not targets:
+            label = f"{skill_name}#00"
+            if on_progress:
+                on_progress(label, "started", {"model": self._model_name(self._llm_for_skill(skill_name)),
+                                               "parallel": False})
+            try:
+                result = await self.run_skill(skill_name, repo_path, extra_context=_NO_INVENTORY,
+                                              max_iterations=max_iterations, verbose=verbose,
+                                              negative_evidence=negative_evidence, label=label)
+            except BaseException:
+                if on_progress:
+                    on_progress(label, "interrupted", None)
+                raise
+            if on_progress:
+                on_progress(label, "done", result)
+            return [result]
+        gate = asyncio.Semaphore(max(1, int(self._cfg.concurrency or 1)))
+        results: list[SkillResult] = []
+
+        async def one(tag: str, index: int, total: int, chunk: list[Target]):
+            key = batch_key(skill_name, tag, chunk)
+            label = f"{skill_name}#{tag}"
+            if key in done:
+                if on_progress:
+                    on_progress(label, "skipped", None)
+                return chunk, None
+            async with gate:
+                if on_progress:
+                    on_progress(label, "started", {"model": self._model_name(self._llm_for_skill(skill_name)),
+                                                   "parallel": True})
+                try:
+                    result = await self.run_skill(
+                        skill_name, repo_path, extra_context=assignment(chunk, index, total),
+                        max_iterations=max_iterations, verbose=verbose,
+                        negative_evidence=negative_evidence, label=label, focus=_focus(chunk))
+                except BaseException:
+                    if on_progress:
+                        on_progress(label, "interrupted", None)
+                    raise
+                mark_skill_done(repo_path, commit, key)
+                if on_progress:
+                    on_progress(label, "done", result)
+                return chunk, result
+
+        async def run_plan(plan: list[list[Target]], prefix: str) -> list[Target]:
+            tasks = [asyncio.ensure_future(one(f"{prefix}{i:02d}", i, len(plan), chunk))
+                     for i, chunk in enumerate(plan, 1)]
+            try:
+                outcomes = await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            missing: list[Target] = []
+            for chunk, result in outcomes:
+                if result is None:
+                    continue
+                results.append(result)
+                missing.extend(uncovered(chunk, [c.name for c in result.coverage
+                                                 if c.kind == "entry_point"]))
+            return missing
+
+        missing = await run_plan(make_batches(targets, size), "")
+        if missing:
+            missing = await run_plan(make_batches(missing, size), "r")
+        for t in missing:
+            self._db.upsert_coverage(repo_path, CoverageItem(
+                kind="entry_point", name=t.name, status="needs_follow_up",
+                blocker=f"{skill_name} reached no decision on it in two attempts"), force=True)
+        return results
+
+    def _combine(self, skill_name: str, repo_path: str, results: list[SkillResult]) -> SkillResult:
+        out = SkillResult(skill_name=skill_name, repo_path=repo_path,
+                          commit=self._get_commit(repo_path))
+        total = Usage()
+        for r in results:
+            out.hypotheses.extend(r.hypotheses)
+            out.evidence.extend(r.evidence)
+            out.coverage.extend(r.coverage)
+            out.open_questions.extend(r.open_questions)
+            out.entry_points_found.extend(r.entry_points_found)
+            out.guards_found.extend(r.guards_found)
+            out.conflicts.extend(r.conflicts)
+            out.merged.extend(r.merged)
+            total.add(Usage.from_dict(r.usage or {}))
+        out.model = results[0].model if results else self._model_name(self._llm_for_skill(skill_name))
+        out.usage = total.to_dict()
+        return out
 
     async def _stack(self, repo_path: str) -> StackProfile:
         if repo_path not in self._stack_cache:

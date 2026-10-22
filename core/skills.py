@@ -9,6 +9,9 @@ MAINTENANCE_PHASE = "p0"
 DEFAULT_ORDER = 100
 MIN_TURNS = 8
 MAX_TURNS = 120
+FANOUT_KINDS = ("entry_points",)
+DEFAULT_BATCH = 6
+MAX_BATCH = 40
 
 
 class SkillFormatError(ValueError):
@@ -25,6 +28,8 @@ class SkillInfo:
     requires: tuple[str, ...] = ()
     tier: str = "main"
     max_turns: Optional[int] = None
+    fanout: Optional[str] = None
+    batch: int = DEFAULT_BATCH
 
 
 def split_frontmatter(text: str, source: str = "skill") -> tuple[dict, str]:
@@ -81,6 +86,29 @@ def _as_turns(value, source: str) -> Optional[int]:
     return turns
 
 
+def _as_fanout(value, source: str) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    kind = str(value).strip().lower()
+    if kind not in FANOUT_KINDS:
+        raise SkillFormatError(f"{source}: fanout must be one of {', '.join(FANOUT_KINDS)}, not {value!r}")
+    return kind
+
+
+def _as_batch(value, source: str) -> int:
+    if value is None:
+        return DEFAULT_BATCH
+    if isinstance(value, bool):
+        raise SkillFormatError(f"{source}: batch must be a number")
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        raise SkillFormatError(f"{source}: batch must be a number") from None
+    if not 1 <= size <= MAX_BATCH:
+        raise SkillFormatError(f"{source}: batch must be between 1 and {MAX_BATCH}")
+    return size
+
+
 def _as_names(value) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -110,6 +138,8 @@ class SkillCatalog:
             requires=_as_names(meta.get("requires")),
             tier=_as_tier(meta.get("tier"), str(path)),
             max_turns=_as_turns(meta.get("max_turns"), str(path)),
+            fanout=_as_fanout(meta.get("fanout"), str(path)),
+            batch=_as_batch(meta.get("batch"), str(path)),
         )
 
     def phase_skills(self, phase: str) -> list[SkillInfo]:
