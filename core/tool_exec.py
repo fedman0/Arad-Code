@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -17,7 +18,66 @@ from .intake import _EXPOSURE_VALUES
 
 _GRAPH_TOOLS = frozenset({
     "search_graph", "trace_path", "get_code_snippet", "search_code", "get_architecture",
+    "query_graph",
 })
+
+_SEARCH_GRAPH_ARGS = ("name_pattern", "label", "qn_pattern", "limit", "query", "semantic_query",
+                      "file_pattern", "relationship", "include_connected", "offset")
+_TRACE_PATH_ARGS = ("function_name", "mode", "depth", "direction", "parameter_name",
+                    "risk_labels", "limit")
+_SNIPPET_ARGS = ("include_neighbors", "source_mode", "start_line", "max_lines")
+_TRACE_MODES = frozenset({"calls", "data_flow", "cross_service"})
+_GRAPH_WRITE = re.compile(r"\b(create|merge|delete|detach|set|remove|drop|load\s+csv|call)\b", re.I)
+
+
+def _clamp(value, low: int, high: int, default: int) -> int:
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _search_graph_args(args: dict) -> dict:
+    out = {k: v for k, v in args.items() if k in _SEARCH_GRAPH_ARGS}
+    sq = out.get("semantic_query")
+    if isinstance(sq, str):
+        sq = [sq]
+    if isinstance(sq, list):
+        sq = [str(s) for s in sq if str(s).strip()][:5]
+    if sq and not out.get("query"):
+        out["semantic_query"] = sq
+    else:
+        out.pop("semantic_query", None)
+    if "limit" in out:
+        out["limit"] = _clamp(out["limit"], 1, 200, 20)
+    if "offset" in out:
+        out["offset"] = _clamp(out["offset"], 0, 100000, 0)
+    return out
+
+
+def _trace_path_args(args: dict) -> dict:
+    out = {k: v for k, v in args.items() if k in _TRACE_PATH_ARGS}
+    if out.get("mode") == "called_by":
+        out["mode"] = "calls"
+        out.setdefault("direction", "inbound")
+    if out.get("mode") is not None and out["mode"] not in _TRACE_MODES:
+        out["mode"] = "calls"
+    if "depth" in out:
+        out["depth"] = _clamp(out["depth"], 1, 10, 3)
+    if "limit" in out:
+        out["limit"] = _clamp(out["limit"], 1, 500, 100)
+    return out
+
+
+def _snippet_args(args: dict) -> dict:
+    out = {k: v for k, v in args.items() if k in _SNIPPET_ARGS}
+    if "max_lines" in out:
+        out["max_lines"] = _clamp(out["max_lines"], 1, 500, 200)
+    if "start_line" in out:
+        out["start_line"] = _clamp(out["start_line"], 1, 10_000_000, 1)
+    if out.get("source_mode") not in (None, "auto", "full", "outline"):
+        out.pop("source_mode")
+    return out
 
 _NO_GRAPH = (
     "{name} is unavailable: the code graph has no index for this repository "
@@ -179,23 +239,29 @@ class ToolExecutor:
             if project is None:
                 return _NO_GRAPH.format(name=name)
         if name == "search_graph":
-            filtered = {k: v for k, v in args.items()
-                        if k in ("name_pattern", "label", "qn_pattern", "limit")}
+            filtered = _search_graph_args(args)
             filtered["project"] = project
             r = await self._mcp.search_graph(**filtered)
             return r or "No results in the code graph for this query"
         if name == "trace_path":
-            filtered = {k: v for k, v in args.items()
-                        if k in ("function_name", "mode", "depth", "direction")}
-            if filtered.get("mode") == "called_by":
-                filtered["mode"] = "calls"
-                filtered.setdefault("direction", "inbound")
+            filtered = _trace_path_args(args)
             filtered["project"] = project
             r = await self._mcp.trace_path(**filtered)
             return r or "No results"
         if name == "get_code_snippet":
-            r = await self._mcp.get_code_snippet(args["qualified_name"], project=project)
+            r = await self._mcp.get_code_snippet(args["qualified_name"], project=project,
+                                                 **_snippet_args(args))
             return r or "Symbol not found in graph index — try read_file instead"
+        if name == "query_graph":
+            query = str(args.get("query") or "").strip()
+            if not query:
+                return "query is required: a read-only Cypher MATCH ... RETURN statement."
+            if _GRAPH_WRITE.search(query):
+                return ("query_graph is read-only: use MATCH ... WHERE ... RETURN without "
+                        "CREATE, MERGE, SET, DELETE, REMOVE, DROP, LOAD CSV or CALL.")
+            r = await self._mcp.query_graph_text(query, project=project,
+                                                 max_rows=_clamp(args.get("max_rows"), 1, 500, 100))
+            return r or "No rows"
         if name == "search_code":
             r = await self._mcp.search_code(args["pattern"], args.get("limit", 50), project=project,
                                             regex=bool(args.get("regex", False)))

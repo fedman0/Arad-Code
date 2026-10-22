@@ -43,6 +43,12 @@ class FakeLLM(BaseHTTPRequestHandler):
                 {"id": "call_0", "type": "function",
                  "function": {"name": "search_graph",
                               "arguments": json.dumps({"name_pattern": "read_token"})}},
+                {"id": "call_q", "type": "function",
+                 "function": {"name": "query_graph",
+                              "arguments": json.dumps({"query": "MATCH (f:Function) RETURN f.name LIMIT 20"})}},
+                {"id": "call_k", "type": "function",
+                 "function": {"name": "search_graph",
+                              "arguments": json.dumps({"query": "token"})}},
                 {"id": "call_1", "type": "function",
                  "function": {"name": "grep", "arguments": json.dumps({"pattern": MARKER})}},
                 {"id": "call_2", "type": "function",
@@ -140,6 +146,10 @@ def main() -> int:
     results = tool_results(FakeLLM.requests[1]) if len(FakeLLM.requests) >= 2 else {}
     check("graph tools answer inside the sandbox", "read_token" in results.get("call_0", ""),
           results.get("call_0", "")[:300])
+    check("query_graph answers inside the sandbox", "read_token" in results.get("call_q", ""),
+          results.get("call_q", "")[:300])
+    check("keyword search answers inside the sandbox", "read_token" in results.get("call_k", ""),
+          results.get("call_k", "")[:300])
     check("ripgrep works on the mounted repo", MARKER in results.get("call_1", ""),
           results.get("call_1", "")[:300])
     check("host file outside the repo is not readable",

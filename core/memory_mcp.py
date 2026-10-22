@@ -43,6 +43,10 @@ def _parse_project_table(text: str) -> list[dict]:
     return rows
 
 
+def _present(extra: dict) -> dict:
+    return {k: v for k, v in extra.items() if v is not None and v != "" and v != []}
+
+
 def _project_page(result: Any) -> tuple[list[dict], bool]:
     if isinstance(result, list):
         return [p for p in result if isinstance(p, dict)], False
@@ -211,6 +215,7 @@ class CodebaseMemoryClient:
         qn_pattern: Optional[str] = None,
         limit: int = 20,
         project: Optional[str] = None,
+        **extra: Any,
     ) -> str:
         args: dict = {"limit": limit}
         if name_pattern:
@@ -221,6 +226,7 @@ class CodebaseMemoryClient:
             args["qn_pattern"] = qn_pattern
         if project:
             args["project"] = project
+        args.update(_present(extra))
         return await self._call_raw_text("search_graph", args)
 
     async def trace_path(
@@ -230,18 +236,22 @@ class CodebaseMemoryClient:
         depth: int = 5,
         project: Optional[str] = None,
         direction: Optional[str] = None,
+        **extra: Any,
     ) -> str:
         args: dict = {"function_name": function_name, "mode": mode, "depth": depth}
         if direction:
             args["direction"] = direction
         if project:
             args["project"] = project
+        args.update(_present(extra))
         return await self._call_raw_text("trace_path", args)
 
-    async def get_code_snippet(self, qualified_name: str, project: Optional[str] = None) -> str:
+    async def get_code_snippet(self, qualified_name: str, project: Optional[str] = None,
+                               **extra: Any) -> str:
         args: dict = {"qualified_name": qualified_name}
         if project:
             args["project"] = project
+        args.update(_present(extra))
         return await self._call_raw_text("get_code_snippet", args)
 
     async def search_code(self, pattern: str, limit: int = 50, project: Optional[str] = None,
@@ -261,8 +271,23 @@ class CodebaseMemoryClient:
             args["project"] = project
         return await self._call_raw_text("get_architecture", args)
 
-    async def query_graph(self, query: str) -> Any:
-        return await self._call("query_graph", {"query": query})
+    async def query_graph(self, query: str, project: Optional[str] = None,
+                          max_rows: Optional[int] = None, fmt: Optional[str] = None) -> Any:
+        args: dict = {"query": query}
+        if project:
+            args["project"] = project
+        if max_rows is not None:
+            args["max_rows"] = max_rows
+        if fmt:
+            args["format"] = fmt
+        return await self._call("query_graph", args)
+
+    async def query_graph_text(self, query: str, project: Optional[str] = None,
+                               max_rows: Optional[int] = None) -> str:
+        result = await self.query_graph(query, project=project, max_rows=max_rows)
+        if result is None:
+            return ""
+        return result if isinstance(result, str) else json.dumps(result, indent=2)
 
     async def close(self):
         proc = self._proc

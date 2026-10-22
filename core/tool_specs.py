@@ -7,14 +7,27 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_graph",
-            "description": "Find functions, classes, or routes by name pattern or label in the indexed code graph.",
+            "description": (
+                "Find functions, methods, classes, routes or modules in the indexed code graph. "
+                "name_pattern / qn_pattern match names (regex), query ranks symbols by keywords in "
+                "their names and code (BM25), semantic_query ranks by meaning. Keyword and meaning "
+                "search are helpers for finding candidates; read the code before relying on a hit. "
+                "Rows carry the qualified name, file, lines and in/out degree."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name_pattern": {"type": "string", "description": "Substring or regex to match symbol names"},
-                    "label": {"type": "string", "description": "Symbol kind: Function, Class, Route, Module"},
-                    "qn_pattern": {"type": "string", "description": "Qualified name pattern"},
+                    "name_pattern": {"type": "string", "description": "Regex or substring matched against symbol names"},
+                    "label": {"type": "string", "description": "Symbol kind: Function, Method, Class, Route, Module, Variable"},
+                    "qn_pattern": {"type": "string", "description": "Regex matched against qualified names"},
+                    "query": {"type": "string", "description": "Keywords, e.g. 'sequelize query login'"},
+                    "semantic_query": {"type": "array", "items": {"type": "string"},
+                                       "description": "Phrases describing what the code does; not together with query"},
+                    "file_pattern": {"type": "string", "description": "Restrict to files whose path matches, e.g. 'routes/'"},
+                    "relationship": {"type": "string", "description": "Edge type the symbol must have, e.g. CALLS"},
+                    "include_connected": {"type": "boolean", "description": "Also list each hit's direct neighbours"},
                     "limit": {"type": "integer", "default": 20},
+                    "offset": {"type": "integer", "default": 0},
                 },
             },
         },
@@ -38,7 +51,11 @@ TOOLS = [
                     "function_name": {"type": "string"},
                     "mode": {"type": "string", "enum": ["calls", "data_flow", "cross_service"], "default": "calls"},
                     "direction": {"type": "string", "enum": ["inbound", "outbound", "both"], "default": "both"},
-                    "depth": {"type": "integer", "default": 5},
+                    "depth": {"type": "integer", "default": 3},
+                    "parameter_name": {"type": "string",
+                                       "description": "data_flow only: follow this parameter of the function, e.g. 'req'"},
+                    "risk_labels": {"type": "boolean", "description": "Label each hop with the risk it carries"},
+                    "limit": {"type": "integer", "default": 100},
                 },
             },
         },
@@ -47,12 +64,41 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_code_snippet",
-            "description": "Get the full source code for a symbol by qualified name.",
+            "description": (
+                "Get the source of a symbol by qualified name (or short name). Long sources are "
+                "clipped; continue with start_line. include_neighbors also lists its callers and "
+                "callees."
+            ),
             "parameters": {
                 "type": "object",
                 "required": ["qualified_name"],
                 "properties": {
                     "qualified_name": {"type": "string"},
+                    "include_neighbors": {"type": "boolean"},
+                    "source_mode": {"type": "string", "enum": ["auto", "full", "outline"]},
+                    "start_line": {"type": "integer"},
+                    "max_lines": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_graph",
+            "description": (
+                "Read-only Cypher over the code graph for questions that span many symbols, e.g. "
+                "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE g.name = 'query' RETURN f.name, "
+                "f.file_path LIMIT 50. Labels include Function, Method, Class, Module, File, Route; "
+                "edges include CALLS, HANDLES, HTTP_CALLS, IMPORTS, DEFINES, USAGE, WRITES. "
+                "A call chain it returns counts as semantic evidence."
+            ),
+            "parameters": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_rows": {"type": "integer", "default": 100},
                 },
             },
         },
@@ -542,7 +588,7 @@ _THREADED_TOOLS = frozenset({
 
 
 _PROMPT_TOOL_NAMES = frozenset({
-    "search_graph", "trace_path", "get_code_snippet", "search_code",
+    "search_graph", "trace_path", "get_code_snippet", "search_code", "query_graph",
     "read_file", "grep", "get_architecture", "list_dir",
     "parse_file_structure", "find_all_usages", "run_semgrep", "shell",
     "list_hypotheses", "get_hypothesis", "get_open_questions",

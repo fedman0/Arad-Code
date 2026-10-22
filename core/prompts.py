@@ -7,7 +7,7 @@ SYSTEM_PROMPT = """You are an expert security researcher performing authorized p
 
 1. **list_dir** — orient yourself before searching anything.
 2. **get_architecture** — understand the tech stack and service map.
-3. **search_graph / trace_path** — structural queries (call graphs, symbol resolution). PREFER over grep.
+3. **search_graph / trace_path** — structural queries (call graphs, symbol resolution). PREFER over grep. trace_path(mode="data_flow", parameter_name="req") follows a request value into the functions it reaches; query_graph answers questions over many symbols with read-only Cypher; search_graph(query=...) finds candidates by keywords.
 4. **get_code_snippet** — read a specific function by qualified name. Use after search_graph finds it.
 5. **parse_file_structure** — get every class/method in a file with line numbers and decorators.
 6. **read_file** — read a file or range when you need the actual code, not just the structure.
@@ -80,7 +80,7 @@ HUNT_SYSTEM_PROMPT = """You are an expert security researcher performing authori
 This is a pattern-detection sweep. Your goal is to find as many vulnerability patterns as possible across the codebase, not to exhaustively prove any single one. Speed and coverage matter more than depth.
 
 ## Tool priority:
-1. **search_graph** — find classes and functions by domain keyword (auth, middleware, token, jwt, route, config, payment)
+1. **search_graph** — find classes and functions by domain keyword (auth, middleware, token, jwt, route, config, payment); query= ranks by keywords in names and code
 2. **get_code_snippet** — read a specific function by qualified name
 3. **read_file** — read a config or route file directly
 4. **grep** — search for a literal string pattern when search_graph isn't enough
