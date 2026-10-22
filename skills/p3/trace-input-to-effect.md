@@ -1,6 +1,8 @@
 ---
 parallel: true
-max_turns: 40
+max_turns: 45
+fanout: entry_points
+batch: 6
 ---
 
 # SKILL: trace-input-to-effect
@@ -17,6 +19,10 @@ max_turns: 40
 - entry_point: qualified name or route
 - field: the specific input field to trace
 - target_effect: what kind of effect to find (DB write, shell exec, HTTP call, file write)
+
+When the prompt lists Assigned entry points, trace each of them: every input it accepts, through every
+function it calls, to every effect it reaches. Record one coverage decision per assigned entry point as
+that list asks, and spread the turns across all of them.
 
 If no entry_point was supplied, pick the highest-priority targets from Known Context (existing hypotheses via
 `list_hypotheses` that still need a data-flow trace, then unauthenticated entry points that accept input) and process

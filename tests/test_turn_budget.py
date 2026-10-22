@@ -51,16 +51,25 @@ def turns_used(tmp_path, skill, **kw):
 
 
 def test_deep_skills_get_forty_turns_and_hunts_keep_thirty(tmp_path):
-    assert turns_used(tmp_path / "a", "trace-input-to-effect") == (34, 35)
+    assert turns_used(tmp_path / "a", "trace-effect-to-callers") == (34, 35)
     assert turns_used(tmp_path / "b", "hunt-injection-sqli-cmdi") == (24, 25)
-    assert turns_used(tmp_path / "c", "trace-input-to-effect", max_iterations=12) == (6, 7)
+    assert turns_used(tmp_path / "c", "trace-effect-to-callers", max_iterations=12) == (6, 7)
 
 
 def test_every_shipped_deep_skill_declares_its_budget():
     from core.config import Config
     cat = SkillCatalog(Config().resolved_skills())
     for phase in ("p1", "p2", "p3", "p5"):
-        assert all(s.max_turns == 40 for s in cat.phase_skills(phase)), phase
+        assert all(s.max_turns == (45 if s.fanout else 40) for s in cat.phase_skills(phase)), phase
     p4 = cat.phase_skills("p4")
     assert all(s.max_turns == 40 for s in p4 if s.name.startswith("understand-"))
     assert all(s.max_turns is None for s in p4 if s.name.startswith("hunt-"))
+
+
+def test_trace_input_to_effect_fans_out_over_entry_points():
+    from core.config import Config
+    cat = SkillCatalog(Config().resolved_skills())
+    info = cat.find("trace-input-to-effect")
+    assert info.fanout == "entry_points" and info.batch == 6 and info.max_turns == 45
+    assert "Assigned entry points" in cat.body("trace-input-to-effect")
+    assert [s.name for s in cat.phase_skills("p3") if s.fanout] == ["trace-input-to-effect"]
