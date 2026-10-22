@@ -7,7 +7,7 @@
 ![python](https://img.shields.io/badge/python-3.10%20to%203.14-3776AB?logo=python&logoColor=white)
 ![interface](https://img.shields.io/badge/interface-TUI%20%2B%20CLI-0d1117)
 ![output](https://img.shields.io/badge/output-SARIF%202.1.0-2ea043)
-![version](https://img.shields.io/badge/version-2.3.5-informational)
+![version](https://img.shields.io/badge/version-2.3.6-informational)
 
 </div>
 
@@ -73,7 +73,7 @@ Skills live in `skills/`, one folder per phase. A full run goes through them in 
 
 Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it.
 
-`p1` and `p2` run one skill at a time because each builds on the one before. The `p3` and `p4` skills don't depend on each other, so up to three of them run at once (`--concurrency` changes that).
+`p1` and `p2` run one skill at a time because each builds on the one before. The `p3` and `p4` skills don't depend on each other, so up to three of them run at once (`--concurrency` changes that). `trace-input-to-effect` goes through every entry point the earlier phases found: it runs once per batch of six, and each entry point ends with a recorded decision (see [Writing your own skills](#writing-your-own-skills)).
 
 Before a run starts, Arad Code takes a quick look at the repository without calling the model: file types, dependency manifests (`package.json`, `requirements.txt`, `go.mod`, `pom.xml` and the like) and a few telltale lines of code. Skills that can't apply are skipped. A command line tool with no HTML, no templates and no web framework doesn't get the XSS or open redirect hunts, a repo without Docker, Terraform or CI files doesn't get the IaC hunt, and so on. Each skip is printed with its reason and recorded in `coverage`. The check only skips when nothing points the other way, and when it can't finish looking (a huge repository), it skips nothing. `--all-skills` turns it off for one run, `skill_gating: false` for good.
 
