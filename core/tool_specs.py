@@ -267,7 +267,8 @@ TOOLS = [
                 "Persist a threat model for this target, shared with all subsequent skills. "
                 "Call once after initial architecture review. "
                 "Required sections: ## Overview, ## Trust Boundaries, ## Attack Surface, ## Severity Calibration. "
-                "Minimum 400 chars. If a model already exists, this overwrites it."
+                "Minimum 400 chars. If a base already exists, this replaces it and drops its "
+                "amendments; amendments recorded before any base are kept."
             ),
             "parameters": {
                 "type": "object",
@@ -283,8 +284,8 @@ TOOLS = [
         "function": {
             "name": "amend_threat_model",
             "description": (
-                "Append a correction or discovery to the existing threat model without replacing it. "
-                "Use when you find the base model was wrong or incomplete."
+                "Append a correction, a discovery or this skill's map to the threat model without "
+                "replacing it. Works before any base threat model exists."
             ),
             "parameters": {
                 "type": "object",

@@ -608,6 +608,24 @@ FINDINGS_SCHEMA = {
                 }
             }
         },
+        "threat_model_update": {
+            "type": "object",
+            "description": (
+                "The map your skill is told to save to the threat model, when you have not saved "
+                "it with save_threat_model or amend_threat_model in this run. The engine records "
+                "it for later skills."
+            ),
+            "required": ["content"],
+            "properties": {
+                "content": {"type": "string", "description": "The section in Markdown"},
+                "summary": {"type": "string",
+                            "description": "3 to 8 lines with the facts later skills need most"},
+                "base": {"type": "boolean",
+                         "description": "true when content is the base threat model (## Overview, "
+                                        "## Trust Boundaries, ## Attack Surface, ## Severity "
+                                        "Calibration) and none has been saved yet"},
+            },
+        },
         "negative_evidence": {
             "type": "array",
             "description": (

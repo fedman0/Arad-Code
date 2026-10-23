@@ -65,6 +65,8 @@ _ROOM_CAP = 65536
 _FORCE_FINISH = (
     "You have used enough iterations. Call finish() RIGHT NOW with all findings "
     "you have gathered so far. Include every hypothesis with its evidence. "
+    "If your skill saves a map to the threat model and you have not saved it yet, "
+    "put it in threat_model_update. "
     "Do not call any other tool, only finish()."
 )
 _CONTINUE = (
@@ -254,6 +256,22 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
             parts.append("Known conflicts:\n" + "\n".join(cs))
 
         return "\n\n".join(parts)
+
+    def _save_threat_model_update(self, repo_path: str, skill_name: str, update) -> None:
+        if not isinstance(update, dict):
+            return
+        content = str(update.get("content") or "").strip()
+        if not content:
+            return
+        base, amendments = self._db.threat_model_parts(repo_path) or ("", [])
+        if content == base.strip() or any(content == str(a.get("content") or "").strip()
+                                          for a in amendments):
+            return
+        if update.get("base") is True and not base.strip() and len(content) >= 400:
+            self._db.save_threat_model(repo_path, content, skill_name)
+            return
+        summary = update.get("summary") if isinstance(update.get("summary"), str) else ""
+        self._db.amend_threat_model(repo_path, content, skill_name, summary)
 
     def _model_name(self, llm) -> str:
         return getattr(llm, "model", "") or self._cfg.model
@@ -834,6 +852,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 else:
                     self._db.save_negative_evidence(repo_path, ne)
 
+        self._save_threat_model_update(repo_path, skill_name, findings.get("threat_model_update"))
         result = SkillResult(
             skill_name=skill_name,
             repo_path=repo_path,

@@ -71,7 +71,7 @@ Skills live in `skills/`, one folder per phase. A full run goes through them in 
 | `p4` | Hunting: 17 `hunt-*` breadth scans (SQLi, SSRF, XSS, auth bypass, secrets, IaC, LLM/MCP issues and more) plus 9 deep-dive reviews | 26 |
 | `p5` | Compose individual findings into attack chains | 1 |
 
-Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it. The maps the `p1` and `p2` skills add to the threat model are shown to later skills as the short summary the writing skill gave with it, and `get_threat_model` returns a map in full when a skill needs the details.
+Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it. The maps the `p1` and `p2` skills add to the threat model are shown to later skills as the short summary the writing skill gave with it, and `get_threat_model` returns a map in full when a skill needs the details. A skill can add its map before anyone has saved the base threat model, and one that reaches its closing turns (where only `finish()` is allowed) before saving it can hand the map over in `finish()` instead.
 
 `p1` and `p2` run one skill at a time because each builds on the one before. The `p3` and `p4` skills don't depend on each other, so up to three of them run at once (`--concurrency` changes that). `trace-input-to-effect` goes through every entry point the earlier phases found: it runs once per batch of six, and each entry point ends with a recorded decision (see [Writing your own skills](#writing-your-own-skills)).
 
@@ -648,6 +648,7 @@ Things that keep a skill working:
 - Valid `exposure` values are `internet`, `authenticated`, `internal`, `admin_only` and `unreachable`. Anything else gets reset to `unspecified`.
 - Evidence goes in the top-level `evidence` array of `finish()`, tied to its finding by `hypothesis_index`; a hypothesis has no field for evidence of its own. When a finding with confidence above 3 has no evidence item, or a hypothesis is missing a required field, `finish()` is sent back to the model with the list of problems, twice at most. A finding that still has no evidence is kept as a lead at confidence 3 and never reaches the report.
 - A proof obligation's status is judged against the finding, not the wording of its question. For "Is any rate limiter applied?" with no limiter in the code, the answer supports the finding, so the obligation is `verified`; `refuted` means the evidence shows the finding does not hold. A finding sent with a required obligation marked `refuted` goes back to the model with that note, within the same two retries.
+- A map the skill should keep goes to `amend_threat_model`, which works before any base threat model exists. When the skill reaches its closing turns first, the map can go in the `threat_model_update` field of `finish()`, with `base: true` for the base sections when none has been saved yet.
 
 A skill file can start with a short YAML header:
 

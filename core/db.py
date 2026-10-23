@@ -496,28 +496,34 @@ class EvidenceStore:
                VALUES (?,?,'[]',?,?,?)
                ON CONFLICT(target) DO UPDATE SET
                  content=excluded.content,
-                 amendments='[]',
+                 amendments=CASE WHEN threat_models.content = '' THEN threat_models.amendments
+                                 ELSE '[]' END,
                  updated_at=excluded.updated_at,
                  created_by_skill=excluded.created_by_skill""",
             (repo_path, content, now, now, skill)
         )
         self.conn.commit()
 
-    def get_threat_model(self, repo_path: str, brief: bool = False) -> Optional[str]:
+    def threat_model_parts(self, repo_path: str) -> Optional[tuple[str, list[dict]]]:
         row = self.conn.execute(
             "SELECT content, amendments FROM threat_models WHERE target=?", (repo_path,)
         ).fetchone()
         if row is None:
             return None
-        content = row["content"]
-        amendments = json.loads(row["amendments"] or "[]")
+        return row["content"] or "", json.loads(row["amendments"] or "[]")
+
+    def get_threat_model(self, repo_path: str, brief: bool = False) -> Optional[str]:
+        parts = self.threat_model_parts(repo_path)
+        if parts is None:
+            return None
+        content, amendments = parts
         if amendments:
             addenda = "\n\n".join(
                 f"### Amendment {i+1} (by {a.get('added_by_skill', '?')})\n"
                 f"{_amendment_brief(a, i + 1) if brief else a['content']}"
                 for i, a in enumerate(amendments)
             )
-            return content + "\n\n---\n\n" + addenda
+            return content + "\n\n---\n\n" + addenda if content.strip() else addenda
         return content
 
     def get_threat_model_section(self, repo_path: str, section: str = "") -> Optional[str]:
@@ -545,27 +551,35 @@ class EvidenceStore:
             f"  {number}. {_first_line(a.get('content'))} (by {a.get('added_by_skill', '?')}, "
             f"{len(a.get('content') or '')} characters)"
             for number, a in enumerate(amendments, 1))
-        return row["content"] + (f"\n\nAmendments:\n{listing}" if listing else "")
+        base = row["content"] or "No base threat model has been saved yet."
+        return base + (f"\n\nAmendments:\n{listing}" if listing else "")
 
     def amend_threat_model(self, repo_path: str, addendum: str, skill: str = "",
                            summary: str = "") -> bool:
         row = self.conn.execute(
             "SELECT amendments FROM threat_models WHERE target=?", (repo_path,)
         ).fetchone()
-        if row is None:
-            return False
-        amendments = json.loads(row["amendments"] or "[]")
+        now = utc_now_iso()
         entry = {
             "content": addendum,
-            "added_at": utc_now_iso(),
+            "added_at": now,
             "added_by_skill": skill,
         }
         if summary.strip():
             entry["summary"] = summary.strip()
+        if row is None:
+            self.conn.execute(
+                "INSERT INTO threat_models (target, content, amendments, created_at, updated_at, "
+                "created_by_skill) VALUES (?,?,?,?,?,?)",
+                (repo_path, "", json.dumps([entry]), now, now, "")
+            )
+            self.conn.commit()
+            return True
+        amendments = json.loads(row["amendments"] or "[]")
         amendments.append(entry)
         self.conn.execute(
             "UPDATE threat_models SET amendments=?, updated_at=? WHERE target=?",
-            (json.dumps(amendments), utc_now_iso(), repo_path)
+            (json.dumps(amendments), now, repo_path)
         )
         self.conn.commit()
         return True
