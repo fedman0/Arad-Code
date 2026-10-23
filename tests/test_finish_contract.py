@@ -142,3 +142,42 @@ def test_optional_refuted_points_and_demotions_are_not_sent_back(tmp_path):
                                            proof_obligations=[required])],
                                       [ev(0), ev(1)])]])
     assert len(llm.calls) == 1 and len(res.hypotheses) == 2
+
+
+def test_guard_coverage_is_described_by_the_path_the_attacker_uses():
+    props = FINDINGS_SCHEMA["properties"]["hypotheses"]["items"]["properties"]
+    assert "uncovered_paths" in props["guard_coverage"]["description"]
+    assert "some_paths" in props["uncovered_paths"]["description"]
+    assert "uncovered_paths" in OUTPUT_CONTRACT
+
+
+def test_some_paths_without_the_unguarded_path_is_sent_back_once(tmp_path):
+    gap = hyp(guard_coverage="some_paths")
+    named = hyp(guard_coverage="some_paths", uncovered_paths=["GET /search (no auth check)"])
+    res, llm = run(tmp_path, [[tc(1, "search_graph", {"name_pattern": "search"})],
+                              [finish([gap], [ev(0)])], [finish([named], [ev(0)])]])
+    reply = tool_replies(llm)["call_101"]
+    assert reply.startswith("Findings NOT recorded") and "names no uncovered_paths" in reply
+    assert len(llm.calls) == 3 and len(res.hypotheses) == 1
+    assert res.hypotheses[0].status == "evidence_supported"
+    assert not [o for o in res.hypotheses[0].proof_obligations if o.claim_type == "guard"]
+
+
+def test_the_guard_obligation_asks_for_the_path_and_lifts_once_it_is_named():
+    from core.evidence_gate import _inject_minimum_obligations
+    from core.models import Hypothesis, ProofObligation
+    h = Hypothesis(**hyp(guard_coverage="some_paths"))
+    _inject_minimum_obligations(h)
+    guard = [o for o in h.proof_obligations if o.claim_type == "guard"]
+    assert len(guard) == 1 and "uncovered_paths" in guard[0].question
+    old = ProofObligation(question="Are all attack paths free of effective guards?",
+                          status="unresolved", claim_type="guard", required_for_finding=True,
+                          reason="engine-injected (guard_coverage=some_paths)")
+    h.proof_obligations, h.uncovered_paths = [old], ["GET /search"]
+    _inject_minimum_obligations(h)
+    assert h.proof_obligations == []
+    own = ProofObligation(question="Is the guard on /search missing?", status="unresolved",
+                          claim_type="guard", required_for_finding=True)
+    h.proof_obligations = [own]
+    _inject_minimum_obligations(h)
+    assert h.proof_obligations == [own]

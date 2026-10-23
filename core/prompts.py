@@ -253,6 +253,10 @@ silently dropped. Before calling finish(), check each item below.
 - `reachability`, `input_control`, `guard_coverage`, `exposure`: all REQUIRED.
   Leaving one unset makes the engine add an unresolved obligation that blocks
   the finding from ever being reported.
+- `guard_coverage` is about the paths the attacker can use: `no_paths` when no
+  effective guard sits on the one used, `some_paths` when other paths are
+  guarded but one usable path is not (name it in `uncovered_paths`), and
+  `all_paths` only when every path is guarded and the finding needs a bypass.
 - `proof_obligations`: state the claims your finding depends on. Mark one
   `verified` ONLY when a specific evidence item establishes it, and cite that
   evidence in `evidence_ref`. Mark `unresolved` when you could not confirm it.

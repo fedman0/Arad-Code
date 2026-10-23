@@ -420,7 +420,26 @@ def _apply_quality_caps(h: "Hypothesis", evidence: "list[Evidence]",
         h.confidence = worst_cap
 
 
+def _guard_settled(h: "Hypothesis") -> bool:
+    if h.guard_coverage == "some_paths":
+        return any(isinstance(p, str) and p.strip() for p in h.uncovered_paths)
+    return h.guard_coverage != "unknown"
+
+
+def _injected_met(h: "Hypothesis", ob) -> bool:
+    if ob.status != "unresolved" or not (ob.reason or "").startswith("engine-injected"):
+        return False
+    if ob.claim_type == "reachability":
+        return h.reachability == "proven"
+    if ob.claim_type == "input_control":
+        return h.input_control in ("full", "partial")
+    if ob.claim_type == "guard":
+        return _guard_settled(h)
+    return False
+
+
 def _inject_minimum_obligations(h: "Hypothesis") -> None:
+    h.proof_obligations = [ob for ob in h.proof_obligations if not _injected_met(h, ob)]
     existing_required = {
         ob.claim_type for ob in h.proof_obligations if ob.required_for_finding
     }
@@ -441,9 +460,9 @@ def _inject_minimum_obligations(h: "Hypothesis") -> None:
             required_for_finding=True,
             reason=f"engine-injected (input_control={h.input_control})",
         ))
-    if "guard" not in existing_required and h.guard_coverage in ("unknown", "some_paths"):
+    if "guard" not in existing_required and not _guard_settled(h):
         h.proof_obligations.append(ProofObligation(
-            question="Are all attack paths free of effective guards?",
+            question="Which attack path has no effective guard? Name it in uncovered_paths.",
             status="unresolved",
             claim_type="guard",
             required_for_finding=True,

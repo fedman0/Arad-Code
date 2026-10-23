@@ -419,8 +419,18 @@ FINDINGS_SCHEMA = {
                     "guard_analysis": {"type": "string", "enum": ["complete", "incomplete"]},
                     "runtime_assumptions": {"type": "string", "enum": ["verified", "env_dependent"]},
                     "impact_basis": {"type": "string", "enum": ["observed", "inferred"]},
-                    "guard_coverage": {"type": "string", "enum": ["all_paths", "some_paths", "no_paths", "unknown"]},
-                    "uncovered_paths": {"type": "array", "items": {"type": "string"}},
+                    "guard_coverage": {"type": "string", "enum": ["all_paths", "some_paths", "no_paths", "unknown"],
+                                       "description": "Whether an effective guard sits on the paths the "
+                                                      "attacker can use: no_paths = none on the path "
+                                                      "used; some_paths = other paths are guarded but "
+                                                      "at least one usable path is not, named in "
+                                                      "uncovered_paths; all_paths = every path is "
+                                                      "guarded, so the finding needs a bypass; unknown "
+                                                      "= not checked"},
+                    "uncovered_paths": {"type": "array", "items": {"type": "string"},
+                                        "description": "Attack paths no effective guard covers, e.g. "
+                                                       "'PUT /api/Users/:id (no isAuthorized)'. "
+                                                       "Required with some_paths"},
                     "temporal_validity": {"type": "string", "enum": ["checked_at_request", "snapshot", "unknown"]},
                     "actor_capabilities": {"type": "array", "items": {"type": "string"}},
                     "exposure": {"type": "string",

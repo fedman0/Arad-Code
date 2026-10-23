@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, Optional
+from .evidence_gate import _injected_met
 from .models import Evidence, Hypothesis, ProofObligation
 
 
@@ -146,6 +147,12 @@ def _refuted_required(h_data: dict) -> list[str]:
     return out
 
 
+def _unnamed_guard_gap(h_data: dict) -> bool:
+    if h_data.get("status") in _MODEL_DEMOTION_STATUSES or h_data.get("guard_coverage") != "some_paths":
+        return False
+    return not any(isinstance(p, str) and p.strip() for p in _as_list(h_data.get("uncovered_paths")))
+
+
 def _finish_problems(findings: dict, commit: str = "",
                      known: "frozenset[str] | set[str]" = frozenset()) -> list[str]:
     problems: list[str] = []
@@ -162,6 +169,11 @@ def _finish_problems(findings: dict, commit: str = "",
                 "says the finding does not hold. Status is judged against the finding: a guard or "
                 "check that does not exist is verified. Mark it verified if the evidence supports "
                 "the finding, or drop the hypothesis if it does not")
+        if _unnamed_guard_gap(h):
+            problems.append(
+                f"hypotheses[{i}] sets guard_coverage some_paths but names no uncovered_paths. "
+                "List the attack path that no effective guard covers, or set guard_coverage to "
+                "unknown if you did not check")
         existing = _existing_id(h)
         if existing:
             if existing in known:
@@ -230,15 +242,7 @@ _FILL_IN_CLAIMS = ("guard_coverage", "guard_analysis", "runtime_assumptions", "i
 
 
 def _injected_and_met(h: "Hypothesis", ob) -> bool:
-    if ob.status != "unresolved" or not (ob.reason or "").startswith("engine-injected"):
-        return False
-    if ob.claim_type == "reachability":
-        return h.reachability == "proven"
-    if ob.claim_type == "input_control":
-        return h.input_control in ("full", "partial")
-    if ob.claim_type == "guard":
-        return h.guard_coverage not in ("unknown", "some_paths")
-    return False
+    return _injected_met(h, ob)
 
 
 def _merge_model_claims(h: "Hypothesis", entries: list) -> None:
