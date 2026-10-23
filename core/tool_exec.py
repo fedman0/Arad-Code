@@ -293,6 +293,11 @@ class ToolExecutor:
             filtered = _trace_path_args(args)
             filtered["project"] = project
             r = await self._mcp.trace_path(**filtered)
+            short = str(filtered.get("function_name") or "").rsplit(".", 1)[-1].strip()
+            if r and short and '"function not found"' in r[:300]:
+                r += (f"\nThe code graph has no node for {short}. Functions assigned to a const "
+                      "(arrow functions), object methods and library calls are often missing "
+                      f"from it; find_all_usages(symbol_name=\"{short}\") lists the uses by text.")
             return r or "No results"
         if name == "get_code_snippet":
             r = await self._mcp.get_code_snippet(args["qualified_name"], project=project,

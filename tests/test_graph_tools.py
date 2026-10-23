@@ -72,6 +72,21 @@ def test_trace_path_supports_data_flow_and_clamps(tmp_path):
     assert calls[0][1]["mode"] == "calls" and calls[0][1]["direction"] == "inbound"
 
 
+def test_trace_path_points_at_find_all_usages_when_the_graph_has_no_node(tmp_path):
+    runner, _ = make_runner(tmp_path)
+    rec = Recorder()
+
+    async def missing(**kw):
+        return json.dumps({"error": "function not found", "function_name": kw["function_name"]})
+    rec.trace_path = missing
+    runner._mcp = rec
+    rp = str(make_repo(tmp_path / "repo"))
+    out = asyncio.run(runner._execute_tool("trace_path", {"function_name": "lib.challengeUtils.solveIf"}, rp))
+    assert out.startswith("{") and 'find_all_usages(symbol_name="solveIf")' in out
+    out, _ = run(tmp_path / "b", "trace_path", {"function_name": "f"})
+    assert out == "chain"
+
+
 def test_code_snippet_extras(tmp_path):
     _, calls = run(tmp_path, "get_code_snippet", {"qualified_name": "a.b", "include_neighbors": True,
                                                   "max_lines": 9999, "start_line": 40, "source_mode": "bogus"})
