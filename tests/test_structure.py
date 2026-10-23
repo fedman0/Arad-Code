@@ -66,6 +66,16 @@ def test_catalog_reads_parallel_and_requires(tmp_path):
         cat.body("missing")
 
 
+def test_catalog_reads_optional_and_the_understand_skills_use_it(tmp_path):
+    write_skill(tmp_path, "p4", "deep-x", "---\noptional: true\n---\nx\n")
+    write_skill(tmp_path, "p4", "deep-y", "---\nparallel: true\n---\ny\n")
+    cat = SkillCatalog(tmp_path)
+    assert cat.find("deep-x").optional is True and cat.find("deep-y").optional is False
+    shipped = SkillCatalog(Path(__file__).resolve().parent.parent / "skills").phase_skills("p4")
+    assert {s.name for s in shipped if s.optional} == {s.name for s in shipped
+                                                        if s.name.startswith("understand-")}
+
+
 def test_bad_order_value_is_reported_with_the_file(tmp_path):
     write_skill(tmp_path, "p1", "broken", "---\norder: soon\n---\nx\n")
     with pytest.raises(SkillFormatError, match="broken.md"):

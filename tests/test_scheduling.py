@@ -139,6 +139,28 @@ def test_gating_can_be_turned_off_in_config(tmp_path):
     assert set(runner._llm.skills) == set(p4_skills())
 
 
+def test_optional_skills_are_skipped_unless_turned_on(tmp_path):
+    assert Config().optional_skills is False
+    repo = git_repo(tmp_path / "repo", {"app.py": "print(1)\n"})
+    catalog = SkillCatalog(SKILLS).phase_skills("p4")
+    optional = {s.name for s in catalog if s.optional}
+    plain = {s.name for s in catalog if s.optional and not s.requires}
+    assert len(optional) == 9 and plain
+    runner, db = make_runner(tmp_path)
+    events = []
+    asyncio.run(runner.run_phase("p4", repo, on_progress=lambda n, s, r: events.append((n, s, r))))
+    skipped = {n: r for n, s, r in events if s == "not_applicable"}
+    assert optional <= set(skipped) and not optional & set(runner._llm.skills)
+    assert all("optional_skills" in skipped[n] for n in plain)
+    assert "hunt-injection-sqli-cmdi" in runner._llm.skills
+    rows = {r["name"]: r for r in db.coverage_detail(repo) if r["kind"] == "skill"}
+    assert all(rows[n]["status"] == "not_applicable" for n in plain)
+
+    runner2, _ = make_runner(tmp_path, optional_skills=True)
+    asyncio.run(runner2.run_phase("p4", repo))
+    assert plain <= set(runner2._llm.skills)
+
+
 def test_a_failing_parallel_skill_stops_the_batch(tmp_path):
     repo = git_repo(tmp_path / "repo", {"app.py": "print(1)\n"})
     runner, db = make_runner(tmp_path, llm=CountingLLM(fail_for="hunt-injection-sqli-cmdi"), concurrency=3)

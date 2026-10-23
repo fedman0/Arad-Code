@@ -30,6 +30,7 @@ class SkillInfo:
     max_turns: Optional[int] = None
     fanout: Optional[str] = None
     batch: int = DEFAULT_BATCH
+    optional: bool = False
 
 
 def split_frontmatter(text: str, source: str = "skill") -> tuple[dict, str]:
@@ -140,6 +141,7 @@ class SkillCatalog:
             max_turns=_as_turns(meta.get("max_turns"), str(path)),
             fanout=_as_fanout(meta.get("fanout"), str(path)),
             batch=_as_batch(meta.get("batch"), str(path)),
+            optional=_as_flag(meta.get("optional", False)),
         )
 
     def phase_skills(self, phase: str) -> list[SkillInfo]:

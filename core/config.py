@@ -60,6 +60,7 @@ class Config:
     context_char_limit: int = 200000
     history_char_limit: int = 110000
     skill_gating: bool = True
+    optional_skills: bool = False
     negative_evidence: bool = False
     verbose: bool = False
     headless: bool = False
@@ -185,6 +186,7 @@ def _config_from_data(
         context_char_limit=200000 if context_char_limit is None else context_char_limit,
         history_char_limit=110000 if history_char_limit is None else history_char_limit,
         skill_gating=_as_bool(_opt(data, "skill_gating", True)),
+        optional_skills=_as_bool(_opt(data, "optional_skills", False)),
         negative_evidence=_as_bool(_opt(data, "negative_evidence", False)),
         verbose=_as_bool(_opt(data, "verbose", False)),
         headless=_as_bool(_opt(data, "headless", False)),

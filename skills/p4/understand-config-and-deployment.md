@@ -1,4 +1,5 @@
 ---
+optional: true
 parallel: true
 max_turns: 40
 ---

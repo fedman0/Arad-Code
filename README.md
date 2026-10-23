@@ -68,7 +68,7 @@ Skills live in `skills/`, one folder per phase. A full run goes through them in 
 | `p1` | Project understanding: inventory, build, config, entry points, DI, middleware, deployment, service boundaries | 8 |
 | `p2` | Identity and ownership: identities, authorization model, resource ownership, tenants, state machines, invariants, trust boundaries, sensitive data | 8 |
 | `p3` | Path analysis: input to effect, effect back to callers, identity propagation, persisted data reuse, cross-service messages | 6 |
-| `p4` | Hunting: 17 `hunt-*` breadth scans (SQLi, SSRF, XSS, auth bypass, secrets, IaC, LLM/MCP issues and more) plus 9 deep-dive reviews | 26 |
+| `p4` | Hunting: 17 `hunt-*` breadth scans (SQLi, SSRF, XSS, auth bypass, secrets, IaC, LLM/MCP issues and more) plus 9 optional `understand-*` deep-dive reviews | 26 |
 | `p5` | Compose individual findings into attack chains | 1 |
 
 Earlier phases write what they learn (a threat model, entry points, guards, function summaries) into a local SQLite store, and later phases start from that context instead of rediscovering it. The maps the `p1` and `p2` skills add to the threat model are shown to later skills as the short summary the writing skill gave with it, and `get_threat_model` returns a map in full when a skill needs the details. A skill can add its map before anyone has saved the base threat model, and one that reaches its closing turns (where only `finish()` is allowed) before saving it can hand the map over in `finish()` instead.
@@ -225,6 +225,7 @@ The prices above only show the shape. Copy the real numbers from your provider's
 | `context_char_limit` | `200000` | Once a skill's conversation grows past this many characters, older tool output is shortened. `0` turns this limit off |
 | `history_char_limit` | `110000` | The same shortening starts once the tool calls and results after the skill's first message pass this many characters. This keeps calls cheaper and gives every skill the same room, however long its Known Context is. `0` turns it off; set both to `0` to keep everything |
 | `skill_gating` | `true` | Skip skills that don't apply to the project's stack |
+| `optional_skills` | `false` | Also run the skills marked `optional`, which are the nine `understand-*` reviews. They cost about a seventh of a scan's tokens, and in benchmark runs every known bug they found was also found by other skills in another run. `--all-skills` runs them for one scan |
 | `negative_evidence` | `false` | Same as passing `-N` to every `run` and `skill` (also applies to scans started in the UI) |
 | `verbose` | `false` | Same as passing `-v` to every `run` |
 | `headless` | `false` | Never open the terminal UI, as if every command had `--headless` |
@@ -397,7 +398,7 @@ pentest.py sandbox status
 - `-N` / `--negative-evidence` makes the `p3` and `p4` skills also record *why* an entry point is safe: the exact guard line that protects it. Those anchors are re-checked on later runs, and if the guard disappears from the code the entry point is flagged for review again.
 - `-v` prints every tool call as it happens.
 - `--concurrency N` sets how many `p3`/`p4` skills run at once (default 3). Raise it if your API key has the rate limit for it; `1` runs one skill at a time.
-- `--all-skills` runs every skill, including the ones the stack check would skip.
+- `--all-skills` runs every skill, including the ones the stack check would skip and the optional ones.
 - `--fast-model` and `--verify-model` override `fast_model` and `verify_model` for one command.
 - `verify` sends one finding to an adversarial pass whose only job is to refute it, then updates its status. Your own triage decisions are never overwritten.
 - Budget options: `--budget USD`, `--token-budget N` and `--no-transcripts`, explained in [Cost, budgets and transcripts](#cost-budgets-and-transcripts).
@@ -671,6 +672,7 @@ max_turns: 40
 | `tier` | `main` | `fast` runs the skill on `fast_model` when one is set |
 | `parallel` | `false` | The skill doesn't depend on others in its phase and may run alongside them |
 | `requires` | none | Skip the skill unless the project shows at least one of these: `web`, `templates`, `iac`, `llm`, `messaging`, `multiservice`, `ldap`, `multitenant` |
+| `optional` | `false` | Leave the skill out of `run` unless `optional_skills` is on or `--all-skills` is given. `skill <name>` still runs it |
 | `max_turns` | `30` | How many model turns the skill gets (8 to 120). The last six only allow `finish()`. The built-in mapping, modelling, tracing and `understand-*` skills use 40; the `hunt-*` skills keep 30 |
 | `fanout` | none | `entry_points` runs the skill once per batch of entry points instead of once for the whole application (see below) |
 | `batch` | `6` | How many entry points one fan-out run gets (1 to 40) |

@@ -1,4 +1,5 @@
 ---
+optional: true
 parallel: true
 requires: [web, multiservice]
 max_turns: 40

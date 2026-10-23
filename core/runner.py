@@ -947,9 +947,13 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 reported_skips.add(name)
                 continue
             info = self._skills.find(name)
+            reason = ""
             if stack is not None and info is not None and info.requires \
                     and not stack.has_any(info.requires):
                 reason = f"no {describe(info.requires)} found"
+            elif gating and info is not None and info.optional and not self._cfg.optional_skills:
+                reason = "optional, off unless optional_skills is on or --all-skills is given"
+            if reason:
                 mark_skill_done(repo_path, commit, name)
                 self._db.upsert_coverage(repo_path, CoverageItem(
                     kind="skill", name=name, status="not_applicable", exclusion_reason=reason),
