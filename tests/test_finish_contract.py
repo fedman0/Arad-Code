@@ -85,7 +85,7 @@ def test_forced_finish_rejection_says_only_finish_is_left(tmp_path):
                    max_iterations=3)
     reply = tool_replies(llm)["call_101"]
     assert "only finish() is available now" in reply
-    assert llm.calls[1]["tools"] == ["finish"] and len(res.hypotheses) == 1
+    assert "read_file" in llm.calls[1]["tools"] and len(res.hypotheses) == 1
 
 
 def test_empty_findings_are_never_bounced(tmp_path):

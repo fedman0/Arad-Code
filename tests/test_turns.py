@@ -7,6 +7,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.llm import Reply
+from core.runner import _FORCE_FINISH
 from fakes_engine import EMPTY, ScriptedLLM, make_repo, make_runner, tc
 from test_usage import FakeAPI, bad_request, completion, make_client
 
@@ -130,7 +131,8 @@ def test_forced_finish_turns_get_room_and_give_up_after_two_empty_replies(tmp_pa
     res = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp, max_iterations=4))
     assert len(llm.calls) == 2
     assert llm.calls[0]["tool_choice"] == {"type": "function", "function": {"name": "finish"}}
-    assert llm.calls[0]["tools"] == ["finish"] and llm.calls[0]["max_tokens"] == 65536
+    assert "finish" in llm.calls[0]["tools"] and "read_file" in llm.calls[0]["tools"]
+    assert llm.calls[0]["max_tokens"] == 65536
     assert llm.calls[1]["reasoning_effort"] == "low"
     assert any("Call finish() RIGHT NOW" in str(m.get("content")) for m in llm.calls[0]["messages"])
     assert any("cut off" in str(m.get("content")) for m in llm.calls[1]["messages"])
@@ -151,6 +153,24 @@ def test_a_finish_that_is_not_an_object_is_bounced_then_recorded_empty(tmp_path)
     assert replies["call_2"].startswith("finish() arguments were not a JSON object")
     assert len(llm.calls) == 3 and not res.hypotheses
     assert any("not a JSON object" in q for q in res.open_questions)
+
+
+def test_the_forced_finish_note_rides_on_the_last_tool_result(tmp_path):
+    runner, _ = make_runner(tmp_path)
+    rp = str(make_repo(tmp_path / "repo"))
+    llm = ScriptedLLM([[tc(1, "search_graph", {"name_pattern": "search"})],
+                       [tc(2, "read_file", {"path": "app/views.py"})],
+                       [tc(3, "finish", FINDING)]])
+    runner._llm = llm
+    res = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp, max_iterations=7))
+    forced = llm.calls[1]
+    assert [m["role"] for m in forced["messages"]][-2:] == ["assistant", "tool"]
+    assert forced["messages"][-1]["content"].endswith(_FORCE_FINISH)
+    assert forced["tools"] == llm.calls[0]["tools"] and len(forced["tools"]) > 1
+    assert forced["tool_choice"] == {"type": "function", "function": {"name": "finish"}}
+    assert tool_replies(llm)["call_2"].startswith("Not run: only finish() is available now")
+    assert llm.calls[2]["tools"] == ["finish"]
+    assert len(res.hypotheses) == 1
 
 
 def test_legacy_fakes_without_finish_reason_still_drive_a_skill(tmp_path):
@@ -224,4 +244,4 @@ def test_a_skill_finishes_on_a_model_that_refuses_named_tool_choice(tmp_path):
     assert not res.open_questions
     assert [b["tool_choice"] if not isinstance(b["tool_choice"], dict) else "named" for b in seen] \
         == ["named", "required"]
-    assert [t["function"]["name"] for t in seen[-1]["tools"]] == ["finish"]
+    assert "finish" in [t["function"]["name"] for t in seen[-1]["tools"]]

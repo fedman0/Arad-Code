@@ -71,6 +71,9 @@ _FORCE_FINISH_MAP = (
     "Your skill saves a map to the threat model: if you have not saved it yet, "
     "put it in threat_model_update."
 )
+_FORCED_REFUSED = (
+    "Not run: only finish() is available now. Call finish() with the findings you have."
+)
 _CONTINUE = (
     "Continue the skill: call a tool to keep investigating, "
     "or call finish() with your structured findings."
@@ -137,6 +140,14 @@ def _saves_map(skill_text: str) -> bool:
 
 def _force_finish(map_skill: bool) -> str:
     return f"{_FORCE_FINISH} {_FORCE_FINISH_MAP}" if map_skill else _FORCE_FINISH
+
+
+def _add_note(messages: list[dict], note: str) -> None:
+    last = messages[-1] if messages else None
+    if last is not None and last.get("role") == "tool":
+        messages[-1] = {**last, "content": f"{last.get('content') or ''}\n\n{note}"}
+    else:
+        messages.append({"role": "user", "content": note})
 
 
 def _rejection(problems: list[str], forced: bool) -> str:
@@ -461,14 +472,15 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         nudge_at = max(0, max_iterations - _FORCED_TURNS)
         map_skill = _saves_map(skill_text)
         brief = False
+        refused = False
         empty_forced = 0
         finish_retries = 0
         no_output = ""
         for iteration in range(max_iterations):
             forced = iteration >= nudge_at
             if forced and iteration == nudge_at:
-                messages.append({"role": "user", "content": _force_finish(map_skill)})
-            tools_to_use = [finish_tool] if forced else TOOLS
+                _add_note(messages, _force_finish(map_skill))
+            tools_to_use = [finish_tool] if forced and refused else TOOLS
             reply = await self._turn(
                 llm, transcript, messages, tools_to_use, active_system_prompt,
                 tool_choice=_FINISH_CHOICE if forced else None,
@@ -561,6 +573,9 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                         else:
                             finish_args = raw_findings
                             result_text = "Findings recorded."
+                elif forced:
+                    refused = True
+                    result_text = _FORCED_REFUSED
                 elif broken:
                     brief = brief or cut
                     result_text = (
