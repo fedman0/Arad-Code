@@ -34,9 +34,9 @@ class Explorer:
         self.calls = []
 
     async def complete_turn(self, messages, tools, system=None, tool_choice=None, **extra):
-        names = [t["function"]["name"] for t in tools]
-        self.calls.append(names)
-        if names == ["finish"]:
+        closing = "Call finish() RIGHT NOW" in str(messages[-1].get("content") or "")
+        self.calls.append(closing)
+        if closing:
             return Reply(None, [tc(len(self.calls), "finish", EMPTY)], "tool_calls")
         return Reply(None, [tc(len(self.calls), "list_dir", {"path": ""})], "tool_calls")
 
@@ -47,7 +47,7 @@ def turns_used(tmp_path, skill, **kw):
     llm = Explorer()
     runner._llm = llm
     asyncio.run(runner.run_skill(skill, rp, **kw))
-    return sum(1 for c in llm.calls if c != ["finish"]), len(llm.calls)
+    return sum(1 for c in llm.calls if not c), len(llm.calls)
 
 
 def test_deep_skills_get_forty_turns_and_hunts_keep_thirty(tmp_path):
