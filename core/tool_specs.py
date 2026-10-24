@@ -284,8 +284,10 @@ TOOLS = [
         "function": {
             "name": "amend_threat_model",
             "description": (
-                "Append a correction, a discovery or this skill's map to the threat model without "
-                "replacing it. Works before any base threat model exists."
+                "Append a correction or discovery to the threat model without replacing it. Use it "
+                "when the threat model is wrong or incomplete, or to save the map your skill's "
+                "instructions ask for; findings go in finish(). Works before any base threat "
+                "model exists."
             ),
             "parameters": {
                 "type": "object",

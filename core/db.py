@@ -14,6 +14,7 @@ from .usage import Usage
 
 
 _AMENDMENT_HEAD = 1200
+_BRIEF_AMENDMENTS = 25
 
 
 def _first_line(text: Optional[str]) -> str:
@@ -518,11 +519,21 @@ class EvidenceStore:
             return None
         content, amendments = parts
         if amendments:
+            shown = amendments[:_BRIEF_AMENDMENTS] if brief else amendments
             addenda = "\n\n".join(
                 f"### Amendment {i+1} (by {a.get('added_by_skill', '?')})\n"
                 f"{_amendment_brief(a, i + 1) if brief else a['content']}"
-                for i, a in enumerate(amendments)
+                for i, a in enumerate(shown)
             )
+            rest = amendments[len(shown):]
+            if rest:
+                first = len(shown) + 1
+                addenda += (
+                    f"\n\n### Amendments {first} to {len(amendments)}, one line each "
+                    f"(get_threat_model(section=\"N\") returns amendment N)\n"
+                    + "\n".join(f"  {n}. {_first_line(a.get('content'))} "
+                                f"(by {a.get('added_by_skill', '?')})"
+                                for n, a in enumerate(rest, first)))
             return content + "\n\n---\n\n" + addenda if content.strip() else addenda
         return content
 

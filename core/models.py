@@ -621,9 +621,9 @@ FINDINGS_SCHEMA = {
         "threat_model_update": {
             "type": "object",
             "description": (
-                "The map your skill is told to save to the threat model, when you have not saved "
-                "it with save_threat_model or amend_threat_model in this run. The engine records "
-                "it for later skills."
+                "Only for a skill whose instructions say to save a map to the threat model: that "
+                "map, when you have not saved it with save_threat_model or amend_threat_model in "
+                "this run. Leave it out otherwise. The engine records it for later skills."
             ),
             "required": ["content"],
             "properties": {

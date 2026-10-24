@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.config import Config, _config_from_data
 from core.context import ContextWindow
 from core.models import FINDINGS_SCHEMA
-from core.runner import _FORCE_FINISH
+from core.runner import _force_finish
 from fakes_engine import ScriptedLLM, make_repo, make_runner, tc
 
 BASE = "## Overview\nA shop.\n\n## Trust Boundaries\nInternet to API.\n\n## Severity Calibration\nAuth first.\n" + "b" * 400
@@ -108,7 +108,8 @@ def scripted(tmp_path, turns, base=True):
 
 
 def test_finish_carries_the_map_a_skill_had_no_turns_left_for(tmp_path):
-    assert "threat_model_update" in _FORCE_FINISH
+    assert "threat_model_update" in _force_finish(True)
+    assert "threat_model_update" not in _force_finish(False)
     assert "threat_model_update" in FINDINGS_SCHEMA["properties"]
     db, rp = scripted(tmp_path, [[finish_with({"content": MAP, "summary": "guard only on /api"})]])
     full = db.get_threat_model(rp)
@@ -152,3 +153,35 @@ def test_history_budget_has_a_default_and_can_be_configured():
     assert _config_from_data({"history_char_limit": 0}).history_char_limit == 0
     runner, _ = make_runner(Path(__import__("tempfile").mkdtemp()))
     assert runner._window().history == runner._cfg.history_char_limit == 110000
+
+
+def test_the_known_context_lists_late_amendments_in_one_line(tmp_path):
+    runner, db, rp = setup(tmp_path)
+    for i in range(30):
+        db.amend_threat_model(rp, f"## Batch {i:02d} map\n" + "x" * 300, "trace-input-to-effect",
+                              summary=f"summary of batch {i:02d}")
+    brief = db.get_threat_model(rp, brief=True)
+    assert "summary of batch 24" in brief and "summary of batch 25" not in brief
+    assert brief.count("### Amendment ") == 25
+    assert "### Amendments 26 to 30, one line each" in brief
+    assert "  30. Batch 29 map (by trace-input-to-effect)" in brief
+    assert "x" * 300 not in brief
+    full = db.get_threat_model(rp)
+    assert full.count("### Amendment ") == 30 and "x" * 300 in full
+    assert "summary of batch 29" not in runner._build_initial_context(rp)
+
+
+def test_only_a_map_skill_is_told_to_put_its_map_in_finish(tmp_path):
+    notes = {}
+    for skill in ("map-middleware-and-filters", "hunt-injection-sqli-cmdi"):
+        (tmp_path / skill).mkdir()
+        runner, _ = make_runner(tmp_path / skill)
+        rp = str(make_repo(tmp_path / skill / "repo"))
+        llm = ScriptedLLM([[tc(1, "search_graph", {"name_pattern": "search"})],
+                           [finish_with({"content": MAP, "summary": "s"})]])
+        runner._llm = llm
+        asyncio.run(runner.run_skill(skill, rp, max_iterations=7))
+        notes[skill] = llm.calls[1]["messages"][-1]["content"]
+    assert notes["map-middleware-and-filters"].endswith(_force_finish(True))
+    assert notes["hunt-injection-sqli-cmdi"].endswith(_force_finish(False))
+    assert "threat_model_update" not in notes["hunt-injection-sqli-cmdi"]

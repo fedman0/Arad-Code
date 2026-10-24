@@ -65,9 +65,11 @@ _ROOM_CAP = 65536
 _FORCE_FINISH = (
     "You have used enough iterations. Call finish() RIGHT NOW with all findings "
     "you have gathered so far. Include every hypothesis with its evidence. "
-    "If your skill saves a map to the threat model and you have not saved it yet, "
-    "put it in threat_model_update. "
     "Do not call any other tool, only finish()."
+)
+_FORCE_FINISH_MAP = (
+    "Your skill saves a map to the threat model: if you have not saved it yet, "
+    "put it in threat_model_update."
 )
 _CONTINUE = (
     "Continue the skill: call a tool to keep investigating, "
@@ -127,6 +129,14 @@ def _unwrap_findings(args: dict) -> Optional[dict]:
         except (json.JSONDecodeError, TypeError):
             return None
     return raw if isinstance(raw, dict) else None
+
+
+def _saves_map(skill_text: str) -> bool:
+    return "save_threat_model" in skill_text or "amend_threat_model" in skill_text
+
+
+def _force_finish(map_skill: bool) -> str:
+    return f"{_FORCE_FINISH} {_FORCE_FINISH_MAP}" if map_skill else _FORCE_FINISH
 
 
 def _rejection(problems: list[str], forced: bool) -> str:
@@ -449,6 +459,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
 
         finish_tool = next(t for t in TOOLS if t["function"]["name"] == "finish")
         nudge_at = max(0, max_iterations - _FORCED_TURNS)
+        map_skill = _saves_map(skill_text)
         brief = False
         empty_forced = 0
         finish_retries = 0
@@ -456,7 +467,7 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
         for iteration in range(max_iterations):
             forced = iteration >= nudge_at
             if forced and iteration == nudge_at:
-                messages.append({"role": "user", "content": _FORCE_FINISH})
+                messages.append({"role": "user", "content": _force_finish(map_skill)})
             tools_to_use = [finish_tool] if forced else TOOLS
             reply = await self._turn(
                 llm, transcript, messages, tools_to_use, active_system_prompt,
