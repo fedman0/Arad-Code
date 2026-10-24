@@ -155,6 +155,16 @@ def test_a_finish_that_is_not_an_object_is_bounced_then_recorded_empty(tmp_path)
     assert any("not a JSON object" in q for q in res.open_questions)
 
 
+def test_a_finish_missing_its_last_brace_is_recorded_without_a_retry(tmp_path):
+    runner, _ = make_runner(tmp_path)
+    rp = str(make_repo(tmp_path / "repo"))
+    llm = ScriptedLLM([[raw(1, "finish", json.dumps(FINDING)[:-1])]])
+    runner._llm = llm
+    res = asyncio.run(runner.run_skill("hunt-injection-sqli-cmdi", rp))
+    assert len(llm.calls) == 1 and len(res.hypotheses) == 1 and res.evidence
+    assert any(e["type"] == "finish_json_repaired" for e in transcript_events(tmp_path))
+
+
 def test_the_forced_finish_note_rides_on_the_last_tool_result(tmp_path):
     runner, _ = make_runner(tmp_path)
     rp = str(make_repo(tmp_path / "repo"))

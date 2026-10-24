@@ -37,6 +37,7 @@ from .skills import MAINTENANCE_PHASE, SkillCatalog
 from .transcript import new_run_id, open_transcript
 from .usage import Usage, UsageMeter, usage_scope
 from .context import ContextWindow
+from .jsonfix import loads_object
 from .stack import StackProfile, describe, detect_stack
 from .fanout import (
     GRAPH_ROUTES_QUERY, Target, assignment, coverage_key, inventory, make_batches,
@@ -127,10 +128,7 @@ def _short(text: str, limit: int) -> str:
 def _unwrap_findings(args: dict) -> Optional[dict]:
     raw = args.get("findings", args)
     if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return None
+        raw = loads_object(raw)
     return raw if isinstance(raw, dict) else None
 
 
@@ -545,8 +543,11 @@ class SkillRunner(ToolExecutor, EvidenceReconciler):
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
-                    args = {}
-                    broken = True
+                    args = loads_object(tc.function.arguments) if name == "finish" and not cut else None
+                    if args is not None:
+                        transcript.event("finish_json_repaired")
+                    broken = args is None
+                    args = args or {}
                 if not isinstance(args, dict):
                     args = {}
                     broken = True
