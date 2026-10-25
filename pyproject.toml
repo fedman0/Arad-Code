@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,8 @@ dynamic = ["version", "dependencies"]
 description = "LLM agent that audits source code for security vulnerabilities and backs every finding with evidence"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Mohammad Hossein Abedini", email = "mhmd.abedinii@gmail.com" }]
 classifiers = [
     "Programming Language :: Python :: 3",

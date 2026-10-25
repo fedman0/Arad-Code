@@ -8,6 +8,7 @@
 ![interface](https://img.shields.io/badge/interface-TUI%20%2B%20CLI-0d1117)
 ![output](https://img.shields.io/badge/output-SARIF%202.1.0-2ea043)
 ![version](https://img.shields.io/badge/version-2.3.9-informational)
+![license](https://img.shields.io/badge/license-AGPL--3.0-blue)
 
 </div>
 
@@ -57,6 +58,7 @@ Arad Code is built around one rule: nothing reaches the report unless it can be 
 - [Where things are stored](#where-things-are-stored)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
+- [License](#license)
 
 ## How a scan works
 
@@ -759,3 +761,9 @@ The engine lives in `core/`:
 Changes to the evidence store's schema go in as numbered migrations in `db.py`. The database remembers which version it's at (`PRAGMA user_version`), so an older database is upgraded in place the first time a new release opens it, and a database written by a newer release is refused instead of being damaged.
 
 Every push to `main` runs the suite on GitHub Actions: Python 3.10 to 3.14 on Ubuntu, 3.14 on macOS, once more with every dependency pinned to the oldest version `requirements.txt` allows, a job that builds the sandbox image and runs the smoke test, and a last one that builds the wheel, installs it into a clean virtualenv and runs the `arad` command.
+
+## License
+
+Arad Code is free software under the [GNU Affero General Public License, version 3](LICENSE) (AGPL-3.0-only). You can use it, fork it and change it. Anything you build from it and share, including a changed copy you run as a service for other people, has to stay under the same license with its source available. Keep the copyright and the [NOTICE](NOTICE) file and mark what you changed. The license gives no rights to the Arad Code name, so a fork should go by its own.
+
+Copyright 2026 Mohammad Hossein Abedini.
