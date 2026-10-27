@@ -1433,13 +1433,13 @@ class AradCodeApp(App):
             from .cache import completed_skills, started_skills
             commit = runner._get_commit(repo)
             done = {s for s in completed_skills(repo, commit) if "#" not in s}
-            started = started_skills(repo, commit)
-            if started:
-                partly = len(started - done)
+            started_names = started_skills(repo, commit)
+            if started_names:
+                partly = len(started_names - done)
                 more = f", {partly} partly done" if partly else ""
                 self._log(f"[dim]Resuming — {len(done)} skill(s) already done{more}[/dim]")
                 try:
-                    existing = [h for h in db.list_hypotheses(repo) if h.skill_source in started]
+                    existing = [h for h in db.list_hypotheses(repo) if h.skill_source in started_names]
                     if existing:
                         by_skill: dict[str, list] = defaultdict(list)
                         for h in existing:

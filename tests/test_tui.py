@@ -376,6 +376,9 @@ async def t_resume_count(c):
         await type_cmd(pilot, f"run '{c.repo}' --resume")
         await wait_idle(pilot)
         c.check("B17 resume counts only completed skills' findings + new", app._finding_count == 3, (app._finding_count, log_text(app)[-600:]))
+        text = log_text(app)
+        c.check("B17 resumed scan completes without an error",
+                "Scan complete" in text and "Run failed" not in text and "Error:" not in text, text[-600:])
         node = app._wf_model.get_agent("p0-recon")
         node2 = app._wf_model.add_agent("x", "run")
         c.check("B17 preloaded skill node cached with findings", node.state == "cached" and len(node.findings) == 2)
